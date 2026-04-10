@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufReader, Read};
-use std::path::Path;
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use csv::{ReaderBuilder, StringRecord};
 use flate2::read::MultiGzDecoder;
+use md5::Context as Md5Context;
 use tempfile::tempdir;
 
 use crate::formats::{
@@ -35,6 +36,14 @@ pub struct IngestConfig {
 pub struct IngestResult {
     pub metadata: RunMetadata,
     pub index: OctreeIndex,
+}
+
+#[derive(Debug)]
+struct StagedInput {
+    path: PathBuf,
+    input_name: String,
+    source_bulk_md5: String,
+    _tempdir: Option<tempfile::TempDir>,
 }
 
 fn parse_optional_f32(value: Option<&str>) -> Result<Option<f32>> {
@@ -103,6 +112,70 @@ fn open_input(input: &str) -> Result<Box<dyn Read>> {
     Ok(Box::new(file))
 }
 
+fn md5_hex<R: Read>(reader: &mut R) -> Result<String> {
+    let mut context = Md5Context::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).context("failed to read input")?;
+        if read == 0 {
+            return Ok(format!("{:x}", context.compute()));
+        }
+        context.consume(&buffer[..read]);
+    }
+}
+
+fn copy_with_md5<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> Result<String> {
+    let mut context = Md5Context::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).context("failed to read input")?;
+        if read == 0 {
+            return Ok(format!("{:x}", context.compute()));
+        }
+        context.consume(&buffer[..read]);
+        writer
+            .write_all(&buffer[..read])
+            .context("failed to stage input")?;
+    }
+}
+
+fn stage_input(input: &str) -> Result<StagedInput> {
+    let input_name = input_name(input);
+    if input.starts_with("http://") || input.starts_with("https://") {
+        let tempdir = tempdir().context("failed to create temporary input directory")?;
+        let path = tempdir.path().join(&input_name);
+        let mut response = reqwest::blocking::get(input)
+            .with_context(|| format!("failed to GET {input}"))?
+            .error_for_status()
+            .with_context(|| format!("unsuccessful response for {input}"))?;
+        let file = fs::File::create(&path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        let source_bulk_md5 = copy_with_md5(&mut response, &mut writer)?;
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush {}", path.display()))?;
+        return Ok(StagedInput {
+            path,
+            input_name,
+            source_bulk_md5,
+            _tempdir: Some(tempdir),
+        });
+    }
+
+    let path = PathBuf::from(input.strip_prefix("file://").unwrap_or(input));
+    let file =
+        fs::File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let source_bulk_md5 = md5_hex(&mut reader)?;
+    Ok(StagedInput {
+        path,
+        input_name,
+        source_bulk_md5,
+        _tempdir: None,
+    })
+}
+
 fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 3] {
     let distance_pc = 1_000.0_f64 / parallax_mas as f64;
     let ra = (ra_deg as f64).to_radians();
@@ -115,13 +188,14 @@ fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 
 }
 
 fn read_rows(
+    input_path: &Path,
     config: &IngestConfig,
 ) -> Result<(Vec<CanonicalRow>, BTreeMap<u32, Vec<ServingRow>>, RunCounts)> {
     let octree = OctreeConfig {
         depth: config.octree_depth,
         bounds: config.bounds,
     };
-    let reader = open_input(&config.input)?;
+    let reader = open_input(&input_path.display().to_string())?;
     let decoder = MultiGzDecoder::new(BufReader::new(reader));
     let mut csv_reader = ReaderBuilder::new()
         .comment(Some(b'#'))
@@ -206,6 +280,7 @@ fn write_output(
     counts: RunCounts,
     started_at: String,
     finished_at: String,
+    source_bulk_md5: String,
 ) -> Result<IngestResult> {
     let canonical_directory = format!("canonical/{}", canonical_directory_name(input_name));
     let serving_directory = format!("serving/depth={}", config.octree_depth);
@@ -236,6 +311,7 @@ fn write_output(
 
     let metadata = RunMetadata {
         source_bulk_url: config.input.clone(),
+        source_bulk_md5,
         input_name: input_name.to_string(),
         canonical_directory,
         canonical_parts,
@@ -260,15 +336,71 @@ fn write_output(
     Ok(IngestResult { metadata, index })
 }
 
+fn matches_existing_run(
+    metadata: &RunMetadata,
+    config: &IngestConfig,
+    input_name: &str,
+    source_bulk_md5: &str,
+) -> bool {
+    metadata.source_bulk_url == config.input
+        && metadata.source_bulk_md5 == source_bulk_md5
+        && metadata.input_name == input_name
+        && metadata.octree_depth == config.octree_depth
+        && metadata.bounds == config.bounds
+        && metadata.parallax_filter_mas == config.parallax_filter_mas
+}
+
+fn load_existing_run(
+    storage: &StorageClient,
+    output_root: &StorageRoot,
+    config: &IngestConfig,
+    input_name: &str,
+    source_bulk_md5: &str,
+) -> Result<Option<IngestResult>> {
+    let Some(metadata_bytes) = storage.read_optional_bytes(&output_root.join("metadata.json"))?
+    else {
+        return Ok(None);
+    };
+    let Some(index_bytes) = storage.read_optional_bytes(&output_root.join("index.octree"))? else {
+        return Ok(None);
+    };
+    let Ok(metadata) = serde_json::from_slice::<RunMetadata>(&metadata_bytes) else {
+        return Ok(None);
+    };
+    if !matches_existing_run(&metadata, config, input_name, source_bulk_md5) {
+        return Ok(None);
+    }
+    let Ok(index) = serde_json::from_slice::<OctreeIndex>(&index_bytes) else {
+        return Ok(None);
+    };
+    if storage
+        .validate_run_layout(output_root, &metadata, &index)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    Ok(Some(IngestResult { metadata, index }))
+}
+
 pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
     if config.octree_depth == 0 || config.octree_depth > 10 {
         bail!("octree depth must be between 1 and 10");
     }
     let output_root = StorageRoot::parse(&config.output_root)?;
-    let input_name = input_name(&config.input);
+    let staged_input = stage_input(&config.input)?;
+    let storage = StorageClient::new()?;
+    if let Some(result) = load_existing_run(
+        &storage,
+        &output_root,
+        &config,
+        &staged_input.input_name,
+        &staged_input.source_bulk_md5,
+    )? {
+        return Ok(result);
+    }
 
     let started_at = Utc::now().to_rfc3339();
-    let (canonical_rows, mut serving_rows, counts) = read_rows(&config)?;
+    let (canonical_rows, mut serving_rows, counts) = read_rows(&staged_input.path, &config)?;
     let finished_at = Utc::now().to_rfc3339();
     match output_root {
         StorageRoot::Local(path) => {
@@ -277,12 +409,13 @@ pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
             write_output(
                 &path,
                 &config,
-                &input_name,
+                &staged_input.input_name,
                 &canonical_rows,
                 &mut serving_rows,
                 counts,
                 started_at,
                 finished_at,
+                staged_input.source_bulk_md5,
             )
         }
         root @ StorageRoot::Gcs(_) => {
@@ -290,14 +423,14 @@ pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
             let result = write_output(
                 local_output.path(),
                 &config,
-                &input_name,
+                &staged_input.input_name,
                 &canonical_rows,
                 &mut serving_rows,
                 counts,
                 started_at,
                 finished_at,
+                staged_input.source_bulk_md5,
             )?;
-            let storage = StorageClient::new()?;
             storage.upload_directory(local_output.path(), &root)?;
             storage.validate_run_layout(&root, &result.metadata, &result.index)?;
             Ok(result)
@@ -375,6 +508,7 @@ mod tests {
         assert_eq!(metadata.counts.rows_with_positive_parallax, 2);
         assert_eq!(metadata.counts.rows_after_parallax_filter, 2);
         assert_eq!(metadata.counts.rows_in_bounds, 2);
+        assert_eq!(metadata.source_bulk_md5.len(), 32);
         assert_eq!(canonical_rows.len(), 2);
         assert_eq!(canonical_rows[0].parallax_error, 1.0);
         assert_eq!(canonical_rows[0].phot_g_mean_mag, 12.5);
@@ -421,5 +555,92 @@ mod tests {
         assert_eq!(result.metadata.counts.rows_seen, 2);
         assert_eq!(result.metadata.counts.rows_with_positive_parallax, 1);
         assert_eq!(result.metadata.counts.rows_in_bounds, 1);
+    }
+
+    #[test]
+    fn skips_reingesting_unchanged_input() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
+        let output_path = dir.path().join("run");
+
+        write_gzip_file(
+            &input_path,
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             1,0,0,100,1,12.5,0.3\n\
+             2,90,0,100,1,13.5,0.6\n",
+        );
+
+        let first = run_ingestion(IngestConfig {
+            input: input_path.display().to_string(),
+            output_root: output_path.display().to_string(),
+            parallax_filter_mas: None,
+            octree_depth: DEFAULT_DEPTH,
+            bounds: DEFAULT_BOUNDS,
+        })
+        .unwrap();
+        let metadata_before = fs::read(output_path.join("metadata.json")).unwrap();
+
+        let second = run_ingestion(IngestConfig {
+            input: input_path.display().to_string(),
+            output_root: output_path.display().to_string(),
+            parallax_filter_mas: None,
+            octree_depth: DEFAULT_DEPTH,
+            bounds: DEFAULT_BOUNDS,
+        })
+        .unwrap();
+        let metadata_after = fs::read(output_path.join("metadata.json")).unwrap();
+
+        assert_eq!(second.metadata, first.metadata);
+        assert_eq!(second.index, first.index);
+        assert_eq!(metadata_after, metadata_before);
+    }
+
+    #[test]
+    fn reingests_when_input_md5_changes() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
+        let output_path = dir.path().join("run");
+
+        write_gzip_file(
+            &input_path,
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             1,0,0,100,1,12.5,0.3\n",
+        );
+        let first = run_ingestion(IngestConfig {
+            input: input_path.display().to_string(),
+            output_root: output_path.display().to_string(),
+            parallax_filter_mas: None,
+            octree_depth: DEFAULT_DEPTH,
+            bounds: DEFAULT_BOUNDS,
+        })
+        .unwrap();
+
+        write_gzip_file(
+            &input_path,
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             7,0,0,100,1,14.5,0.8\n",
+        );
+        let second = run_ingestion(IngestConfig {
+            input: input_path.display().to_string(),
+            output_root: output_path.display().to_string(),
+            parallax_filter_mas: None,
+            octree_depth: DEFAULT_DEPTH,
+            bounds: DEFAULT_BOUNDS,
+        })
+        .unwrap();
+        let metadata: RunMetadata = read_json(&output_path.join("metadata.json")).unwrap();
+        let canonical_rows = read_canonical_rows(
+            &output_path
+                .join(&metadata.canonical_directory)
+                .join("part-000.bin"),
+        )
+        .unwrap();
+
+        assert_ne!(
+            first.metadata.source_bulk_md5,
+            second.metadata.source_bulk_md5
+        );
+        assert_eq!(canonical_rows.len(), 1);
+        assert_eq!(canonical_rows[0].source_id, 7);
     }
 }

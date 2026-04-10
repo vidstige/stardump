@@ -41,6 +41,7 @@ pub struct RunCounts {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RunMetadata {
     pub source_bulk_url: String,
+    pub source_bulk_md5: String,
     pub input_name: String,
     pub canonical_directory: String,
     pub canonical_parts: Vec<String>,

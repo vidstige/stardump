@@ -212,6 +212,36 @@ impl StorageClient {
         }
     }
 
+    pub fn read_optional_bytes(&self, root: &StorageRoot) -> Result<Option<Vec<u8>>> {
+        match root {
+            StorageRoot::Local(path) => {
+                if !path.exists() {
+                    return Ok(None);
+                }
+                self.read_bytes(root).map(Some)
+            }
+            StorageRoot::Gcs(location) => {
+                let response = self
+                    .authorized_get(&format!(
+                        "{}?alt=media",
+                        object_url(&location.bucket, &location.prefix)
+                    ))
+                    .send()
+                    .with_context(|| format!("failed to read {}", root.display()))?;
+                if response.status() == reqwest::StatusCode::NOT_FOUND {
+                    return Ok(None);
+                }
+                let response = response
+                    .error_for_status()
+                    .with_context(|| format!("failed to read {}", root.display()))?;
+                response
+                    .bytes()
+                    .map(|bytes| Some(bytes.to_vec()))
+                    .with_context(|| format!("failed to decode {}", root.display()))
+            }
+        }
+    }
+
     pub fn upload_directory(&self, local_root: &Path, remote_root: &StorageRoot) -> Result<()> {
         self.upload_directory_recursive(local_root, local_root, remote_root)
     }
