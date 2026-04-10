@@ -1,24 +1,22 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::formats::{
-    OctreeIndex, RunMetadata, ServingRow, leaf_filename, read_json, read_serving_rows,
-    validate_run_layout,
-};
+use crate::formats::{OctreeIndex, RunMetadata, ServingRow, decode_serving_rows, leaf_filename};
 use crate::octree::OctreeConfig;
+use crate::storage::{StorageClient, StorageRoot};
 
 #[derive(Clone)]
 pub struct QueryService {
     metadata: RunMetadata,
     index: OctreeIndex,
-    data_root: PathBuf,
+    data_root: StorageRoot,
+    storage: StorageClient,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,20 +68,29 @@ async fn query_radius(
     State(service): State<Arc<QueryService>>,
     Json(request): Json<RadiusQueryRequest>,
 ) -> Result<Json<RadiusQueryResponse>, (StatusCode, String)> {
-    let response = query_radius_checked(&service, request).map(Json)?;
+    let response = tokio::task::spawn_blocking(move || query_radius_checked(&service, request))
+        .await
+        .map_err(|error| internal_error(error.into()))??;
+    let response = Json(response);
     Ok(response)
 }
 
 impl QueryService {
-    pub fn load(root: impl AsRef<Path>) -> Result<Self> {
-        let data_root = root.as_ref().to_path_buf();
-        let metadata = read_json::<RunMetadata>(&data_root.join("metadata.json"))?;
-        let index = read_json::<OctreeIndex>(&data_root.join("index.octree"))?;
-        validate_run_layout(&data_root, &metadata, &index)?;
+    pub fn load(root: &str) -> Result<Self> {
+        let data_root = StorageRoot::parse(root)?;
+        let storage = StorageClient::new()?;
+        let metadata: RunMetadata =
+            serde_json::from_slice(&storage.read_bytes(&data_root.join("metadata.json"))?)
+                .context("failed to parse metadata.json")?;
+        let index: OctreeIndex =
+            serde_json::from_slice(&storage.read_bytes(&data_root.join("index.octree"))?)
+                .context("failed to parse index.octree")?;
+        storage.validate_run_layout(&data_root, &metadata, &index)?;
         Ok(Self {
             metadata,
             index,
             data_root,
+            storage,
         })
     }
 
@@ -116,7 +123,11 @@ impl QueryService {
             }
 
             examined_leaves += 1;
-            let rows = read_serving_rows(&serving_root.join(leaf_filename(*morton)))?;
+            let rows = decode_serving_rows(
+                &self
+                    .storage
+                    .read_bytes(&serving_root.join(&leaf_filename(*morton)))?,
+            )?;
             for row in rows {
                 let distance = distance(center, &row);
                 if distance <= request.radius {
@@ -179,6 +190,7 @@ pub fn query_radius_checked(
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::path::Path;
 
     use axum::body::{self, Body};
     use axum::http::Request;
@@ -198,8 +210,8 @@ mod tests {
         encoder.finish().unwrap();
     }
 
-    #[tokio::test]
-    async fn serves_exact_radius_queries_over_written_shards() {
+    #[test]
+    fn serves_exact_radius_queries_over_written_shards() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -213,36 +225,42 @@ mod tests {
         );
         run_ingestion(IngestConfig {
             input: input_path.display().to_string(),
-            output_root: output_path.clone(),
+            output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
             octree_depth: DEFAULT_DEPTH,
             bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
 
-        let service = Arc::new(QueryService::load(&output_path).unwrap());
-        let app = build_app(service);
-        let request = Request::builder()
-            .method("POST")
-            .uri("/query/radius")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"x":0.0,"y":0.0,"z":0.0,"radius":11.0,"limit":10}"#,
-            ))
-            .unwrap();
+        let service = Arc::new(QueryService::load(&output_path.display().to_string()).unwrap());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/query/radius")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"x":0.0,"y":0.0,"z":0.0,"radius":11.0,"limit":10}"#,
+                ))
+                .unwrap();
 
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+            let response = {
+                let app = build_app(service.clone());
+                app.oneshot(request).await.unwrap()
+            };
+            assert_eq!(response.status(), StatusCode::OK);
 
-        let bytes = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let payload: RadiusQueryResponse = serde_json::from_slice(&bytes).unwrap();
-        let source_ids: Vec<u64> = payload.matches.iter().map(|item| item.source_id).collect();
+            let bytes = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: RadiusQueryResponse = serde_json::from_slice(&bytes).unwrap();
+            let source_ids: Vec<u64> = payload.matches.iter().map(|item| item.source_id).collect();
 
-        assert_eq!(source_ids, vec![1, 2, 3]);
-        assert_eq!(payload.returned_matches, 3);
-        assert!(!payload.truncated);
+            assert_eq!(source_ids, vec![1, 2, 3]);
+            assert_eq!(payload.returned_matches, 3);
+            assert!(!payload.truncated);
+        });
+        drop(service);
     }
 
     #[test]
@@ -264,7 +282,7 @@ mod tests {
         for output_root in [&output_a, &output_b] {
             run_ingestion(IngestConfig {
                 input: input_path.display().to_string(),
-                output_root: output_root.to_path_buf(),
+                output_root: output_root.display().to_string(),
                 parallax_filter_mas: None,
                 octree_depth: DEFAULT_DEPTH,
                 bounds: DEFAULT_BOUNDS,
@@ -272,8 +290,8 @@ mod tests {
             .unwrap();
         }
 
-        let service_a = QueryService::load(&output_a).unwrap();
-        let service_b = QueryService::load(&output_b).unwrap();
+        let service_a = QueryService::load(&output_a.display().to_string()).unwrap();
+        let service_b = QueryService::load(&output_b.display().to_string()).unwrap();
         let request = RadiusQueryRequest {
             x: 0.0,
             y: 0.0,

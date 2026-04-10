@@ -1,18 +1,20 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, Read};
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use csv::{ReaderBuilder, StringRecord};
 use flate2::read::MultiGzDecoder;
+use tempfile::tempdir;
 
 use crate::formats::{
     CanonicalRow, OctreeIndex, RunCounts, RunMetadata, ServingRow, leaf_filename,
     validate_run_layout, write_canonical_rows, write_json, write_serving_rows,
 };
 use crate::octree::{Bounds3, OctreeConfig};
+use crate::storage::{StorageClient, StorageRoot};
 
 pub const DEFAULT_DEPTH: u8 = 6;
 pub const DEFAULT_BOUNDS: Bounds3 = Bounds3 {
@@ -23,7 +25,7 @@ pub const DEFAULT_BOUNDS: Bounds3 = Bounds3 {
 #[derive(Clone, Debug)]
 pub struct IngestConfig {
     pub input: String,
-    pub output_root: PathBuf,
+    pub output_root: String,
     pub parallax_filter_mas: Option<f32>,
     pub octree_depth: u8,
     pub bounds: Bounds3,
@@ -196,6 +198,7 @@ fn read_rows(
 }
 
 fn write_output(
+    output_root: &Path,
     config: &IngestConfig,
     input_name: &str,
     canonical_rows: &[CanonicalRow],
@@ -206,8 +209,8 @@ fn write_output(
 ) -> Result<IngestResult> {
     let canonical_directory = format!("canonical/{}", canonical_directory_name(input_name));
     let serving_directory = format!("serving/depth={}", config.octree_depth);
-    let canonical_root = config.output_root.join(&canonical_directory);
-    let serving_root = config.output_root.join(&serving_directory);
+    let canonical_root = output_root.join(&canonical_directory);
+    let serving_root = output_root.join(&serving_directory);
     if canonical_root.exists() {
         fs::remove_dir_all(&canonical_root)
             .with_context(|| format!("failed to clear {}", canonical_root.display()))?;
@@ -250,9 +253,9 @@ fn write_output(
         leaves,
     };
 
-    write_json(&config.output_root.join("metadata.json"), &metadata)?;
-    write_json(&config.output_root.join("index.octree"), &index)?;
-    validate_run_layout(&config.output_root, &metadata, &index)?;
+    write_json(&output_root.join("metadata.json"), &metadata)?;
+    write_json(&output_root.join("index.octree"), &index)?;
+    validate_run_layout(output_root, &metadata, &index)?;
 
     Ok(IngestResult { metadata, index })
 }
@@ -261,28 +264,50 @@ pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
     if config.octree_depth == 0 || config.octree_depth > 10 {
         bail!("octree depth must be between 1 and 10");
     }
-    fs::create_dir_all(&config.output_root)
-        .with_context(|| format!("failed to create {}", config.output_root.display()))?;
+    let output_root = StorageRoot::parse(&config.output_root)?;
+    let input_name = input_name(&config.input);
 
     let started_at = Utc::now().to_rfc3339();
     let (canonical_rows, mut serving_rows, counts) = read_rows(&config)?;
     let finished_at = Utc::now().to_rfc3339();
-
-    write_output(
-        &config,
-        &input_name(&config.input),
-        &canonical_rows,
-        &mut serving_rows,
-        counts,
-        started_at,
-        finished_at,
-    )
+    match output_root {
+        StorageRoot::Local(path) => {
+            fs::create_dir_all(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?;
+            write_output(
+                &path,
+                &config,
+                &input_name,
+                &canonical_rows,
+                &mut serving_rows,
+                counts,
+                started_at,
+                finished_at,
+            )
+        }
+        root @ StorageRoot::Gcs(_) => {
+            let local_output = tempdir().context("failed to create temporary output directory")?;
+            let result = write_output(
+                local_output.path(),
+                &config,
+                &input_name,
+                &canonical_rows,
+                &mut serving_rows,
+                counts,
+                started_at,
+                finished_at,
+            )?;
+            let storage = StorageClient::new()?;
+            storage.upload_directory(local_output.path(), &root)?;
+            storage.validate_run_layout(&root, &result.metadata, &result.index)?;
+            Ok(result)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::path::Path;
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -316,7 +341,7 @@ mod tests {
 
         let result = run_ingestion(IngestConfig {
             input: input_path.display().to_string(),
-            output_root: output_path.clone(),
+            output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
             octree_depth: DEFAULT_DEPTH,
             bounds: DEFAULT_BOUNDS,
@@ -386,7 +411,7 @@ mod tests {
 
         let result = run_ingestion(IngestConfig {
             input: input_path.display().to_string(),
-            output_root: output_path,
+            output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
             octree_depth: DEFAULT_DEPTH,
             bounds: DEFAULT_BOUNDS,

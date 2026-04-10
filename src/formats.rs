@@ -86,20 +86,7 @@ where
     F: Fn(&[u8]) -> T,
 {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    if bytes.len() as u64 % row_size != 0 {
-        bail!(
-            "file {} length {} is not a multiple of row size {}",
-            path.display(),
-            bytes.len(),
-            row_size
-        );
-    }
-
-    let mut rows = Vec::with_capacity(bytes.len() / row_size as usize);
-    for chunk in bytes.chunks_exact(row_size as usize) {
-        rows.push(decode(chunk));
-    }
-    Ok(rows)
+    decode_rows(&bytes, row_size, decode)
 }
 
 pub fn leaf_filename(morton: u32) -> String {
@@ -107,24 +94,19 @@ pub fn leaf_filename(morton: u32) -> String {
 }
 
 pub fn read_canonical_rows(path: &Path) -> Result<Vec<CanonicalRow>> {
-    read_rows(path, CANONICAL_ROW_SIZE, |chunk| CanonicalRow {
-        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-        ra: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-        dec: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-        parallax: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
-        parallax_error: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
-        phot_g_mean_mag: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
-        bp_rp: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
-    })
+    read_rows(path, CANONICAL_ROW_SIZE, decode_canonical_row)
 }
 
 pub fn read_serving_rows(path: &Path) -> Result<Vec<ServingRow>> {
-    read_rows(path, SERVING_ROW_SIZE, |chunk| ServingRow {
-        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-        x: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-        y: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-        z: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
-    })
+    read_rows(path, SERVING_ROW_SIZE, decode_serving_row)
+}
+
+pub fn decode_canonical_rows(bytes: &[u8]) -> Result<Vec<CanonicalRow>> {
+    decode_rows(bytes, CANONICAL_ROW_SIZE, decode_canonical_row)
+}
+
+pub fn decode_serving_rows(bytes: &[u8]) -> Result<Vec<ServingRow>> {
+    decode_rows(bytes, SERVING_ROW_SIZE, decode_serving_row)
 }
 
 pub fn row_count(path: &Path, row_size: u64) -> Result<u64> {
@@ -255,6 +237,46 @@ pub fn validate_run_layout(root: &Path, metadata: &RunMetadata, index: &OctreeIn
     }
 
     Ok(())
+}
+
+fn decode_rows<T, F>(bytes: &[u8], row_size: u64, decode: F) -> Result<Vec<T>>
+where
+    F: Fn(&[u8]) -> T,
+{
+    if bytes.len() as u64 % row_size != 0 {
+        bail!(
+            "buffer length {} is not a multiple of row size {}",
+            bytes.len(),
+            row_size
+        );
+    }
+
+    let mut rows = Vec::with_capacity(bytes.len() / row_size as usize);
+    for chunk in bytes.chunks_exact(row_size as usize) {
+        rows.push(decode(chunk));
+    }
+    Ok(rows)
+}
+
+fn decode_canonical_row(chunk: &[u8]) -> CanonicalRow {
+    CanonicalRow {
+        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+        ra: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+        dec: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+        parallax: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        parallax_error: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+        phot_g_mean_mag: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+        bp_rp: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
+    }
+}
+
+fn decode_serving_row(chunk: &[u8]) -> ServingRow {
+    ServingRow {
+        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+        x: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+        y: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+        z: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use clap::Parser;
 use gaia_viz::ingest::{DEFAULT_BOUNDS, DEFAULT_DEPTH, IngestConfig, run_ingestion};
 
@@ -9,7 +7,7 @@ struct Args {
     input: String,
 
     #[arg(long)]
-    output_root: PathBuf,
+    output_root: String,
 
     #[arg(long)]
     parallax_filter_mas: Option<f32>,
