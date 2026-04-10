@@ -60,7 +60,7 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
-async fn healthz() -> StatusCode {
+async fn health() -> StatusCode {
     StatusCode::OK
 }
 
@@ -161,7 +161,7 @@ impl QueryService {
 
 pub fn build_app(service: Arc<QueryService>) -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
         .route("/query/radius", post(query_radius))
         .with_state(service)
 }
