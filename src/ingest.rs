@@ -11,8 +11,9 @@ use md5::Context as Md5Context;
 use tempfile::tempdir;
 
 use crate::formats::{
-    CanonicalRow, OctreeIndex, RunCounts, RunMetadata, ServingRow, leaf_filename,
-    validate_run_layout, write_canonical_rows, write_json, write_serving_rows,
+    CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex, RunCounts, RunMetadata,
+    ServingRow, decode_octree_index, decode_run_metadata, leaf_filename, validate_run_layout,
+    write_canonical_rows, write_octree_index, write_run_metadata, write_serving_rows,
 };
 use crate::octree::{Bounds3, OctreeConfig};
 use crate::storage::{StorageClient, StorageRoot};
@@ -329,8 +330,8 @@ fn write_output(
         leaves,
     };
 
-    write_json(&output_root.join("metadata.json"), &metadata)?;
-    write_json(&output_root.join("index.octree"), &index)?;
+    write_run_metadata(&output_root.join(METADATA_FILENAME), &metadata)?;
+    write_octree_index(&output_root.join(OCTREE_INDEX_FILENAME), &index)?;
     validate_run_layout(output_root, &metadata, &index)?;
 
     Ok(IngestResult { metadata, index })
@@ -357,20 +358,22 @@ fn load_existing_run(
     input_name: &str,
     source_bulk_md5: &str,
 ) -> Result<Option<IngestResult>> {
-    let Some(metadata_bytes) = storage.read_optional_bytes(&output_root.join("metadata.json"))?
+    let Some(metadata_bytes) = storage.read_optional_bytes(&output_root.join(METADATA_FILENAME))?
     else {
         return Ok(None);
     };
-    let Some(index_bytes) = storage.read_optional_bytes(&output_root.join("index.octree"))? else {
+    let Some(index_bytes) =
+        storage.read_optional_bytes(&output_root.join(OCTREE_INDEX_FILENAME))?
+    else {
         return Ok(None);
     };
-    let Ok(metadata) = serde_json::from_slice::<RunMetadata>(&metadata_bytes) else {
+    let Ok(metadata) = decode_run_metadata(&metadata_bytes) else {
         return Ok(None);
     };
     if !matches_existing_run(&metadata, config, input_name, source_bulk_md5) {
         return Ok(None);
     }
-    let Ok(index) = serde_json::from_slice::<OctreeIndex>(&index_bytes) else {
+    let Ok(index) = decode_octree_index(&index_bytes) else {
         return Ok(None);
     };
     if storage
@@ -446,7 +449,10 @@ mod tests {
     use flate2::write::GzEncoder;
     use tempfile::tempdir;
 
-    use crate::formats::{read_canonical_rows, read_json, read_serving_rows};
+    use crate::formats::{
+        METADATA_FILENAME, OCTREE_INDEX_FILENAME, read_canonical_rows, read_octree_index,
+        read_run_metadata, read_serving_rows,
+    };
 
     use super::*;
 
@@ -481,8 +487,10 @@ mod tests {
         })
         .unwrap();
 
-        let metadata: RunMetadata = read_json(&output_path.join("metadata.json")).unwrap();
-        let index: OctreeIndex = read_json(&output_path.join("index.octree")).unwrap();
+        let metadata: RunMetadata =
+            read_run_metadata(&output_path.join(METADATA_FILENAME)).unwrap();
+        let index: OctreeIndex =
+            read_octree_index(&output_path.join(OCTREE_INDEX_FILENAME)).unwrap();
         let canonical_rows = read_canonical_rows(
             &output_path
                 .join(&metadata.canonical_directory)
@@ -578,7 +586,7 @@ mod tests {
             bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
-        let metadata_before = fs::read(output_path.join("metadata.json")).unwrap();
+        let metadata_before = fs::read(output_path.join(METADATA_FILENAME)).unwrap();
 
         let second = run_ingestion(IngestConfig {
             input: input_path.display().to_string(),
@@ -588,7 +596,7 @@ mod tests {
             bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
-        let metadata_after = fs::read(output_path.join("metadata.json")).unwrap();
+        let metadata_after = fs::read(output_path.join(METADATA_FILENAME)).unwrap();
 
         assert_eq!(second.metadata, first.metadata);
         assert_eq!(second.index, first.index);
@@ -628,7 +636,8 @@ mod tests {
             bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
-        let metadata: RunMetadata = read_json(&output_path.join("metadata.json")).unwrap();
+        let metadata: RunMetadata =
+            read_run_metadata(&output_path.join(METADATA_FILENAME)).unwrap();
         let canonical_rows = read_canonical_rows(
             &output_path
                 .join(&metadata.canonical_directory)

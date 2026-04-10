@@ -7,7 +7,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::formats::{OctreeIndex, RunMetadata, ServingRow, decode_serving_rows, leaf_filename};
+use crate::formats::{
+    METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex, RunMetadata, ServingRow,
+    decode_octree_index, decode_run_metadata, decode_serving_rows, leaf_filename,
+};
 use crate::octree::OctreeConfig;
 use crate::storage::{StorageClient, StorageRoot};
 
@@ -80,11 +83,11 @@ impl QueryService {
         let data_root = StorageRoot::parse(root)?;
         let storage = StorageClient::new()?;
         let metadata: RunMetadata =
-            serde_json::from_slice(&storage.read_bytes(&data_root.join("metadata.json"))?)
-                .context("failed to parse metadata.json")?;
+            decode_run_metadata(&storage.read_bytes(&data_root.join(METADATA_FILENAME))?)
+                .context("failed to parse metadata")?;
         let index: OctreeIndex =
-            serde_json::from_slice(&storage.read_bytes(&data_root.join("index.octree"))?)
-                .context("failed to parse index.octree")?;
+            decode_octree_index(&storage.read_bytes(&data_root.join(OCTREE_INDEX_FILENAME))?)
+                .context("failed to parse octree index")?;
         storage.validate_run_layout(&data_root, &metadata, &index)?;
         Ok(Self {
             metadata,
