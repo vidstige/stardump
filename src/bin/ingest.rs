@@ -1,5 +1,5 @@
 use clap::Parser;
-use gaia_viz::ingest::{DEFAULT_BOUNDS, DEFAULT_DEPTH, IngestConfig, run_ingestion};
+use star_dump::ingest::{DEFAULT_BOUNDS, DEFAULT_DEPTH, IngestConfig, run_ingestion};
 
 #[derive(Parser)]
 struct Args {

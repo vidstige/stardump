@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
-use gaia_viz::query_api::{QueryService, build_app};
+use star_dump::query_api::{QueryService, build_app};
 
 #[derive(Parser)]
 struct Args {
