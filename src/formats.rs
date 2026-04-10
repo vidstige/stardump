@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::octree::Bounds3;
 
-pub const CANONICAL_ROW_SIZE: u64 = 20;
+pub const CANONICAL_ROW_SIZE: u64 = 32;
 pub const SERVING_ROW_SIZE: u64 = 20;
 pub const LEAF_FILENAME_WIDTH: usize = 8;
 
@@ -17,6 +17,9 @@ pub struct CanonicalRow {
     pub ra: f32,
     pub dec: f32,
     pub parallax: f32,
+    pub parallax_error: f32,
+    pub phot_g_mean_mag: f32,
+    pub bp_rp: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +66,9 @@ fn canonical_row_bytes(row: &CanonicalRow) -> [u8; CANONICAL_ROW_SIZE as usize] 
     bytes[8..12].copy_from_slice(&row.ra.to_le_bytes());
     bytes[12..16].copy_from_slice(&row.dec.to_le_bytes());
     bytes[16..20].copy_from_slice(&row.parallax.to_le_bytes());
+    bytes[20..24].copy_from_slice(&row.parallax_error.to_le_bytes());
+    bytes[24..28].copy_from_slice(&row.phot_g_mean_mag.to_le_bytes());
+    bytes[28..32].copy_from_slice(&row.bp_rp.to_le_bytes());
     bytes
 }
 
@@ -106,6 +112,9 @@ pub fn read_canonical_rows(path: &Path) -> Result<Vec<CanonicalRow>> {
         ra: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
         dec: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
         parallax: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        parallax_error: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+        phot_g_mean_mag: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+        bp_rp: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
     })
 }
 
@@ -266,12 +275,18 @@ mod tests {
                 ra: 2.0,
                 dec: 3.0,
                 parallax: 4.0,
+                parallax_error: 0.5,
+                phot_g_mean_mag: 12.5,
+                bp_rp: 0.25,
             },
             CanonicalRow {
                 source_id: 5,
                 ra: 6.0,
                 dec: 7.0,
                 parallax: 8.0,
+                parallax_error: 1.5,
+                phot_g_mean_mag: 13.5,
+                bp_rp: 0.75,
             },
         ];
         let serving_rows = vec![

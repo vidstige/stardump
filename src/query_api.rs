@@ -206,10 +206,10 @@ mod tests {
 
         write_gzip_file(
             &input_path,
-            "source_id,ra,dec,parallax\n\
-             1,0,0,100\n\
-             2,90,0,100\n\
-             3,180,0,100\n",
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             1,0,0,100,1,12.5,0.3\n\
+             2,90,0,100,1,13.5,0.6\n\
+             3,180,0,100,1,14.5,0.9\n",
         );
         run_ingestion(IngestConfig {
             input: input_path.display().to_string(),
@@ -254,11 +254,11 @@ mod tests {
 
         write_gzip_file(
             &input_path,
-            "source_id,ra,dec,parallax\n\
-             7,0,0,100\n\
-             3,90,0,50\n\
-             9,180,0,25\n\
-             2,0,90,40\n",
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             7,0,0,100,1,12.0,0.2\n\
+             3,90,0,50,1,13.0,0.4\n\
+             9,180,0,25,1,14.0,0.6\n\
+             2,0,90,40,1,15.0,0.8\n",
         );
 
         for output_root in [&output_a, &output_b] {

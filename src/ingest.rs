@@ -46,6 +46,10 @@ fn parse_optional_f32(value: Option<&str>) -> Result<Option<f32>> {
     }
 }
 
+fn optional_f32_or_nan(value: Option<&str>) -> Result<f32> {
+    Ok(parse_optional_f32(value)?.unwrap_or(f32::NAN))
+}
+
 fn parse_required_f32(value: Option<&str>, field: &str) -> Result<f32> {
     let value = value
         .ok_or_else(|| anyhow!("missing field {field}"))?
@@ -128,6 +132,9 @@ fn read_rows(
     let ra_index = field_index(&headers, "ra")?;
     let dec_index = field_index(&headers, "dec")?;
     let parallax_index = field_index(&headers, "parallax")?;
+    let parallax_error_index = field_index(&headers, "parallax_error")?;
+    let phot_g_mean_mag_index = field_index(&headers, "phot_g_mean_mag")?;
+    let bp_rp_index = field_index(&headers, "bp_rp")?;
 
     let mut canonical_rows = Vec::new();
     let mut serving_rows = BTreeMap::<u32, Vec<ServingRow>>::new();
@@ -160,6 +167,10 @@ fn read_rows(
         let source_id = parse_required_u64(record.get(source_id_index), "source_id")?;
         let ra = parse_required_f32(record.get(ra_index), "ra")?;
         let dec = parse_required_f32(record.get(dec_index), "dec")?;
+        let parallax_error =
+            parse_required_f32(record.get(parallax_error_index), "parallax_error")?;
+        let phot_g_mean_mag = optional_f32_or_nan(record.get(phot_g_mean_mag_index))?;
+        let bp_rp = optional_f32_or_nan(record.get(bp_rp_index))?;
         let [x, y, z] = cartesian_coordinates(ra, dec, parallax);
         let Some(morton) = octree.morton_for_point([x, y, z]) else {
             continue;
@@ -171,6 +182,9 @@ fn read_rows(
             ra,
             dec,
             parallax,
+            parallax_error,
+            phot_g_mean_mag,
+            bp_rp,
         });
         serving_rows
             .entry(morton)
@@ -293,11 +307,11 @@ mod tests {
 
         write_gzip_file(
             &input_path,
-            "source_id,ra,dec,parallax\n\
-             1,0,0,100\n\
-             2,90,0,0.2\n\
-             3,0,0,\n\
-             4,0,0,-1\n",
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             1,0,0,100,1,12.5,0.3\n\
+             2,90,0,0.2,0.1,13.5,\n\
+             3,0,0,,0.2,14.5,1.1\n\
+             4,0,0,-1,0.3,15.5,1.2\n",
         );
 
         let result = run_ingestion(IngestConfig {
@@ -337,6 +351,11 @@ mod tests {
         assert_eq!(metadata.counts.rows_after_parallax_filter, 2);
         assert_eq!(metadata.counts.rows_in_bounds, 2);
         assert_eq!(canonical_rows.len(), 2);
+        assert_eq!(canonical_rows[0].parallax_error, 1.0);
+        assert_eq!(canonical_rows[0].phot_g_mean_mag, 12.5);
+        assert_eq!(canonical_rows[0].bp_rp, 0.3);
+        assert_eq!(canonical_rows[1].phot_g_mean_mag, 13.5);
+        assert!(canonical_rows[1].bp_rp.is_nan());
         assert_eq!(leaf_rows.iter().map(Vec::len).sum::<usize>(), 2);
         assert!(index.leaves.len() >= 2);
     }
@@ -357,9 +376,12 @@ mod tests {
              # - {name: ra, datatype: float64}\n\
              # - {name: dec, datatype: float64}\n\
              # - {name: parallax, datatype: float64}\n\
-             source_id,ra,dec,parallax\n\
-             1,0,0,100\n\
-             2,1,2,null\n",
+             # - {name: parallax_error, datatype: float64}\n\
+             # - {name: phot_g_mean_mag, datatype: float32}\n\
+             # - {name: bp_rp, datatype: float32}\n\
+             source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             1,0,0,100,2,12.1,null\n\
+             2,1,2,null,3,13.2,0.5\n",
         );
 
         let result = run_ingestion(IngestConfig {
