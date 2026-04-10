@@ -7,6 +7,8 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::octree::Bounds3;
 
+pub const CANONICAL_ROOT: &str = "canonical";
+pub const SERVING_ROOT: &str = "serving";
 pub const CANONICAL_ROW_SIZE: u64 = 32;
 pub const SERVING_ROW_SIZE: u64 = 20;
 pub const LEAF_FILENAME_WIDTH: usize = 8;
@@ -38,27 +40,24 @@ pub struct ServingRow {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RunCounts {
+pub struct SourceCounts {
     pub rows_seen: u64,
     pub rows_with_positive_parallax: u64,
     pub rows_after_parallax_filter: u64,
-    pub rows_in_bounds: u64,
+    pub rows_written: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RunMetadata {
+pub struct SourceMetadata {
     pub source_bulk_url: String,
     pub source_bulk_md5: String,
     pub input_name: String,
     pub canonical_directory: String,
     pub canonical_parts: Vec<String>,
-    pub serving_directory: String,
-    pub octree_depth: u8,
-    pub bounds: Bounds3,
     pub parallax_filter_mas: Option<f32>,
     pub ingestion_started_at: String,
     pub ingestion_finished_at: String,
-    pub counts: RunCounts,
+    pub counts: SourceCounts,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -121,7 +120,6 @@ fn parse_metadata_fields(text: &str) -> Result<BTreeMap<String, String>> {
             bail!("duplicate metadata key {key}");
         }
     }
-
     Ok(fields)
 }
 
@@ -133,12 +131,6 @@ fn metadata_field<'a>(fields: &'a BTreeMap<String, String>, key: &str) -> Result
 }
 
 fn parse_metadata_u64(fields: &BTreeMap<String, String>, key: &str) -> Result<u64> {
-    metadata_field(fields, key)?
-        .parse()
-        .with_context(|| format!("failed to parse metadata key {key}"))
-}
-
-fn parse_metadata_u8(fields: &BTreeMap<String, String>, key: &str) -> Result<u8> {
     metadata_field(fields, key)?
         .parse()
         .with_context(|| format!("failed to parse metadata key {key}"))
@@ -158,30 +150,6 @@ fn parse_metadata_optional_f32(
         "none" => Ok(None),
         _ => parse_metadata_f32(fields, key).map(Some),
     }
-}
-
-fn parse_metadata_triplet(fields: &BTreeMap<String, String>, key: &str) -> Result<[f32; 3]> {
-    let value = metadata_field(fields, key)?;
-    let mut parts = value.split(',');
-    let x = parts
-        .next()
-        .ok_or_else(|| anyhow!("missing first component for metadata key {key}"))?
-        .parse()
-        .with_context(|| format!("failed to parse metadata key {key}"))?;
-    let y = parts
-        .next()
-        .ok_or_else(|| anyhow!("missing second component for metadata key {key}"))?
-        .parse()
-        .with_context(|| format!("failed to parse metadata key {key}"))?;
-    let z = parts
-        .next()
-        .ok_or_else(|| anyhow!("missing third component for metadata key {key}"))?
-        .parse()
-        .with_context(|| format!("failed to parse metadata key {key}"))?;
-    if parts.next().is_some() {
-        bail!("too many components for metadata key {key}");
-    }
-    Ok([x, y, z])
 }
 
 fn parse_metadata_parts(fields: &BTreeMap<String, String>, key: &str) -> Result<Vec<String>> {
@@ -208,6 +176,26 @@ fn read_f32(bytes: &[u8], offset: usize) -> Result<f32> {
     Ok(f32::from_le_bytes(chunk.try_into().unwrap()))
 }
 
+pub fn canonical_directory_path(input_name: &str) -> String {
+    let name = input_name
+        .strip_prefix("GaiaSource_")
+        .and_then(|value| value.strip_suffix(".csv.gz"))
+        .unwrap_or(input_name);
+    format!("{CANONICAL_ROOT}/{name}")
+}
+
+pub fn serving_directory(depth: u8) -> String {
+    format!("{SERVING_ROOT}/depth={depth}")
+}
+
+pub fn metadata_path_for_source(input_name: &str) -> String {
+    format!(
+        "{}/{}",
+        canonical_directory_path(input_name),
+        METADATA_FILENAME
+    )
+}
+
 pub fn leaf_filename(morton: u32) -> String {
     format!("leaf-{morton:0width$}.bin", width = LEAF_FILENAME_WIDTH)
 }
@@ -228,37 +216,31 @@ pub fn decode_serving_rows(bytes: &[u8]) -> Result<Vec<ServingRow>> {
     decode_rows(bytes, SERVING_ROW_SIZE, decode_serving_row)
 }
 
-pub fn decode_run_metadata(bytes: &[u8]) -> Result<RunMetadata> {
+pub fn decode_source_metadata(bytes: &[u8]) -> Result<SourceMetadata> {
     let text = std::str::from_utf8(bytes).context("metadata is not valid UTF-8")?;
     let fields = parse_metadata_fields(text)?;
-    Ok(RunMetadata {
+    Ok(SourceMetadata {
         source_bulk_url: metadata_field(&fields, "source_bulk_url")?.to_string(),
         source_bulk_md5: metadata_field(&fields, "source_bulk_md5")?.to_string(),
         input_name: metadata_field(&fields, "input_name")?.to_string(),
         canonical_directory: metadata_field(&fields, "canonical_directory")?.to_string(),
         canonical_parts: parse_metadata_parts(&fields, "canonical_parts")?,
-        serving_directory: metadata_field(&fields, "serving_directory")?.to_string(),
-        octree_depth: parse_metadata_u8(&fields, "octree_depth")?,
-        bounds: Bounds3 {
-            min: parse_metadata_triplet(&fields, "bounds_min")?,
-            max: parse_metadata_triplet(&fields, "bounds_max")?,
-        },
         parallax_filter_mas: parse_metadata_optional_f32(&fields, "parallax_filter_mas")?,
         ingestion_started_at: metadata_field(&fields, "ingestion_started_at")?.to_string(),
         ingestion_finished_at: metadata_field(&fields, "ingestion_finished_at")?.to_string(),
-        counts: RunCounts {
+        counts: SourceCounts {
             rows_seen: parse_metadata_u64(&fields, "rows_seen")?,
             rows_with_positive_parallax: parse_metadata_u64(
                 &fields,
                 "rows_with_positive_parallax",
             )?,
             rows_after_parallax_filter: parse_metadata_u64(&fields, "rows_after_parallax_filter")?,
-            rows_in_bounds: parse_metadata_u64(&fields, "rows_in_bounds")?,
+            rows_written: parse_metadata_u64(&fields, "rows_written")?,
         },
     })
 }
 
-pub fn encode_run_metadata(metadata: &RunMetadata) -> Vec<u8> {
+pub fn encode_source_metadata(metadata: &SourceMetadata) -> Vec<u8> {
     let canonical_parts = metadata.canonical_parts.join(",");
     let parallax_filter_mas = metadata
         .parallax_filter_mas
@@ -270,52 +252,40 @@ source_bulk_md5: {}\n\
 input_name: {}\n\
 canonical_directory: {}\n\
 canonical_parts: {}\n\
-serving_directory: {}\n\
-octree_depth: {}\n\
-bounds_min: {},{},{}\n\
-bounds_max: {},{},{}\n\
 parallax_filter_mas: {}\n\
 ingestion_started_at: {}\n\
 ingestion_finished_at: {}\n\
 rows_seen: {}\n\
 rows_with_positive_parallax: {}\n\
 rows_after_parallax_filter: {}\n\
-rows_in_bounds: {}\n",
+rows_written: {}\n",
         metadata.source_bulk_url,
         metadata.source_bulk_md5,
         metadata.input_name,
         metadata.canonical_directory,
         canonical_parts,
-        metadata.serving_directory,
-        metadata.octree_depth,
-        metadata.bounds.min[0],
-        metadata.bounds.min[1],
-        metadata.bounds.min[2],
-        metadata.bounds.max[0],
-        metadata.bounds.max[1],
-        metadata.bounds.max[2],
         parallax_filter_mas,
         metadata.ingestion_started_at,
         metadata.ingestion_finished_at,
         metadata.counts.rows_seen,
         metadata.counts.rows_with_positive_parallax,
         metadata.counts.rows_after_parallax_filter,
-        metadata.counts.rows_in_bounds,
+        metadata.counts.rows_written,
     )
     .into_bytes()
 }
 
-pub fn read_run_metadata(path: &Path) -> Result<RunMetadata> {
+pub fn read_source_metadata(path: &Path) -> Result<SourceMetadata> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    decode_run_metadata(&bytes).with_context(|| format!("failed to parse {}", path.display()))
+    decode_source_metadata(&bytes).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-pub fn write_run_metadata(path: &Path, metadata: &RunMetadata) -> Result<()> {
+pub fn write_source_metadata(path: &Path, metadata: &SourceMetadata) -> Result<()> {
     let file =
         fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut writer = BufWriter::new(file);
     writer
-        .write_all(&encode_run_metadata(metadata))
+        .write_all(&encode_source_metadata(metadata))
         .with_context(|| format!("failed to write {}", path.display()))?;
     writer
         .flush()
@@ -456,69 +426,6 @@ pub fn write_serving_rows(path: &Path, rows: &[ServingRow]) -> Result<()> {
     Ok(())
 }
 
-pub fn validate_run_layout(root: &Path, metadata: &RunMetadata, index: &OctreeIndex) -> Result<()> {
-    if metadata.octree_depth != index.depth {
-        bail!(
-            "metadata depth {} does not match index depth {}",
-            metadata.octree_depth,
-            index.depth
-        );
-    }
-    if metadata.bounds != index.bounds {
-        bail!("metadata bounds do not match index bounds");
-    }
-
-    let canonical_root = root.join(&metadata.canonical_directory);
-    let serving_root = root.join(&metadata.serving_directory);
-
-    let mut canonical_rows = 0;
-    for part in &metadata.canonical_parts {
-        canonical_rows += row_count(&canonical_root.join(part), CANONICAL_ROW_SIZE)?;
-    }
-
-    let mut serving_rows = 0;
-    let mut expected_files = std::collections::BTreeSet::new();
-    for morton in &index.leaves {
-        let filename = leaf_filename(*morton);
-        expected_files.insert(filename.clone());
-        serving_rows += row_count(&serving_root.join(filename), SERVING_ROW_SIZE)?;
-    }
-
-    let mut actual_files = std::collections::BTreeSet::new();
-    for entry in fs::read_dir(&serving_root)
-        .with_context(|| format!("failed to read {}", serving_root.display()))?
-    {
-        let entry = entry.with_context(|| format!("failed to read {}", serving_root.display()))?;
-        if entry
-            .file_type()
-            .with_context(|| format!("failed to stat {}", entry.path().display()))?
-            .is_file()
-        {
-            actual_files.insert(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-
-    if actual_files != expected_files {
-        bail!("serving directory contents do not match index leaves");
-    }
-    if canonical_rows != serving_rows {
-        bail!(
-            "canonical rows {} do not match serving rows {}",
-            canonical_rows,
-            serving_rows
-        );
-    }
-    if canonical_rows != metadata.counts.rows_in_bounds {
-        bail!(
-            "metadata rows_in_bounds {} does not match stored rows {}",
-            metadata.counts.rows_in_bounds,
-            canonical_rows
-        );
-    }
-
-    Ok(())
-}
-
 fn decode_rows<T, F>(bytes: &[u8], row_size: u64, decode: F) -> Result<Vec<T>>
 where
     F: Fn(&[u8]) -> T,
@@ -623,38 +530,35 @@ mod tests {
         let dir = tempdir().unwrap();
         let metadata_path = dir.path().join(METADATA_FILENAME);
         let index_path = dir.path().join(OCTREE_INDEX_FILENAME);
-        let metadata = RunMetadata {
+        let metadata = SourceMetadata {
             source_bulk_url: "https://example.test/input.csv.gz".to_string(),
             source_bulk_md5: "0123456789abcdef0123456789abcdef".to_string(),
             input_name: "input.csv.gz".to_string(),
-            canonical_directory: "canonical/786097-786431".to_string(),
+            canonical_directory: canonical_directory_path("input.csv.gz"),
             canonical_parts: vec!["part-000.bin".to_string()],
-            serving_directory: "serving/depth=6".to_string(),
-            octree_depth: 6,
-            bounds: Bounds3 {
-                min: [-1.0, -2.0, -3.0],
-                max: [1.0, 2.0, 3.0],
-            },
             parallax_filter_mas: Some(10.0),
             ingestion_started_at: "2026-04-10T00:00:00Z".to_string(),
             ingestion_finished_at: "2026-04-10T00:00:01Z".to_string(),
-            counts: RunCounts {
+            counts: SourceCounts {
                 rows_seen: 100,
                 rows_with_positive_parallax: 80,
                 rows_after_parallax_filter: 7,
-                rows_in_bounds: 6,
+                rows_written: 6,
             },
         };
         let index = OctreeIndex {
             depth: 6,
-            bounds: metadata.bounds,
+            bounds: Bounds3 {
+                min: [-1.0, -2.0, -3.0],
+                max: [1.0, 2.0, 3.0],
+            },
             leaves: vec![1, 7, 42],
         };
 
-        write_run_metadata(&metadata_path, &metadata).unwrap();
+        write_source_metadata(&metadata_path, &metadata).unwrap();
         write_octree_index(&index_path, &index).unwrap();
 
-        assert_eq!(read_run_metadata(&metadata_path).unwrap(), metadata);
+        assert_eq!(read_source_metadata(&metadata_path).unwrap(), metadata);
         assert_eq!(read_octree_index(&index_path).unwrap(), index);
     }
 }

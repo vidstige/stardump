@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,7 +10,8 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 
 use crate::formats::{
-    CANONICAL_ROW_SIZE, OctreeIndex, RunMetadata, SERVING_ROW_SIZE, leaf_filename,
+    CANONICAL_ROW_SIZE, OctreeIndex, SERVING_ROW_SIZE, SourceMetadata, leaf_filename,
+    serving_directory,
 };
 
 const METADATA_SERVER_URL: &str =
@@ -66,7 +66,8 @@ struct GcsObject {
 
 fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|value| value.to_str()) {
-        Some("json") | Some("octree") => "application/json",
+        Some("octree") => "application/octet-stream",
+        Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -246,26 +247,74 @@ impl StorageClient {
         self.upload_directory_recursive(local_root, local_root, remote_root)
     }
 
-    pub fn validate_run_layout(
+    pub fn list_relative_files_recursive(&self, root: &StorageRoot) -> Result<Vec<String>> {
+        match root {
+            StorageRoot::Local(path) => {
+                if !path.exists() {
+                    return Ok(Vec::new());
+                }
+                let mut files = Vec::new();
+                self.collect_local_files(path, path, &mut files)?;
+                files.sort();
+                Ok(files)
+            }
+            StorageRoot::Gcs(location) => {
+                let mut files = Vec::new();
+                let mut next_page_token = None::<String>;
+                loop {
+                    let mut url = format!(
+                        "https://storage.googleapis.com/storage/v1/b/{}/o?prefix={}",
+                        location.bucket,
+                        urlencoding::encode(&join_prefix(&location.prefix, ""))
+                    );
+                    if let Some(token) = &next_page_token {
+                        url.push_str("&pageToken=");
+                        url.push_str(&urlencoding::encode(token));
+                    }
+
+                    let response = self
+                        .authorized_get(&url)
+                        .send()
+                        .with_context(|| format!("failed to list {}", root.display()))?;
+                    let response = response
+                        .error_for_status()
+                        .with_context(|| format!("failed to list {}", root.display()))?;
+                    let listing: GcsListResponse = response
+                        .json()
+                        .with_context(|| format!("failed to parse {}", root.display()))?;
+
+                    if let Some(items) = listing.items {
+                        for item in items {
+                            let relative = item
+                                .name
+                                .strip_prefix(&join_prefix(&location.prefix, ""))
+                                .unwrap_or(&item.name)
+                                .trim_start_matches('/')
+                                .to_string();
+                            if !relative.is_empty() {
+                                files.push(relative);
+                            }
+                        }
+                    }
+
+                    match listing.next_page_token {
+                        Some(token) => next_page_token = Some(token),
+                        None => {
+                            files.sort();
+                            return Ok(files);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn validate_canonical_layout(
         &self,
         root: &StorageRoot,
-        metadata: &RunMetadata,
-        index: &OctreeIndex,
-    ) -> Result<()> {
-        if metadata.octree_depth != index.depth {
-            bail!(
-                "metadata depth {} does not match index depth {}",
-                metadata.octree_depth,
-                index.depth
-            );
-        }
-        if metadata.bounds != index.bounds {
-            bail!("metadata bounds do not match index bounds");
-        }
-
+        metadata: &SourceMetadata,
+    ) -> Result<u64> {
         let canonical_root = root.join(&metadata.canonical_directory);
-        let serving_root = root.join(&metadata.serving_directory);
-
         let mut canonical_rows = 0;
         for part in &metadata.canonical_parts {
             canonical_rows += ensure_row_multiple(
@@ -274,39 +323,27 @@ impl StorageClient {
                 "canonical object",
             )?;
         }
+        if canonical_rows != metadata.counts.rows_written {
+            bail!(
+                "metadata rows_written {} does not match stored rows {}",
+                metadata.counts.rows_written,
+                canonical_rows,
+            );
+        }
+        Ok(canonical_rows)
+    }
 
+    pub fn validate_serving_layout(&self, root: &StorageRoot, index: &OctreeIndex) -> Result<u64> {
+        let serving_root = root.join(&serving_directory(index.depth));
         let mut serving_rows = 0;
-        let mut expected_files = BTreeSet::new();
         for morton in &index.leaves {
-            let filename = leaf_filename(*morton);
-            expected_files.insert(filename.clone());
             serving_rows += ensure_row_multiple(
-                self.object_size(&serving_root.join(&filename))?,
+                self.object_size(&serving_root.join(&leaf_filename(*morton)))?,
                 SERVING_ROW_SIZE,
                 "serving object",
             )?;
         }
-
-        let actual_files = self.list_filenames(&serving_root)?;
-        if actual_files != expected_files {
-            bail!("serving directory contents do not match index leaves");
-        }
-        if canonical_rows != serving_rows {
-            bail!(
-                "canonical rows {} do not match serving rows {}",
-                canonical_rows,
-                serving_rows
-            );
-        }
-        if canonical_rows != metadata.counts.rows_in_bounds {
-            bail!(
-                "metadata rows_in_bounds {} does not match stored rows {}",
-                metadata.counts.rows_in_bounds,
-                canonical_rows
-            );
-        }
-
-        Ok(())
+        Ok(serving_rows)
     }
 
     fn authorized_get(&self, url: &str) -> reqwest::blocking::RequestBuilder {
@@ -378,66 +415,35 @@ impl StorageClient {
         })
     }
 
-    fn list_filenames(&self, root: &StorageRoot) -> Result<BTreeSet<String>> {
-        match root {
-            StorageRoot::Local(path) => {
-                let mut files = BTreeSet::new();
-                for entry in fs::read_dir(path)
-                    .with_context(|| format!("failed to read {}", path.display()))?
-                {
-                    let entry =
-                        entry.with_context(|| format!("failed to read {}", path.display()))?;
-                    if entry
-                        .file_type()
-                        .with_context(|| format!("failed to stat {}", entry.path().display()))?
-                        .is_file()
-                    {
-                        files.insert(entry.file_name().to_string_lossy().into_owned());
-                    }
-                }
-                Ok(files)
+    fn collect_local_files(
+        &self,
+        root: &Path,
+        current: &Path,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(current)
+            .with_context(|| format!("failed to read {}", current.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed to read {}", current.display()))?;
+            let path = entry.path();
+            if entry
+                .file_type()
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .is_dir()
+            {
+                self.collect_local_files(root, &path, files)?;
+                continue;
             }
-            StorageRoot::Gcs(location) => {
-                let mut files = BTreeSet::new();
-                let mut next_page_token = None::<String>;
-                loop {
-                    let mut url = format!(
-                        "https://storage.googleapis.com/storage/v1/b/{}/o?prefix={}",
-                        location.bucket,
-                        urlencoding::encode(&join_prefix(&location.prefix, ""))
-                    );
-                    if let Some(token) = &next_page_token {
-                        url.push_str("&pageToken=");
-                        url.push_str(&urlencoding::encode(token));
-                    }
 
-                    let response = self
-                        .authorized_get(&url)
-                        .send()
-                        .with_context(|| format!("failed to list {}", root.display()))?;
-                    let response = response
-                        .error_for_status()
-                        .with_context(|| format!("failed to list {}", root.display()))?;
-                    let listing: GcsListResponse = response
-                        .json()
-                        .with_context(|| format!("failed to parse {}", root.display()))?;
-
-                    if let Some(items) = listing.items {
-                        for item in items {
-                            let filename = item.name.rsplit('/').next().unwrap_or("");
-                            files.insert(filename.to_owned());
-                        }
-                    }
-
-                    match listing.next_page_token {
-                        Some(token) => next_page_token = Some(token),
-                        None => return Ok(files),
-                    }
-                }
-            }
+            let relative = path
+                .strip_prefix(root)
+                .with_context(|| format!("failed to relativize {}", path.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push(relative);
         }
+        Ok(())
     }
-
     fn upload_directory_recursive(
         &self,
         local_root: &Path,

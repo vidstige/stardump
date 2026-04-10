@@ -1,3 +1,4 @@
+pub mod build_index;
 pub mod formats;
 pub mod ingest;
 pub mod octree;

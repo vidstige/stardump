@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,38 +10,28 @@ use md5::Context as Md5Context;
 use tempfile::tempdir;
 
 use crate::formats::{
-    CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex, RunCounts, RunMetadata,
-    ServingRow, decode_octree_index, decode_run_metadata, leaf_filename, validate_run_layout,
-    write_canonical_rows, write_octree_index, write_run_metadata, write_serving_rows,
+    CanonicalRow, METADATA_FILENAME, SourceCounts, SourceMetadata, canonical_directory_path,
+    decode_source_metadata, metadata_path_for_source, write_canonical_rows, write_source_metadata,
 };
-use crate::octree::{Bounds3, OctreeConfig};
 use crate::storage::{StorageClient, StorageRoot};
-
-pub const DEFAULT_DEPTH: u8 = 6;
-pub const DEFAULT_BOUNDS: Bounds3 = Bounds3 {
-    min: [-100_000.0, -100_000.0, -100_000.0],
-    max: [100_000.0, 100_000.0, 100_000.0],
-};
 
 #[derive(Clone, Debug)]
 pub struct IngestConfig {
-    pub input: String,
+    pub inputs: Vec<String>,
     pub output_root: String,
     pub parallax_filter_mas: Option<f32>,
-    pub octree_depth: u8,
-    pub bounds: Bounds3,
 }
 
 #[derive(Clone, Debug)]
 pub struct IngestResult {
-    pub metadata: RunMetadata,
-    pub index: OctreeIndex,
+    pub metadata: Vec<SourceMetadata>,
 }
 
 #[derive(Debug)]
 struct StagedInput {
     path: PathBuf,
     input_name: String,
+    source_bulk_url: String,
     source_bulk_md5: String,
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -89,14 +78,6 @@ fn field_index(headers: &StringRecord, field: &str) -> Result<usize> {
 
 fn input_name(input: &str) -> String {
     input.rsplit('/').next().unwrap_or(input).trim().to_string()
-}
-
-fn canonical_directory_name(input_name: &str) -> String {
-    input_name
-        .strip_prefix("GaiaSource_")
-        .and_then(|value| value.strip_suffix(".csv.gz"))
-        .unwrap_or(input_name)
-        .to_string()
 }
 
 fn open_input(input: &str) -> Result<Box<dyn Read>> {
@@ -159,6 +140,7 @@ fn stage_input(input: &str) -> Result<StagedInput> {
         return Ok(StagedInput {
             path,
             input_name,
+            source_bulk_url: input.to_string(),
             source_bulk_md5,
             _tempdir: Some(tempdir),
         });
@@ -172,30 +154,16 @@ fn stage_input(input: &str) -> Result<StagedInput> {
     Ok(StagedInput {
         path,
         input_name,
+        source_bulk_url: input.to_string(),
         source_bulk_md5,
         _tempdir: None,
     })
 }
 
-fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 3] {
-    let distance_pc = 1_000.0_f64 / parallax_mas as f64;
-    let ra = (ra_deg as f64).to_radians();
-    let dec = (dec_deg as f64).to_radians();
-    [
-        (distance_pc * dec.cos() * ra.cos()) as f32,
-        (distance_pc * dec.cos() * ra.sin()) as f32,
-        (distance_pc * dec.sin()) as f32,
-    ]
-}
-
-fn read_rows(
+fn read_canonical_rows(
     input_path: &Path,
-    config: &IngestConfig,
-) -> Result<(Vec<CanonicalRow>, BTreeMap<u32, Vec<ServingRow>>, RunCounts)> {
-    let octree = OctreeConfig {
-        depth: config.octree_depth,
-        bounds: config.bounds,
-    };
+    parallax_filter_mas: Option<f32>,
+) -> Result<(Vec<CanonicalRow>, SourceCounts)> {
     let reader = open_input(&input_path.display().to_string())?;
     let decoder = MultiGzDecoder::new(BufReader::new(reader));
     let mut csv_reader = ReaderBuilder::new()
@@ -213,13 +181,12 @@ fn read_rows(
     let phot_g_mean_mag_index = field_index(&headers, "phot_g_mean_mag")?;
     let bp_rp_index = field_index(&headers, "bp_rp")?;
 
-    let mut canonical_rows = Vec::new();
-    let mut serving_rows = BTreeMap::<u32, Vec<ServingRow>>::new();
-    let mut counts = RunCounts {
+    let mut rows = Vec::new();
+    let mut counts = SourceCounts {
         rows_seen: 0,
         rows_with_positive_parallax: 0,
         rows_after_parallax_filter: 0,
-        rows_in_bounds: 0,
+        rows_written: 0,
     };
 
     for record in csv_reader.records() {
@@ -234,211 +201,167 @@ fn read_rows(
         }
         counts.rows_with_positive_parallax += 1;
 
-        if let Some(minimum_parallax) = config.parallax_filter_mas {
+        if let Some(minimum_parallax) = parallax_filter_mas {
             if parallax <= minimum_parallax {
                 continue;
             }
         }
         counts.rows_after_parallax_filter += 1;
 
-        let source_id = parse_required_u64(record.get(source_id_index), "source_id")?;
-        let ra = parse_required_f32(record.get(ra_index), "ra")?;
-        let dec = parse_required_f32(record.get(dec_index), "dec")?;
-        let parallax_error =
-            parse_required_f32(record.get(parallax_error_index), "parallax_error")?;
-        let phot_g_mean_mag = optional_f32_or_nan(record.get(phot_g_mean_mag_index))?;
-        let bp_rp = optional_f32_or_nan(record.get(bp_rp_index))?;
-        let [x, y, z] = cartesian_coordinates(ra, dec, parallax);
-        let Some(morton) = octree.morton_for_point([x, y, z]) else {
-            continue;
-        };
-
-        counts.rows_in_bounds += 1;
-        canonical_rows.push(CanonicalRow {
-            source_id,
-            ra,
-            dec,
+        rows.push(CanonicalRow {
+            source_id: parse_required_u64(record.get(source_id_index), "source_id")?,
+            ra: parse_required_f32(record.get(ra_index), "ra")?,
+            dec: parse_required_f32(record.get(dec_index), "dec")?,
             parallax,
-            parallax_error,
-            phot_g_mean_mag,
-            bp_rp,
+            parallax_error: parse_required_f32(record.get(parallax_error_index), "parallax_error")?,
+            phot_g_mean_mag: optional_f32_or_nan(record.get(phot_g_mean_mag_index))?,
+            bp_rp: optional_f32_or_nan(record.get(bp_rp_index))?,
         });
-        serving_rows
-            .entry(morton)
-            .or_default()
-            .push(ServingRow { source_id, x, y, z });
     }
 
-    Ok((canonical_rows, serving_rows, counts))
+    counts.rows_written = rows.len() as u64;
+    Ok((rows, counts))
 }
 
-fn write_output(
-    output_root: &Path,
-    config: &IngestConfig,
-    input_name: &str,
-    canonical_rows: &[CanonicalRow],
-    serving_rows: &mut BTreeMap<u32, Vec<ServingRow>>,
-    counts: RunCounts,
-    started_at: String,
-    finished_at: String,
-    source_bulk_md5: String,
-) -> Result<IngestResult> {
-    let canonical_directory = format!("canonical/{}", canonical_directory_name(input_name));
-    let serving_directory = format!("serving/depth={}", config.octree_depth);
-    let canonical_root = output_root.join(&canonical_directory);
-    let serving_root = output_root.join(&serving_directory);
-    if canonical_root.exists() {
-        fs::remove_dir_all(&canonical_root)
-            .with_context(|| format!("failed to clear {}", canonical_root.display()))?;
-    }
-    if serving_root.exists() {
-        fs::remove_dir_all(&serving_root)
-            .with_context(|| format!("failed to clear {}", serving_root.display()))?;
-    }
-    fs::create_dir_all(&canonical_root)
-        .with_context(|| format!("failed to create {}", canonical_root.display()))?;
-    fs::create_dir_all(&serving_root)
-        .with_context(|| format!("failed to create {}", serving_root.display()))?;
-
-    let canonical_parts = vec!["part-000.bin".to_string()];
-    write_canonical_rows(&canonical_root.join(&canonical_parts[0]), canonical_rows)?;
-
-    let mut leaves = Vec::with_capacity(serving_rows.len());
-    for (morton, rows) in serving_rows {
-        rows.sort_by_key(|row| row.source_id);
-        write_serving_rows(&serving_root.join(leaf_filename(*morton)), rows)?;
-        leaves.push(*morton);
-    }
-
-    let metadata = RunMetadata {
-        source_bulk_url: config.input.clone(),
-        source_bulk_md5,
-        input_name: input_name.to_string(),
-        canonical_directory,
-        canonical_parts,
-        serving_directory,
-        octree_depth: config.octree_depth,
-        bounds: config.bounds,
-        parallax_filter_mas: config.parallax_filter_mas,
-        ingestion_started_at: started_at,
-        ingestion_finished_at: finished_at,
-        counts,
-    };
-    let index = OctreeIndex {
-        depth: config.octree_depth,
-        bounds: config.bounds,
-        leaves,
-    };
-
-    write_run_metadata(&output_root.join(METADATA_FILENAME), &metadata)?;
-    write_octree_index(&output_root.join(OCTREE_INDEX_FILENAME), &index)?;
-    validate_run_layout(output_root, &metadata, &index)?;
-
-    Ok(IngestResult { metadata, index })
-}
-
-fn matches_existing_run(
-    metadata: &RunMetadata,
-    config: &IngestConfig,
-    input_name: &str,
-    source_bulk_md5: &str,
+fn metadata_matches(
+    metadata: &SourceMetadata,
+    staged_input: &StagedInput,
+    parallax_filter_mas: Option<f32>,
 ) -> bool {
-    metadata.source_bulk_url == config.input
-        && metadata.source_bulk_md5 == source_bulk_md5
-        && metadata.input_name == input_name
-        && metadata.octree_depth == config.octree_depth
-        && metadata.bounds == config.bounds
-        && metadata.parallax_filter_mas == config.parallax_filter_mas
+    metadata.source_bulk_url == staged_input.source_bulk_url
+        && metadata.source_bulk_md5 == staged_input.source_bulk_md5
+        && metadata.input_name == staged_input.input_name
+        && metadata.parallax_filter_mas == parallax_filter_mas
 }
 
-fn load_existing_run(
+fn load_existing_source(
     storage: &StorageClient,
     output_root: &StorageRoot,
-    config: &IngestConfig,
-    input_name: &str,
-    source_bulk_md5: &str,
-) -> Result<Option<IngestResult>> {
-    let Some(metadata_bytes) = storage.read_optional_bytes(&output_root.join(METADATA_FILENAME))?
+    staged_input: &StagedInput,
+    parallax_filter_mas: Option<f32>,
+) -> Result<Option<SourceMetadata>> {
+    let Some(metadata_bytes) = storage.read_optional_bytes(
+        &output_root.join(&metadata_path_for_source(&staged_input.input_name)),
+    )?
     else {
         return Ok(None);
     };
-    let Some(index_bytes) =
-        storage.read_optional_bytes(&output_root.join(OCTREE_INDEX_FILENAME))?
-    else {
+    let Ok(metadata) = decode_source_metadata(&metadata_bytes) else {
         return Ok(None);
     };
-    let Ok(metadata) = decode_run_metadata(&metadata_bytes) else {
-        return Ok(None);
-    };
-    if !matches_existing_run(&metadata, config, input_name, source_bulk_md5) {
+    if !metadata_matches(&metadata, staged_input, parallax_filter_mas) {
         return Ok(None);
     }
-    let Ok(index) = decode_octree_index(&index_bytes) else {
-        return Ok(None);
-    };
     if storage
-        .validate_run_layout(output_root, &metadata, &index)
+        .validate_canonical_layout(output_root, &metadata)
         .is_err()
     {
         return Ok(None);
     }
-    Ok(Some(IngestResult { metadata, index }))
+    Ok(Some(metadata))
 }
 
-pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
-    if config.octree_depth == 0 || config.octree_depth > 10 {
-        bail!("octree depth must be between 1 and 10");
+fn write_source_output(
+    output_root: &Path,
+    staged_input: &StagedInput,
+    parallax_filter_mas: Option<f32>,
+    rows: &[CanonicalRow],
+    counts: SourceCounts,
+    started_at: String,
+    finished_at: String,
+) -> Result<SourceMetadata> {
+    let canonical_directory = canonical_directory_path(&staged_input.input_name);
+    let canonical_root = output_root.join(&canonical_directory);
+    if canonical_root.exists() {
+        fs::remove_dir_all(&canonical_root)
+            .with_context(|| format!("failed to clear {}", canonical_root.display()))?;
     }
-    let output_root = StorageRoot::parse(&config.output_root)?;
-    let staged_input = stage_input(&config.input)?;
-    let storage = StorageClient::new()?;
-    if let Some(result) = load_existing_run(
-        &storage,
-        &output_root,
-        &config,
-        &staged_input.input_name,
-        &staged_input.source_bulk_md5,
-    )? {
-        return Ok(result);
+    fs::create_dir_all(&canonical_root)
+        .with_context(|| format!("failed to create {}", canonical_root.display()))?;
+
+    let canonical_parts = vec!["part-000.bin".to_string()];
+    write_canonical_rows(&canonical_root.join(&canonical_parts[0]), rows)?;
+
+    let metadata = SourceMetadata {
+        source_bulk_url: staged_input.source_bulk_url.clone(),
+        source_bulk_md5: staged_input.source_bulk_md5.clone(),
+        input_name: staged_input.input_name.clone(),
+        canonical_directory,
+        canonical_parts,
+        parallax_filter_mas,
+        ingestion_started_at: started_at,
+        ingestion_finished_at: finished_at,
+        counts,
+    };
+    write_source_metadata(&canonical_root.join(METADATA_FILENAME), &metadata)?;
+    Ok(metadata)
+}
+
+fn ingest_one(
+    storage: &StorageClient,
+    output_root: &StorageRoot,
+    input: &str,
+    parallax_filter_mas: Option<f32>,
+) -> Result<SourceMetadata> {
+    let staged_input = stage_input(input)?;
+    if let Some(metadata) =
+        load_existing_source(storage, output_root, &staged_input, parallax_filter_mas)?
+    {
+        return Ok(metadata);
     }
 
     let started_at = Utc::now().to_rfc3339();
-    let (canonical_rows, mut serving_rows, counts) = read_rows(&staged_input.path, &config)?;
+    let (rows, counts) = read_canonical_rows(&staged_input.path, parallax_filter_mas)?;
     let finished_at = Utc::now().to_rfc3339();
+
     match output_root {
         StorageRoot::Local(path) => {
-            fs::create_dir_all(&path)
+            fs::create_dir_all(path)
                 .with_context(|| format!("failed to create {}", path.display()))?;
-            write_output(
-                &path,
-                &config,
-                &staged_input.input_name,
-                &canonical_rows,
-                &mut serving_rows,
+            write_source_output(
+                path,
+                &staged_input,
+                parallax_filter_mas,
+                &rows,
                 counts,
                 started_at,
                 finished_at,
-                staged_input.source_bulk_md5,
             )
         }
         root @ StorageRoot::Gcs(_) => {
             let local_output = tempdir().context("failed to create temporary output directory")?;
-            let result = write_output(
+            let metadata = write_source_output(
                 local_output.path(),
-                &config,
-                &staged_input.input_name,
-                &canonical_rows,
-                &mut serving_rows,
+                &staged_input,
+                parallax_filter_mas,
+                &rows,
                 counts,
                 started_at,
                 finished_at,
-                staged_input.source_bulk_md5,
             )?;
-            storage.upload_directory(local_output.path(), &root)?;
-            storage.validate_run_layout(&root, &result.metadata, &result.index)?;
-            Ok(result)
+            storage.upload_directory(local_output.path(), root)?;
+            storage.validate_canonical_layout(root, &metadata)?;
+            Ok(metadata)
         }
     }
+}
+
+pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
+    if config.inputs.is_empty() {
+        bail!("at least one --input is required");
+    }
+    let output_root = StorageRoot::parse(&config.output_root)?;
+    let storage = StorageClient::new()?;
+    let mut metadata = Vec::with_capacity(config.inputs.len());
+    for input in &config.inputs {
+        metadata.push(ingest_one(
+            &storage,
+            &output_root,
+            input,
+            config.parallax_filter_mas,
+        )?);
+    }
+    Ok(IngestResult { metadata })
 }
 
 #[cfg(test)]
@@ -449,10 +372,7 @@ mod tests {
     use flate2::write::GzEncoder;
     use tempfile::tempdir;
 
-    use crate::formats::{
-        METADATA_FILENAME, OCTREE_INDEX_FILENAME, read_canonical_rows, read_octree_index,
-        read_run_metadata, read_serving_rows,
-    };
+    use crate::formats::{read_canonical_rows, read_source_metadata};
 
     use super::*;
 
@@ -464,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn ingests_filtered_rows_and_writes_layout() {
+    fn ingests_filtered_rows_and_writes_canonical_layout() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -479,43 +399,28 @@ mod tests {
         );
 
         let result = run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
-            octree_depth: DEFAULT_DEPTH,
-            bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
 
-        let metadata: RunMetadata =
-            read_run_metadata(&output_path.join(METADATA_FILENAME)).unwrap();
-        let index: OctreeIndex =
-            read_octree_index(&output_path.join(OCTREE_INDEX_FILENAME)).unwrap();
+        let metadata = read_source_metadata(
+            &output_path.join(metadata_path_for_source(&result.metadata[0].input_name)),
+        )
+        .unwrap();
         let canonical_rows = read_canonical_rows(
             &output_path
                 .join(&metadata.canonical_directory)
                 .join("part-000.bin"),
         )
         .unwrap();
-        let leaf_rows: Vec<Vec<ServingRow>> = index
-            .leaves
-            .iter()
-            .map(|leaf| {
-                read_serving_rows(
-                    &output_path
-                        .join(&metadata.serving_directory)
-                        .join(leaf_filename(*leaf)),
-                )
-                .unwrap()
-            })
-            .collect();
 
-        assert_eq!(result.metadata, metadata);
-        assert_eq!(result.index, index);
+        assert_eq!(result.metadata, vec![metadata.clone()]);
         assert_eq!(metadata.counts.rows_seen, 4);
         assert_eq!(metadata.counts.rows_with_positive_parallax, 2);
         assert_eq!(metadata.counts.rows_after_parallax_filter, 2);
-        assert_eq!(metadata.counts.rows_in_bounds, 2);
+        assert_eq!(metadata.counts.rows_written, 2);
         assert_eq!(metadata.source_bulk_md5.len(), 32);
         assert_eq!(canonical_rows.len(), 2);
         assert_eq!(canonical_rows[0].parallax_error, 1.0);
@@ -523,8 +428,6 @@ mod tests {
         assert_eq!(canonical_rows[0].bp_rp, 0.3);
         assert_eq!(canonical_rows[1].phot_g_mean_mag, 13.5);
         assert!(canonical_rows[1].bp_rp.is_nan());
-        assert_eq!(leaf_rows.iter().map(Vec::len).sum::<usize>(), 2);
-        assert!(index.leaves.len() >= 2);
     }
 
     #[test]
@@ -552,17 +455,15 @@ mod tests {
         );
 
         let result = run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
-            octree_depth: DEFAULT_DEPTH,
-            bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
 
-        assert_eq!(result.metadata.counts.rows_seen, 2);
-        assert_eq!(result.metadata.counts.rows_with_positive_parallax, 1);
-        assert_eq!(result.metadata.counts.rows_in_bounds, 1);
+        assert_eq!(result.metadata[0].counts.rows_seen, 2);
+        assert_eq!(result.metadata[0].counts.rows_with_positive_parallax, 1);
+        assert_eq!(result.metadata[0].counts.rows_written, 1);
     }
 
     #[test]
@@ -579,27 +480,24 @@ mod tests {
         );
 
         let first = run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
-            octree_depth: DEFAULT_DEPTH,
-            bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
-        let metadata_before = fs::read(output_path.join(METADATA_FILENAME)).unwrap();
+        let metadata_path =
+            output_path.join(metadata_path_for_source(&first.metadata[0].input_name));
+        let metadata_before = fs::read(&metadata_path).unwrap();
 
         let second = run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
-            octree_depth: DEFAULT_DEPTH,
-            bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
-        let metadata_after = fs::read(output_path.join(METADATA_FILENAME)).unwrap();
+        let metadata_after = fs::read(metadata_path).unwrap();
 
         assert_eq!(second.metadata, first.metadata);
-        assert_eq!(second.index, first.index);
         assert_eq!(metadata_after, metadata_before);
     }
 
@@ -615,11 +513,9 @@ mod tests {
              1,0,0,100,1,12.5,0.3\n",
         );
         let first = run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
-            octree_depth: DEFAULT_DEPTH,
-            bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
 
@@ -629,15 +525,15 @@ mod tests {
              7,0,0,100,1,14.5,0.8\n",
         );
         let second = run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
-            octree_depth: DEFAULT_DEPTH,
-            bounds: DEFAULT_BOUNDS,
         })
         .unwrap();
-        let metadata: RunMetadata =
-            read_run_metadata(&output_path.join(METADATA_FILENAME)).unwrap();
+        let metadata = read_source_metadata(
+            &output_path.join(metadata_path_for_source(&second.metadata[0].input_name)),
+        )
+        .unwrap();
         let canonical_rows = read_canonical_rows(
             &output_path
                 .join(&metadata.canonical_directory)
@@ -646,8 +542,8 @@ mod tests {
         .unwrap();
 
         assert_ne!(
-            first.metadata.source_bulk_md5,
-            second.metadata.source_bulk_md5
+            first.metadata[0].source_bulk_md5,
+            second.metadata[0].source_bulk_md5
         );
         assert_eq!(canonical_rows.len(), 1);
         assert_eq!(canonical_rows[0].source_id, 7);

@@ -8,17 +8,16 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::formats::{
-    METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex, RunMetadata, ServingRow,
-    decode_octree_index, decode_run_metadata, decode_serving_rows, leaf_filename,
+    OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow, decode_octree_index, decode_serving_rows,
+    leaf_filename, serving_directory,
 };
 use crate::octree::OctreeConfig;
 use crate::storage::{StorageClient, StorageRoot};
 
 #[derive(Clone)]
 pub struct QueryService {
-    metadata: RunMetadata,
     index: OctreeIndex,
-    data_root: StorageRoot,
+    serving_root: StorageRoot,
     storage: StorageClient,
 }
 
@@ -82,23 +81,16 @@ impl QueryService {
     pub fn load(root: &str) -> Result<Self> {
         let data_root = StorageRoot::parse(root)?;
         let storage = StorageClient::new()?;
-        let metadata: RunMetadata =
-            decode_run_metadata(&storage.read_bytes(&data_root.join(METADATA_FILENAME))?)
-                .context("failed to parse metadata")?;
         let index: OctreeIndex =
             decode_octree_index(&storage.read_bytes(&data_root.join(OCTREE_INDEX_FILENAME))?)
                 .context("failed to parse octree index")?;
-        storage.validate_run_layout(&data_root, &metadata, &index)?;
+        storage.validate_serving_layout(&data_root, &index)?;
+        let serving_root = data_root.join(&serving_directory(index.depth));
         Ok(Self {
-            metadata,
             index,
-            data_root,
+            serving_root,
             storage,
         })
-    }
-
-    pub fn metadata(&self) -> &RunMetadata {
-        &self.metadata
     }
 
     pub fn query_radius(&self, request: RadiusQueryRequest) -> Result<RadiusQueryResponse> {
@@ -115,7 +107,6 @@ impl QueryService {
             depth: self.index.depth,
             bounds: self.index.bounds,
         };
-        let serving_root = self.data_root.join(&self.metadata.serving_directory);
         let mut matches = Vec::new();
         let mut examined_leaves = 0;
 
@@ -129,7 +120,7 @@ impl QueryService {
             let rows = decode_serving_rows(
                 &self
                     .storage
-                    .read_bytes(&serving_root.join(&leaf_filename(*morton)))?,
+                    .read_bytes(&self.serving_root.join(&leaf_filename(*morton)))?,
             )?;
             for row in rows {
                 let distance = distance(center, &row);
@@ -202,7 +193,8 @@ mod tests {
     use tempfile::tempdir;
     use tower::ServiceExt;
 
-    use crate::ingest::{DEFAULT_BOUNDS, DEFAULT_DEPTH, IngestConfig, run_ingestion};
+    use crate::build_index::{BuildIndexConfig, DEFAULT_BOUNDS, DEFAULT_DEPTH, run_build_index};
+    use crate::ingest::{IngestConfig, run_ingestion};
 
     use super::*;
 
@@ -227,9 +219,13 @@ mod tests {
              3,180,0,100,1,14.5,0.9\n",
         );
         run_ingestion(IngestConfig {
-            input: input_path.display().to_string(),
+            inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
             parallax_filter_mas: None,
+        })
+        .unwrap();
+        run_build_index(BuildIndexConfig {
+            data_root: output_path.display().to_string(),
             octree_depth: DEFAULT_DEPTH,
             bounds: DEFAULT_BOUNDS,
         })
@@ -284,9 +280,13 @@ mod tests {
 
         for output_root in [&output_a, &output_b] {
             run_ingestion(IngestConfig {
-                input: input_path.display().to_string(),
+                inputs: vec![input_path.display().to_string()],
                 output_root: output_root.display().to_string(),
                 parallax_filter_mas: None,
+            })
+            .unwrap();
+            run_build_index(BuildIndexConfig {
+                data_root: output_root.display().to_string(),
                 octree_depth: DEFAULT_DEPTH,
                 bounds: DEFAULT_BOUNDS,
             })
