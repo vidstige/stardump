@@ -13,7 +13,7 @@ PREFIX = "Gaia/gdr3/gaia_source/"
 CDN_BASE = "https://cdn.gea.esac.esa.int/"
 LISTING_BASE = "https://gaia.eu-1.cdn77-storage.com/"
 S3_NAMESPACE = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
-STATE_PATH = ".stardump/full-ingest-state.json"
+STATE_PATH = ".stardump/ingest-state.json"
 POLL_SECONDS = 30
 
 
@@ -275,7 +275,7 @@ def print_status(rows: list[dict]) -> None:
             print(row["log_uri"])
 
 
-def start_full_ingest() -> None:
+def start_ingest() -> None:
     settings = current_settings()
     urls = fetch_gaia_source_urls()
     if not urls:
@@ -317,12 +317,12 @@ def start_full_ingest() -> None:
     print(f"ingest_batches: {len(batches)}")
     print(f"data_root: {settings['data_root']}")
     print(f"state_file: {STATE_PATH}")
-    print("next: python3 -m stardump full-ingest status")
-    print("then: python3 -m stardump full-ingest wait")
-    print("then: python3 -m stardump full-ingest build-index")
+    print("next: python3 -m stardump ingest status")
+    print("then: python3 -m stardump ingest wait")
+    print("then: python3 -m stardump ingest build-index")
 
 
-def status_full_ingest() -> None:
+def status_ingest() -> None:
     try:
         state = read_state()
     except FileNotFoundError:
@@ -335,7 +335,7 @@ def status_full_ingest() -> None:
         raise SystemExit(1)
 
 
-def wait_full_ingest() -> None:
+def wait_ingest() -> None:
     try:
         state = read_state()
     except FileNotFoundError:
