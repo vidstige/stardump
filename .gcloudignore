@@ -2,3 +2,11 @@
 .gitignore
 /target
 /data
+/.stardump
+/docs
+/sh
+/stardump
+__pycache__/
+*.pyc
+plan.md
+AGENTS.md
