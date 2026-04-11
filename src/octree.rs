@@ -39,6 +39,32 @@ fn axis_index(value: f32, min: f32, max: f32, scale: u32) -> Option<u32> {
     Some((fraction * scale as f32).floor() as u32)
 }
 
+fn axis_range(min_value: f32, max_value: f32, min: f32, max: f32, scale: u32) -> Option<(u32, u32)> {
+    if !min_value.is_finite() || !max_value.is_finite() || min_value > max_value {
+        return None;
+    }
+    if max_value < min || min_value > max {
+        return None;
+    }
+
+    let clamped_min = min_value.max(min);
+    let clamped_max = max_value.min(max);
+    let cell = (max - min) / scale as f32;
+
+    let start = if clamped_min <= min {
+        0
+    } else {
+        ((((clamped_min - min) / cell).ceil() as i64) - 1).clamp(0, scale as i64 - 1) as u32
+    };
+    let end = if clamped_max >= max {
+        scale - 1
+    } else {
+        (((clamped_max - min) / cell).floor() as i64).clamp(0, scale as i64 - 1) as u32
+    };
+
+    Some((start, end))
+}
+
 fn clamp_distance(value: f32, min: f32, max: f32) -> f32 {
     if value < min {
         min - value
@@ -96,13 +122,30 @@ impl Bounds3 {
 }
 
 impl OctreeConfig {
+    pub fn axis_scale(&self) -> u32 {
+        1_u32 << self.depth
+    }
+
     pub fn morton_for_point(&self, point: [f32; 3]) -> Option<u32> {
-        let scale = 1_u32 << self.depth;
+        let scale = self.axis_scale();
         Some(morton_encode(
             axis_index(point[0], self.bounds.min[0], self.bounds.max[0], scale)?,
             axis_index(point[1], self.bounds.min[1], self.bounds.max[1], scale)?,
             axis_index(point[2], self.bounds.min[2], self.bounds.max[2], scale)?,
         ))
+    }
+
+    pub fn leaf_ranges_for_bounds(
+        &self,
+        min: [f32; 3],
+        max: [f32; 3],
+    ) -> Option<[(u32, u32); 3]> {
+        let scale = self.axis_scale();
+        Some([
+            axis_range(min[0], max[0], self.bounds.min[0], self.bounds.max[0], scale)?,
+            axis_range(min[1], max[1], self.bounds.min[1], self.bounds.max[1], scale)?,
+            axis_range(min[2], max[2], self.bounds.min[2], self.bounds.max[2], scale)?,
+        ])
     }
 
     pub fn leaf_bounds(&self, morton: u32) -> Bounds3 {
@@ -137,5 +180,22 @@ mod tests {
         assert!(bounds.max[0] >= 0.0);
         assert!(bounds.intersects_sphere([0.0, 0.0, 0.0], 1.0));
         assert!(!bounds.intersects_sphere([200_000.0, 0.0, 0.0], 1.0));
+    }
+
+    #[test]
+    fn leaf_ranges_include_cells_touching_query_bounds() {
+        let config = OctreeConfig {
+            depth: 1,
+            bounds: Bounds3 {
+                min: [0.0, 0.0, 0.0],
+                max: [2.0, 2.0, 2.0],
+            },
+        };
+
+        let ranges = config
+            .leaf_ranges_for_bounds([1.0, 1.0, 1.0], [1.0, 1.0, 1.0])
+            .unwrap();
+
+        assert_eq!(ranges, [(0, 1), (0, 1), (0, 1)]);
     }
 }

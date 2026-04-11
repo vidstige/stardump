@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -11,12 +12,13 @@ use crate::formats::{
     OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow, decode_octree_index, decode_serving_rows,
     leaf_filename, serving_directory,
 };
-use crate::octree::OctreeConfig;
+use crate::octree::{OctreeConfig, morton_encode};
 use crate::storage::{StorageClient, StorageRoot};
 
 #[derive(Clone)]
 pub struct QueryService {
     index: OctreeIndex,
+    occupied_leaves: HashSet<u32>,
     serving_root: StorageRoot,
     storage: StorageClient,
 }
@@ -62,6 +64,36 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
+fn intersecting_leaves(
+    service: &QueryService,
+    octree: OctreeConfig,
+    center: [f32; 3],
+    radius: f32,
+) -> Vec<u32> {
+    let Some(ranges) = octree.leaf_ranges_for_bounds(
+        [center[0] - radius, center[1] - radius, center[2] - radius],
+        [center[0] + radius, center[1] + radius, center[2] + radius],
+    ) else {
+        return Vec::new();
+    };
+
+    let mut leaves = Vec::new();
+    for x in ranges[0].0..=ranges[0].1 {
+        for y in ranges[1].0..=ranges[1].1 {
+            for z in ranges[2].0..=ranges[2].1 {
+                let morton = morton_encode(x, y, z);
+                if !service.occupied_leaves.contains(&morton) {
+                    continue;
+                }
+                if octree.leaf_bounds(morton).intersects_sphere(center, radius) {
+                    leaves.push(morton);
+                }
+            }
+        }
+    }
+    leaves
+}
+
 async fn health() -> StatusCode {
     StatusCode::OK
 }
@@ -87,6 +119,7 @@ impl QueryService {
         storage.validate_serving_layout(&data_root, &index)?;
         let serving_root = data_root.join(&serving_directory(index.depth));
         Ok(Self {
+            occupied_leaves: index.leaves.iter().copied().collect(),
             index,
             serving_root,
             storage,
@@ -108,15 +141,9 @@ impl QueryService {
             bounds: self.index.bounds,
         };
         let mut matches = Vec::new();
-        let mut examined_leaves = 0;
+        let intersecting_leaves = intersecting_leaves(self, octree, center, request.radius);
 
-        for morton in &self.index.leaves {
-            let leaf_bounds = octree.leaf_bounds(*morton);
-            if !leaf_bounds.intersects_sphere(center, request.radius) {
-                continue;
-            }
-
-            examined_leaves += 1;
+        for morton in &intersecting_leaves {
             let rows = decode_serving_rows(
                 &self
                     .storage
@@ -147,7 +174,7 @@ impl QueryService {
         Ok(RadiusQueryResponse {
             returned_matches: matches.len(),
             matches,
-            examined_leaves,
+            examined_leaves: intersecting_leaves.len(),
             truncated,
         })
     }
