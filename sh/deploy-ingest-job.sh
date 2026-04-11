@@ -21,12 +21,22 @@ image_tag="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${image_tag}}"
 bucket_name="${BUCKET_NAME:-star-dump-data-${project_number}}"
 mount_root="${MOUNT_ROOT:-/mnt/gcs}"
-data_root="${DATA_ROOT:-${mount_root}/runs/gaia-source-786097-786431}"
 job_name="${INGEST_JOB_NAME:-star-dump-ingest}"
 service_account_name="${SERVICE_ACCOUNT_NAME:-star-dump-run}"
 service_account_email="${SERVICE_ACCOUNT_EMAIL:-${service_account_name}@${project_id}.iam.gserviceaccount.com}"
-default_ingest_url="${DEFAULT_INGEST_URL:-https://cdn.gea.esac.esa.int/Gaia/gdr3/gaia_source/GaiaSource_786097-786431.csv.gz}"
+ingest_url="${INGEST_URL:-${DEFAULT_INGEST_URL:-}}"
+data_root="${DATA_ROOT:-}"
 parallax_filter_mas="${PARALLAX_FILTER_MAS:-10}"
+
+if [[ -z "${ingest_url}" ]]; then
+  echo "INGEST_URL is required" >&2
+  exit 1
+fi
+
+if [[ -z "${data_root}" ]]; then
+  echo "DATA_ROOT is required, for example DATA_ROOT=${mount_root}/<run-name>" >&2
+  exit 1
+fi
 
 join_with_commas() {
   local IFS=,
@@ -40,7 +50,7 @@ else
 fi
 
 args=(
-  --input "${default_ingest_url}"
+  --input "${ingest_url}"
   --output-root "${data_root}"
   --parallax-filter-mas "${parallax_filter_mas}"
 )

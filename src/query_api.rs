@@ -4,17 +4,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use axum::Router;
 use axum::extract::{RawQuery, State};
-use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::http::StatusCode;
+use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use csv::Writer;
 
 use crate::formats::{
     OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow, decode_octree_index, decode_serving_rows,
-    leaf_filename, serving_directory,
+    indices_directory, leaf_filename,
 };
 use crate::octree::{OctreeConfig, morton_encode};
 use crate::storage::{local_path, validate_serving_layout};
@@ -23,7 +23,7 @@ use crate::storage::{local_path, validate_serving_layout};
 pub struct QueryService {
     index: OctreeIndex,
     occupied_leaves: HashSet<u32>,
-    serving_root: PathBuf,
+    indices_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -101,7 +101,10 @@ async fn query_radius(
         .await
         .map_err(|error| internal_error(error.into()))??;
     Ok((
-        [(CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"))],
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/csv; charset=utf-8"),
+        )],
         csv,
     )
         .into_response())
@@ -110,18 +113,21 @@ async fn query_radius(
 impl QueryService {
     pub fn load(root: &str) -> Result<Self> {
         let data_root = local_path(root)?;
-        let index: OctreeIndex =
-            decode_octree_index(
-                &fs::read(data_root.join(OCTREE_INDEX_FILENAME))
-                    .with_context(|| format!("failed to read {}", data_root.join(OCTREE_INDEX_FILENAME).display()))?,
-            )
-                .context("failed to parse octree index")?;
+        let index: OctreeIndex = decode_octree_index(
+            &fs::read(data_root.join(OCTREE_INDEX_FILENAME)).with_context(|| {
+                format!(
+                    "failed to read {}",
+                    data_root.join(OCTREE_INDEX_FILENAME).display()
+                )
+            })?,
+        )
+        .context("failed to parse octree index")?;
         validate_serving_layout(&data_root, &index)?;
-        let serving_root = data_root.join(&serving_directory(index.depth));
+        let indices_root = data_root.join(&indices_directory(index.depth));
         Ok(Self {
             occupied_leaves: index.leaves.iter().copied().collect(),
             index,
-            serving_root,
+            indices_root,
         })
     }
 
@@ -144,13 +150,12 @@ impl QueryService {
 
         for morton in &intersecting_leaves {
             let rows = decode_serving_rows(
-                &fs::read(self.serving_root.join(leaf_filename(*morton)))
-                    .with_context(|| {
-                        format!(
-                            "failed to read {}",
-                            self.serving_root.join(leaf_filename(*morton)).display()
-                        )
-                    })?,
+                &fs::read(self.indices_root.join(leaf_filename(*morton))).with_context(|| {
+                    format!(
+                        "failed to read {}",
+                        self.indices_root.join(leaf_filename(*morton)).display()
+                    )
+                })?,
             )?;
             for row in rows {
                 let distance = distance(center, &row);
@@ -182,7 +187,8 @@ fn parse_query_parameter(query: &str, name: &str) -> Result<Option<String>, (Sta
     let mut value = None;
     for part in query.split('&') {
         let (raw_key, raw_value) = part.split_once('=').unwrap_or((part, ""));
-        let key = urlencoding::decode(raw_key).map_err(|_| bad_request("query string is not valid percent-encoding"))?;
+        let key = urlencoding::decode(raw_key)
+            .map_err(|_| bad_request("query string is not valid percent-encoding"))?;
         if key != name {
             continue;
         }
@@ -335,7 +341,10 @@ mod tests {
             let headers = rows.headers().unwrap().clone();
             let records = rows.records().collect::<Result<Vec<_>, _>>().unwrap();
 
-            assert_eq!(headers, csv::StringRecord::from(vec!["x", "y", "z", "source_id"]));
+            assert_eq!(
+                headers,
+                csv::StringRecord::from(vec!["x", "y", "z", "source_id"])
+            );
             assert_eq!(records.len(), 3);
             assert_eq!(records[0].get(3), Some("1"));
             assert_eq!(records[1].get(3), Some("2"));

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::formats::{
-    CANONICAL_ROW_SIZE, OctreeIndex, SERVING_ROW_SIZE, SourceMetadata, leaf_filename,
-    serving_directory,
+    CANONICAL_ROW_SIZE, OctreeIndex, SERVING_ROW_SIZE, SourceMetadata, indices_directory,
+    leaf_filename,
 };
 
 fn ensure_row_multiple(size: u64, row_size: u64, label: &str) -> Result<u64> {
@@ -46,7 +46,12 @@ pub fn validate_canonical_layout(root: &Path, metadata: &SourceMetadata) -> Resu
     let mut canonical_rows = 0;
     for part in &metadata.canonical_parts {
         let size = fs::metadata(canonical_root.join(part))
-            .with_context(|| format!("failed to read metadata for {}", canonical_root.join(part).display()))?
+            .with_context(|| {
+                format!(
+                    "failed to read metadata for {}",
+                    canonical_root.join(part).display()
+                )
+            })?
             .len();
         canonical_rows += ensure_row_multiple(size, CANONICAL_ROW_SIZE, "canonical object")?;
     }
@@ -61,18 +66,18 @@ pub fn validate_canonical_layout(root: &Path, metadata: &SourceMetadata) -> Resu
 }
 
 pub fn validate_serving_layout(root: &Path, index: &OctreeIndex) -> Result<u64> {
-    let serving_root = root.join(serving_directory(index.depth));
+    let indices_root = root.join(indices_directory(index.depth));
     let mut serving_rows = 0;
     for morton in &index.leaves {
-        let size = fs::metadata(serving_root.join(leaf_filename(*morton)))
+        let size = fs::metadata(indices_root.join(leaf_filename(*morton)))
             .with_context(|| {
                 format!(
                     "failed to read metadata for {}",
-                    serving_root.join(leaf_filename(*morton)).display()
+                    indices_root.join(leaf_filename(*morton)).display()
                 )
             })?
             .len();
-        serving_rows += ensure_row_multiple(size, SERVING_ROW_SIZE, "serving object")?;
+        serving_rows += ensure_row_multiple(size, SERVING_ROW_SIZE, "index object")?;
     }
     Ok(serving_rows)
 }

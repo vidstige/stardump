@@ -39,7 +39,13 @@ fn axis_index(value: f32, min: f32, max: f32, scale: u32) -> Option<u32> {
     Some((fraction * scale as f32).floor() as u32)
 }
 
-fn axis_range(min_value: f32, max_value: f32, min: f32, max: f32, scale: u32) -> Option<(u32, u32)> {
+fn axis_range(
+    min_value: f32,
+    max_value: f32,
+    min: f32,
+    max: f32,
+    scale: u32,
+) -> Option<(u32, u32)> {
     if !min_value.is_finite() || !max_value.is_finite() || min_value > max_value {
         return None;
     }
@@ -135,16 +141,30 @@ impl OctreeConfig {
         ))
     }
 
-    pub fn leaf_ranges_for_bounds(
-        &self,
-        min: [f32; 3],
-        max: [f32; 3],
-    ) -> Option<[(u32, u32); 3]> {
+    pub fn leaf_ranges_for_bounds(&self, min: [f32; 3], max: [f32; 3]) -> Option<[(u32, u32); 3]> {
         let scale = self.axis_scale();
         Some([
-            axis_range(min[0], max[0], self.bounds.min[0], self.bounds.max[0], scale)?,
-            axis_range(min[1], max[1], self.bounds.min[1], self.bounds.max[1], scale)?,
-            axis_range(min[2], max[2], self.bounds.min[2], self.bounds.max[2], scale)?,
+            axis_range(
+                min[0],
+                max[0],
+                self.bounds.min[0],
+                self.bounds.max[0],
+                scale,
+            )?,
+            axis_range(
+                min[1],
+                max[1],
+                self.bounds.min[1],
+                self.bounds.max[1],
+                scale,
+            )?,
+            axis_range(
+                min[2],
+                max[2],
+                self.bounds.min[2],
+                self.bounds.max[2],
+                scale,
+            )?,
         ])
     }
 

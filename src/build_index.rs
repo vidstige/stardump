@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::formats::{
     CANONICAL_ROOT, CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex,
     ServingRow, SourceMetadata, append_serving_rows, decode_canonical_rows, decode_source_metadata,
-    leaf_filename, serving_directory, write_octree_index,
+    indices_directory, leaf_filename, write_octree_index,
 };
 use crate::octree::{Bounds3, OctreeConfig};
 use crate::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, maximum_distance_pc_for_quality};
@@ -19,8 +19,7 @@ pub const DEFAULT_DEPTH: u8 = 6;
 // The default quality threshold is 10, and the bright-source Gaia DR3 floor is
 // taken as 0.025 mas. That implies a minimum accepted parallax of 0.25 mas and
 // therefore a maximum indexed distance of about 4000 pc.
-pub const DEFAULT_BOUND_PC: f32 =
-    1_000.0 / (DEFAULT_PARALLAX_QUALITY_THRESHOLD * 0.025);
+pub const DEFAULT_BOUND_PC: f32 = 1_000.0 / (DEFAULT_PARALLAX_QUALITY_THRESHOLD * 0.025);
 pub const DEFAULT_BOUNDS: Bounds3 = Bounds3 {
     min: [-DEFAULT_BOUND_PC, -DEFAULT_BOUND_PC, -DEFAULT_BOUND_PC],
     max: [DEFAULT_BOUND_PC, DEFAULT_BOUND_PC, DEFAULT_BOUND_PC],
@@ -59,9 +58,7 @@ fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 
     ]
 }
 
-pub fn load_source_metadata(
-    data_root: &Path,
-) -> Result<Vec<SourceMetadata>> {
+pub fn load_source_metadata(data_root: &Path) -> Result<Vec<SourceMetadata>> {
     let canonical_root = data_root.join(CANONICAL_ROOT);
     let mut metadata = Vec::new();
     for relative in list_relative_files_recursive(&canonical_root)? {
@@ -74,7 +71,7 @@ pub fn load_source_metadata(
             &fs::read(&source_root)
                 .with_context(|| format!("failed to read {}", source_root.display()))?,
         )
-            .with_context(|| format!("failed to parse {}", source_root.display()))?;
+        .with_context(|| format!("failed to parse {}", source_root.display()))?;
         validate_canonical_layout(data_root, &source_metadata)?;
         metadata.push(source_metadata);
     }
@@ -86,13 +83,13 @@ pub fn load_source_metadata(
 fn prepare_output_root(output_root: &Path, octree_depth: u8) -> Result<()> {
     fs::create_dir_all(output_root)
         .with_context(|| format!("failed to create {}", output_root.display()))?;
-    let serving_root = output_root.join(serving_directory(octree_depth));
-    if serving_root.exists() {
-        fs::remove_dir_all(&serving_root)
-            .with_context(|| format!("failed to clear {}", serving_root.display()))?;
+    let indices_root = output_root.join(indices_directory(octree_depth));
+    if indices_root.exists() {
+        fs::remove_dir_all(&indices_root)
+            .with_context(|| format!("failed to clear {}", indices_root.display()))?;
     }
-    fs::create_dir_all(&serving_root)
-        .with_context(|| format!("failed to create {}", serving_root.display()))?;
+    fs::create_dir_all(&indices_root)
+        .with_context(|| format!("failed to create {}", indices_root.display()))?;
     Ok(())
 }
 
@@ -169,14 +166,14 @@ impl IndexBuilder {
     }
 
     pub fn append_rows(&mut self, rows: Vec<CanonicalRow>) -> Result<()> {
-        let serving_root = self.output_root.join(serving_directory(self.octree.depth));
+        let indices_root = self.output_root.join(indices_directory(self.octree.depth));
         let (mut part_serving_rows, part_rows_in_bounds) =
             serving_rows_for_canonical_part(self.octree, rows);
         self.rows_in_bounds += part_rows_in_bounds;
 
         for (morton, rows) in &mut part_serving_rows {
             rows.sort_by_key(|row| row.source_id);
-            append_serving_rows(&serving_root.join(leaf_filename(*morton)), rows)?;
+            append_serving_rows(&indices_root.join(leaf_filename(*morton)), rows)?;
             self.leaves.insert(*morton);
         }
 
@@ -281,7 +278,7 @@ mod tests {
                 decode_serving_rows(
                     &fs::read(
                         output_root
-                            .join(serving_directory(DEFAULT_DEPTH))
+                            .join(indices_directory(DEFAULT_DEPTH))
                             .join(leaf_filename(*leaf)),
                     )
                     .unwrap(),
@@ -333,7 +330,7 @@ mod tests {
         let rows = decode_serving_rows(
             &fs::read(
                 output_root
-                    .join(serving_directory(DEFAULT_DEPTH))
+                    .join(indices_directory(DEFAULT_DEPTH))
                     .join(leaf_filename(result.index.leaves[0])),
             )
             .unwrap(),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -49,6 +50,18 @@ def current_image_tag() -> str:
     return os.environ.get("IMAGE_TAG") or run(["git", "rev-parse", "--short", "HEAD"], capture_output=True)
 
 
+def run_name(urls: list[str]) -> str:
+    digest = hashlib.sha256()
+    for url in sorted(urls):
+        digest.update(url.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()[:12]
+
+
+def default_data_root(mount_root: str, urls: list[str]) -> str:
+    return f"{mount_root}/{run_name(urls)}"
+
+
 def current_settings() -> dict[str, str | int]:
     project_id = current_project_id()
     project_number = current_project_number(project_id)
@@ -60,7 +73,6 @@ def current_settings() -> dict[str, str | int]:
         "image_uri": os.environ.get("IMAGE_URI", f"gcr.io/{project_id}/star-dump:{image_tag}"),
         "bucket_name": bucket_name,
         "mount_root": mount_root,
-        "data_root": os.environ.get("DATA_ROOT", f"{mount_root}/runs/full-gaia-dr3"),
         "job_prefix": os.environ.get("JOB_PREFIX", "star-dump-ingest-full"),
         "build_index_job_name": os.environ.get("BUILD_INDEX_JOB_NAME", "star-dump-build-index"),
         "service_account_email": os.environ.get(
@@ -304,6 +316,7 @@ def start_ingest() -> None:
     urls = fetch_gaia_source_urls()
     if not urls:
         raise SystemExit("failed to fetch Gaia source URL list")
+    data_root = os.environ.get("DATA_ROOT", default_data_root(settings["mount_root"], urls))
 
     batches = batched(urls, settings["batch_size"])
     started_batches = []
@@ -315,7 +328,7 @@ def start_ingest() -> None:
             settings["service_account_email"],
             settings["bucket_name"],
             settings["mount_root"],
-            settings["data_root"],
+            data_root,
             settings["parallax_filter_mas"],
             batch_urls,
         )
@@ -334,14 +347,16 @@ def start_ingest() -> None:
         {
             "batches": started_batches,
             "build_index_job_name": settings["build_index_job_name"],
-            "data_root": settings["data_root"],
+            "data_root": data_root,
             "octree_depth": settings["octree_depth"],
+            "run_name": run_name(urls),
         }
     )
 
     print(f"gaia_source_files: {len(urls)}")
     print(f"ingest_batches: {len(batches)}")
-    print(f"data_root: {settings['data_root']}")
+    print(f"run_name: {run_name(urls)}")
+    print(f"data_root: {data_root}")
     print(f"state_file: {STATE_PATH}")
     print("next: python3 -m stardump ingest status")
     print("then: python3 -m stardump ingest status")
@@ -373,7 +388,11 @@ def start_build_index() -> None:
             print_status(rows)
             raise SystemExit("cannot start build-index before all ingest batches succeeded")
     except FileNotFoundError:
-        data_root = settings["data_root"]
+        data_root = os.environ.get("DATA_ROOT")
+        if not data_root:
+            raise SystemExit(
+                f"missing state file: {STATE_PATH}; set DATA_ROOT explicitly to run build-index"
+            )
         octree_depth = settings["octree_depth"]
 
     job_name = settings["build_index_job_name"]

@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::octree::Bounds3;
 
 pub const CANONICAL_ROOT: &str = "canonical";
-pub const SERVING_ROOT: &str = "serving";
+pub const INDICES_ROOT: &str = "indices";
 pub const CANONICAL_ROW_SIZE: u64 = 32;
 pub const SERVING_ROW_SIZE: u64 = 20;
 pub const LEAF_FILENAME_WIDTH: usize = 8;
@@ -184,8 +184,8 @@ pub fn canonical_directory_path(input_name: &str) -> String {
     format!("{CANONICAL_ROOT}/{name}")
 }
 
-pub fn serving_directory(depth: u8) -> String {
-    format!("{SERVING_ROOT}/depth={depth}")
+pub fn indices_directory(depth: u8) -> String {
+    format!("{INDICES_ROOT}/depth={depth}")
 }
 
 pub fn metadata_path_for_source(input_name: &str) -> String {

@@ -48,8 +48,9 @@ pub fn effective_parallax_uncertainty_mas(parallax_error_mas: f32, g_mag: f32) -
         return None;
     }
     Some(
-        reference_parallax_uncertainty_mas(g_mag)
-            .map_or(parallax_error_mas, |reference| parallax_error_mas.max(reference)),
+        reference_parallax_uncertainty_mas(g_mag).map_or(parallax_error_mas, |reference| {
+            parallax_error_mas.max(reference)
+        }),
     )
 }
 
