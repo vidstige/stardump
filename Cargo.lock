@@ -192,7 +192,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1254,8 +1253,6 @@ dependencies = [
  "flate2",
  "md5",
  "reqwest",
- "serde",
- "serde_json",
  "tempfile",
  "tokio",
  "tower",

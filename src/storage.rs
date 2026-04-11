@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::blocking::Client;
-use serde::Deserialize;
 
 use crate::formats::{
     CANONICAL_ROW_SIZE, OctreeIndex, SERVING_ROW_SIZE, SourceMetadata, leaf_filename,
@@ -45,23 +44,28 @@ struct CachedToken {
     expires_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
 struct AccessTokenResponse {
     access_token: String,
     expires_in: i64,
 }
 
-#[derive(Deserialize)]
 struct GcsListResponse {
     items: Option<Vec<GcsObject>>,
-    #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
 }
 
-#[derive(Deserialize)]
 struct GcsObject {
     name: String,
     size: Option<String>,
+}
+
+enum JsonValue {
+    Object(Vec<(String, JsonValue)>),
+    Array(Vec<JsonValue>),
+    String(String),
+    Number(String),
+    Bool,
+    Null,
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -99,6 +103,258 @@ fn upload_url(bucket: &str, object: &str) -> String {
         "https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=media&name={}",
         urlencoding::encode(object)
     )
+}
+
+fn skip_json_whitespace(bytes: &[u8], index: &mut usize) {
+    while matches!(bytes.get(*index), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        *index += 1;
+    }
+}
+
+fn expect_json_byte(bytes: &[u8], index: &mut usize, expected: u8) -> Result<()> {
+    skip_json_whitespace(bytes, index);
+    match bytes.get(*index) {
+        Some(&actual) if actual == expected => {
+            *index += 1;
+            Ok(())
+        }
+        Some(&actual) => bail!(
+            "expected JSON byte {:?}, found {:?}",
+            expected as char,
+            actual as char
+        ),
+        None => bail!("unexpected end of JSON input"),
+    }
+}
+
+fn parse_json_string(bytes: &[u8], index: &mut usize) -> Result<String> {
+    expect_json_byte(bytes, index, b'"')?;
+    let mut value = String::new();
+    while let Some(&byte) = bytes.get(*index) {
+        *index += 1;
+        match byte {
+            b'"' => return Ok(value),
+            b'\\' => {
+                let escaped = *bytes
+                    .get(*index)
+                    .ok_or_else(|| anyhow!("unexpected end of JSON escape"))?;
+                *index += 1;
+                match escaped {
+                    b'"' => value.push('"'),
+                    b'\\' => value.push('\\'),
+                    b'/' => value.push('/'),
+                    b'b' => value.push('\u{0008}'),
+                    b'f' => value.push('\u{000C}'),
+                    b'n' => value.push('\n'),
+                    b'r' => value.push('\r'),
+                    b't' => value.push('\t'),
+                    b'u' => {
+                        let digits = bytes
+                            .get(*index..*index + 4)
+                            .ok_or_else(|| anyhow!("unexpected end of JSON unicode escape"))?;
+                        *index += 4;
+                        let hex = std::str::from_utf8(digits)
+                            .context("JSON unicode escape is not utf-8")?;
+                        let codepoint = u16::from_str_radix(hex, 16)
+                            .context("failed to parse JSON unicode escape")?;
+                        let ch = char::from_u32(codepoint as u32)
+                            .ok_or_else(|| anyhow!("invalid JSON unicode escape"))?;
+                        value.push(ch);
+                    }
+                    _ => bail!("unsupported JSON escape sequence"),
+                }
+            }
+            _ => value.push(byte as char),
+        }
+    }
+    bail!("unterminated JSON string")
+}
+
+fn parse_json_number(bytes: &[u8], index: &mut usize) -> Result<String> {
+    skip_json_whitespace(bytes, index);
+    let start = *index;
+    while matches!(
+        bytes.get(*index),
+        Some(b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+    ) {
+        *index += 1;
+    }
+    if *index == start {
+        bail!("expected JSON number");
+    }
+    String::from_utf8(bytes[start..*index].to_vec()).context("JSON number is not utf-8")
+}
+
+fn parse_json_array(bytes: &[u8], index: &mut usize) -> Result<Vec<JsonValue>> {
+    expect_json_byte(bytes, index, b'[')?;
+    let mut values = Vec::new();
+    loop {
+        skip_json_whitespace(bytes, index);
+        if matches!(bytes.get(*index), Some(b']')) {
+            *index += 1;
+            return Ok(values);
+        }
+        values.push(parse_json_value(bytes, index)?);
+        skip_json_whitespace(bytes, index);
+        match bytes.get(*index) {
+            Some(b',') => *index += 1,
+            Some(b']') => {
+                *index += 1;
+                return Ok(values);
+            }
+            Some(&byte) => bail!("unexpected JSON byte {:?} in array", byte as char),
+            None => bail!("unexpected end of JSON array"),
+        }
+    }
+}
+
+fn parse_json_object(bytes: &[u8], index: &mut usize) -> Result<Vec<(String, JsonValue)>> {
+    expect_json_byte(bytes, index, b'{')?;
+    let mut fields = Vec::new();
+    loop {
+        skip_json_whitespace(bytes, index);
+        if matches!(bytes.get(*index), Some(b'}')) {
+            *index += 1;
+            return Ok(fields);
+        }
+        let key = parse_json_string(bytes, index)?;
+        expect_json_byte(bytes, index, b':')?;
+        let value = parse_json_value(bytes, index)?;
+        fields.push((key, value));
+        skip_json_whitespace(bytes, index);
+        match bytes.get(*index) {
+            Some(b',') => *index += 1,
+            Some(b'}') => {
+                *index += 1;
+                return Ok(fields);
+            }
+            Some(&byte) => bail!("unexpected JSON byte {:?} in object", byte as char),
+            None => bail!("unexpected end of JSON object"),
+        }
+    }
+}
+
+fn parse_json_value(bytes: &[u8], index: &mut usize) -> Result<JsonValue> {
+    skip_json_whitespace(bytes, index);
+    match bytes.get(*index) {
+        Some(b'"') => parse_json_string(bytes, index).map(JsonValue::String),
+        Some(b'{') => parse_json_object(bytes, index).map(JsonValue::Object),
+        Some(b'[') => parse_json_array(bytes, index).map(JsonValue::Array),
+        Some(b't') if bytes.get(*index..*index + 4) == Some(b"true") => {
+            *index += 4;
+            Ok(JsonValue::Bool)
+        }
+        Some(b'f') if bytes.get(*index..*index + 5) == Some(b"false") => {
+            *index += 5;
+            Ok(JsonValue::Bool)
+        }
+        Some(b'n') if bytes.get(*index..*index + 4) == Some(b"null") => {
+            *index += 4;
+            Ok(JsonValue::Null)
+        }
+        Some(b'-' | b'0'..=b'9') => parse_json_number(bytes, index).map(JsonValue::Number),
+        Some(&byte) => bail!("unexpected JSON byte {:?} at offset {}", byte as char, *index),
+        None => bail!("unexpected end of JSON input"),
+    }
+}
+
+fn parse_json(text: &str) -> Result<JsonValue> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    let value = parse_json_value(bytes, &mut index)?;
+    skip_json_whitespace(bytes, &mut index);
+    if index != bytes.len() {
+        bail!("trailing characters after JSON value");
+    }
+    Ok(value)
+}
+
+fn json_field<'a>(fields: &'a [(String, JsonValue)], name: &str) -> Option<&'a JsonValue> {
+    fields
+        .iter()
+        .find_map(|(key, value)| if key == name { Some(value) } else { None })
+}
+
+fn json_string(value: &JsonValue, label: &str) -> Result<String> {
+    match value {
+        JsonValue::String(value) => Ok(value.clone()),
+        _ => bail!("{label} is not a JSON string"),
+    }
+}
+
+fn json_optional_string(value: Option<&JsonValue>, label: &str) -> Result<Option<String>> {
+    match value {
+        Some(JsonValue::String(value)) => Ok(Some(value.clone())),
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(_) => bail!("{label} is not a JSON string"),
+    }
+}
+
+fn json_i64(value: &JsonValue, label: &str) -> Result<i64> {
+    match value {
+        JsonValue::Number(value) => value.parse().with_context(|| format!("failed to parse {label}")),
+        _ => bail!("{label} is not a JSON number"),
+    }
+}
+
+fn parse_access_token_response(text: &str) -> Result<AccessTokenResponse> {
+    let JsonValue::Object(fields) = parse_json(text)? else {
+        bail!("access token response is not a JSON object");
+    };
+    Ok(AccessTokenResponse {
+        access_token: json_string(
+            json_field(&fields, "access_token")
+                .ok_or_else(|| anyhow!("missing access_token"))?,
+            "access_token",
+        )?,
+        expires_in: json_i64(
+            json_field(&fields, "expires_in").ok_or_else(|| anyhow!("missing expires_in"))?,
+            "expires_in",
+        )?,
+    })
+}
+
+fn parse_gcs_object(text: &str) -> Result<GcsObject> {
+    let JsonValue::Object(fields) = parse_json(text)? else {
+        bail!("GCS object response is not a JSON object");
+    };
+    Ok(GcsObject {
+        name: json_string(
+            json_field(&fields, "name").ok_or_else(|| anyhow!("missing name"))?,
+            "name",
+        )?,
+        size: json_optional_string(json_field(&fields, "size"), "size")?,
+    })
+}
+
+fn parse_gcs_list_response(text: &str) -> Result<GcsListResponse> {
+    let JsonValue::Object(fields) = parse_json(text)? else {
+        bail!("GCS list response is not a JSON object");
+    };
+    let items = match json_field(&fields, "items") {
+        Some(JsonValue::Array(items)) => {
+            let mut objects = Vec::with_capacity(items.len());
+            for item in items {
+                let JsonValue::Object(item_fields) = item else {
+                    bail!("GCS list item is not a JSON object");
+                };
+                objects.push(GcsObject {
+                    name: json_string(
+                        json_field(item_fields, "name").ok_or_else(|| anyhow!("missing name"))?,
+                        "name",
+                    )?,
+                    size: json_optional_string(json_field(item_fields, "size"), "size")?,
+                });
+            }
+            Some(objects)
+        }
+        Some(JsonValue::Null) | None => None,
+        Some(_) => bail!("items is not a JSON array"),
+    };
+    Ok(GcsListResponse {
+        items,
+        next_page_token: json_optional_string(json_field(&fields, "nextPageToken"), "nextPageToken")?,
+    })
 }
 
 impl StorageRoot {
@@ -177,9 +433,12 @@ impl StorageClient {
                 let response = response
                     .error_for_status()
                     .with_context(|| format!("failed to read {}", root.display()))?;
-                let object: GcsObject = response
-                    .json()
-                    .with_context(|| format!("failed to parse {}", root.display()))?;
+                let object = parse_gcs_object(
+                    &response
+                        .text()
+                        .with_context(|| format!("failed to read {}", root.display()))?,
+                )
+                .with_context(|| format!("failed to parse {}", root.display()))?;
                 object
                     .size
                     .ok_or_else(|| anyhow!("missing object size for {}", root.display()))?
@@ -279,9 +538,12 @@ impl StorageClient {
                     let response = response
                         .error_for_status()
                         .with_context(|| format!("failed to list {}", root.display()))?;
-                    let listing: GcsListResponse = response
-                        .json()
-                        .with_context(|| format!("failed to parse {}", root.display()))?;
+                    let listing = parse_gcs_list_response(
+                        &response
+                            .text()
+                            .with_context(|| format!("failed to read {}", root.display()))?,
+                    )
+                    .with_context(|| format!("failed to parse {}", root.display()))?;
 
                     if let Some(items) = listing.items {
                         for item in items {
@@ -386,9 +648,12 @@ impl StorageClient {
         let response = response
             .error_for_status()
             .context("failed to fetch metadata server token")?;
-        let token: AccessTokenResponse = response
-            .json()
-            .context("failed to parse metadata server token")?;
+        let token = parse_access_token_response(
+            &response
+                .text()
+                .context("failed to read metadata server token")?,
+        )
+        .context("failed to parse metadata server token")?;
         Ok(CachedToken {
             value: token.access_token,
             expires_at: Utc::now() + ChronoDuration::seconds(token.expires_in),

@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
+use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
-use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::Router;
+use csv::Writer;
 
 use crate::formats::{
     OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow, decode_octree_index, decode_serving_rows,
@@ -23,7 +25,7 @@ pub struct QueryService {
     storage: StorageClient,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct RadiusQueryRequest {
     pub x: f32,
     pub y: f32,
@@ -32,21 +34,12 @@ pub struct RadiusQueryRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq)]
 pub struct RadiusQueryMatch {
-    pub source_id: u64,
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    pub distance: f32,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct RadiusQueryResponse {
-    pub matches: Vec<RadiusQueryMatch>,
-    pub examined_leaves: usize,
-    pub returned_matches: usize,
-    pub truncated: bool,
+    pub source_id: u64,
 }
 
 fn distance(center: [f32; 3], row: &ServingRow) -> f32 {
@@ -100,13 +93,17 @@ async fn health() -> StatusCode {
 
 async fn query_radius(
     State(service): State<Arc<QueryService>>,
-    Json(request): Json<RadiusQueryRequest>,
-) -> Result<Json<RadiusQueryResponse>, (StatusCode, String)> {
-    let response = tokio::task::spawn_blocking(move || query_radius_checked(&service, request))
+    RawQuery(query): RawQuery,
+) -> Result<Response, (StatusCode, String)> {
+    let request = parse_query_request(query.as_deref())?;
+    let csv = tokio::task::spawn_blocking(move || query_radius_csv(&service, request))
         .await
         .map_err(|error| internal_error(error.into()))??;
-    let response = Json(response);
-    Ok(response)
+    Ok((
+        [(CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"))],
+        csv,
+    )
+        .into_response())
 }
 
 impl QueryService {
@@ -126,7 +123,7 @@ impl QueryService {
         })
     }
 
-    pub fn query_radius(&self, request: RadiusQueryRequest) -> Result<RadiusQueryResponse> {
+    pub fn query_radius(&self, request: RadiusQueryRequest) -> Result<Vec<RadiusQueryMatch>> {
         if !request.radius.is_finite() || request.radius <= 0.0 {
             bail!("radius must be a positive finite number");
         }
@@ -153,38 +150,73 @@ impl QueryService {
                 let distance = distance(center, &row);
                 if distance <= request.radius {
                     matches.push(RadiusQueryMatch {
-                        source_id: row.source_id,
                         x: row.x,
                         y: row.y,
                         z: row.z,
-                        distance,
+                        source_id: row.source_id,
                     });
                 }
             }
         }
 
-        matches.sort_by(|left, right| {
-            left.source_id
-                .cmp(&right.source_id)
-                .then_with(|| left.distance.total_cmp(&right.distance))
-        });
-        let truncated = matches.len() > limit;
+        matches.sort_by(|left, right| left.source_id.cmp(&right.source_id));
         matches.truncate(limit);
-
-        Ok(RadiusQueryResponse {
-            returned_matches: matches.len(),
-            matches,
-            examined_leaves: intersecting_leaves.len(),
-            truncated,
-        })
+        Ok(matches)
     }
 }
 
 pub fn build_app(service: Arc<QueryService>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/query/radius", post(query_radius))
+        .route("/query/radius", get(query_radius))
         .with_state(service)
+}
+
+fn parse_query_parameter(query: &str, name: &str) -> Result<Option<String>, (StatusCode, String)> {
+    let mut value = None;
+    for part in query.split('&') {
+        let (raw_key, raw_value) = part.split_once('=').unwrap_or((part, ""));
+        let key = urlencoding::decode(raw_key).map_err(|_| bad_request("query string is not valid percent-encoding"))?;
+        if key != name {
+            continue;
+        }
+        if value.is_some() {
+            return Err(bad_request(format!("duplicate query parameter {name}")));
+        }
+        let decoded = urlencoding::decode(raw_value)
+            .map_err(|_| bad_request("query string is not valid percent-encoding"))?;
+        value = Some(decoded.into_owned());
+    }
+    Ok(value)
+}
+
+fn parse_required_f32(query: &str, name: &str) -> Result<f32, (StatusCode, String)> {
+    let value = parse_query_parameter(query, name)?
+        .ok_or_else(|| bad_request(format!("missing query parameter {name}")))?;
+    value
+        .parse()
+        .map_err(|_| bad_request(format!("query parameter {name} must be a number")))
+}
+
+fn parse_optional_usize(query: &str, name: &str) -> Result<Option<usize>, (StatusCode, String)> {
+    let Some(value) = parse_query_parameter(query, name)? else {
+        return Ok(None);
+    };
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| bad_request(format!("query parameter {name} must be an integer")))
+}
+
+fn parse_query_request(query: Option<&str>) -> Result<RadiusQueryRequest, (StatusCode, String)> {
+    let query = query.unwrap_or_default();
+    Ok(RadiusQueryRequest {
+        x: parse_required_f32(query, "x")?,
+        y: parse_required_f32(query, "y")?,
+        z: parse_required_f32(query, "z")?,
+        radius: parse_required_f32(query, "r")?,
+        limit: parse_optional_usize(query, "limit")?,
+    })
 }
 
 pub fn validate_request(request: &RadiusQueryRequest) -> Result<(), (StatusCode, String)> {
@@ -200,12 +232,29 @@ pub fn validate_request(request: &RadiusQueryRequest) -> Result<(), (StatusCode,
     Ok(())
 }
 
-pub fn query_radius_checked(
+fn encode_matches_csv(matches: &[RadiusQueryMatch]) -> Result<String, (StatusCode, String)> {
+    let mut writer = Writer::from_writer(Vec::new());
+    writer
+        .write_record(["x", "y", "z", "source_id"])
+        .map_err(|error| internal_error(error.into()))?;
+    for row in matches {
+        writer
+            .serialize((row.x, row.y, row.z, row.source_id))
+            .map_err(|error| internal_error(error.into()))?;
+    }
+    let bytes = writer
+        .into_inner()
+        .map_err(|error| internal_error(error.into_error().into()))?;
+    String::from_utf8(bytes).map_err(|error| internal_error(error.into()))
+}
+
+pub fn query_radius_csv(
     service: &QueryService,
     request: RadiusQueryRequest,
-) -> Result<RadiusQueryResponse, (StatusCode, String)> {
+) -> Result<String, (StatusCode, String)> {
     validate_request(&request)?;
-    service.query_radius(request).map_err(internal_error)
+    let matches = service.query_radius(request).map_err(internal_error)?;
+    encode_matches_csv(&matches)
 }
 
 #[cfg(test)]
@@ -262,12 +311,9 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let request = Request::builder()
-                .method("POST")
-                .uri("/query/radius")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"x":0.0,"y":0.0,"z":0.0,"radius":11.0,"limit":10}"#,
-                ))
+                .method("GET")
+                .uri("/query/radius?x=0.0&y=0.0&z=0.0&r=11.0&limit=10")
+                .body(Body::empty())
                 .unwrap();
 
             let response = {
@@ -279,12 +325,15 @@ mod tests {
             let bytes = body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
-            let payload: RadiusQueryResponse = serde_json::from_slice(&bytes).unwrap();
-            let source_ids: Vec<u64> = payload.matches.iter().map(|item| item.source_id).collect();
+            let mut rows = csv::Reader::from_reader(bytes.as_ref());
+            let headers = rows.headers().unwrap().clone();
+            let records = rows.records().collect::<Result<Vec<_>, _>>().unwrap();
 
-            assert_eq!(source_ids, vec![1, 2, 3]);
-            assert_eq!(payload.returned_matches, 3);
-            assert!(!payload.truncated);
+            assert_eq!(headers, csv::StringRecord::from(vec!["x", "y", "z", "source_id"]));
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0].get(3), Some("1"));
+            assert_eq!(records[1].get(3), Some("2"));
+            assert_eq!(records[2].get(3), Some("3"));
         });
         drop(service);
     }
@@ -341,20 +390,6 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(response_a.returned_matches, response_b.returned_matches);
-        assert_eq!(response_a.examined_leaves, response_b.examined_leaves);
-        assert_eq!(response_a.truncated, response_b.truncated);
-        assert_eq!(
-            response_a
-                .matches
-                .iter()
-                .map(|item| item.source_id)
-                .collect::<Vec<_>>(),
-            response_b
-                .matches
-                .iter()
-                .map(|item| item.source_id)
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(response_a, response_b);
     }
 }
