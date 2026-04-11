@@ -18,6 +18,8 @@ const SIGMA_G17_MAS: f32 = 0.070;
 const SIGMA_G20_MAS: f32 = 0.500;
 const SIGMA_G21_MAS: f32 = 1.300;
 
+pub const DEFAULT_PARALLAX_QUALITY_THRESHOLD: f32 = 10.0;
+
 fn interpolate_log10_sigma(g_mag: f32, g0: f32, sigma0: f32, g1: f32, sigma1: f32) -> f32 {
     let slope = (sigma1.log10() - sigma0.log10()) / (g1 - g0);
     10_f32.powf(sigma0.log10() + slope * (g_mag - g0))
@@ -66,6 +68,10 @@ pub fn passes_parallax_quality(
 ) -> bool {
     parallax_quality(parallax_mas, parallax_error_mas, g_mag)
         .is_some_and(|quality| quality >= minimum_quality)
+}
+
+pub fn maximum_distance_pc_for_quality(minimum_quality: f32) -> f32 {
+    1_000.0 / (minimum_quality * SIGMA_G15_MAS)
 }
 
 #[cfg(test)]

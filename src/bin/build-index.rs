@@ -2,10 +2,10 @@ use clap::Parser;
 use tempfile::tempdir;
 
 use star_dump::build_index::{
-    BuildIndexConfig, BuildIndexResult, DEFAULT_BOUNDS, DEFAULT_DEPTH, IndexBuilder,
+    BuildIndexConfig, BuildIndexResult, DEFAULT_DEPTH, IndexBuilder, bounds_for_quality_threshold,
     load_source_metadata, read_canonical_part_rows, run_build_index,
 };
-use star_dump::quality::passes_parallax_quality;
+use star_dump::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, passes_parallax_quality};
 use star_dump::storage::{StorageClient, StorageRoot};
 
 #[derive(Parser)]
@@ -16,7 +16,7 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_DEPTH)]
     octree_depth: u8,
 
-    #[arg(long, default_value_t = 10.0)]
+    #[arg(long, default_value_t = DEFAULT_PARALLAX_QUALITY_THRESHOLD)]
     quality_threshold: f32,
 }
 
@@ -35,13 +35,17 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
         return run_build_index(BuildIndexConfig {
             data_root: args.data_root,
             octree_depth: args.octree_depth,
-            bounds: DEFAULT_BOUNDS,
+            bounds: bounds_for_quality_threshold(args.quality_threshold),
         });
     }
 
     match data_root {
         StorageRoot::Local(ref path) => {
-            let mut builder = IndexBuilder::new(path, args.octree_depth, DEFAULT_BOUNDS)?;
+            let mut builder = IndexBuilder::new(
+                path,
+                args.octree_depth,
+                bounds_for_quality_threshold(args.quality_threshold),
+            )?;
             for source in &metadata {
                 for part in &source.canonical_parts {
                     let rows = read_canonical_part_rows(&storage, &data_root, source, part)?
@@ -68,8 +72,11 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
         }
         ref root @ StorageRoot::Gcs(_) => {
             let local_output = tempdir()?;
-            let mut builder =
-                IndexBuilder::new(local_output.path(), args.octree_depth, DEFAULT_BOUNDS)?;
+            let mut builder = IndexBuilder::new(
+                local_output.path(),
+                args.octree_depth,
+                bounds_for_quality_threshold(args.quality_threshold),
+            )?;
             for source in &metadata {
                 for part in &source.canonical_parts {
                     let rows = read_canonical_part_rows(&storage, &data_root, source, part)?

@@ -11,13 +11,27 @@ use crate::formats::{
     leaf_filename, serving_directory, write_octree_index,
 };
 use crate::octree::{Bounds3, OctreeConfig};
+use crate::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, maximum_distance_pc_for_quality};
 use crate::storage::{StorageClient, StorageRoot};
 
 pub const DEFAULT_DEPTH: u8 = 6;
+// The default quality threshold is 10, and the bright-source Gaia DR3 floor is
+// taken as 0.025 mas. That implies a minimum accepted parallax of 0.25 mas and
+// therefore a maximum indexed distance of about 4000 pc.
+pub const DEFAULT_BOUND_PC: f32 =
+    1_000.0 / (DEFAULT_PARALLAX_QUALITY_THRESHOLD * 0.025);
 pub const DEFAULT_BOUNDS: Bounds3 = Bounds3 {
-    min: [-100_000.0, -100_000.0, -100_000.0],
-    max: [100_000.0, 100_000.0, 100_000.0],
+    min: [-DEFAULT_BOUND_PC, -DEFAULT_BOUND_PC, -DEFAULT_BOUND_PC],
+    max: [DEFAULT_BOUND_PC, DEFAULT_BOUND_PC, DEFAULT_BOUND_PC],
 };
+
+pub fn bounds_for_quality_threshold(minimum_quality: f32) -> Bounds3 {
+    let bound = maximum_distance_pc_for_quality(minimum_quality);
+    Bounds3 {
+        min: [-bound, -bound, -bound],
+        max: [bound, bound, bound],
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct BuildIndexConfig {
