@@ -13,7 +13,7 @@ use crate::formats::{
     CanonicalRow, METADATA_FILENAME, SourceCounts, SourceMetadata, canonical_directory_path,
     decode_source_metadata, metadata_path_for_source, write_canonical_rows, write_source_metadata,
 };
-use crate::storage::{StorageClient, StorageRoot};
+use crate::storage::{local_path, read_optional_bytes, validate_canonical_layout};
 
 #[derive(Clone, Debug)]
 pub struct IngestConfig {
@@ -235,14 +235,12 @@ fn metadata_matches(
 }
 
 fn load_existing_source(
-    storage: &StorageClient,
-    output_root: &StorageRoot,
+    output_root: &Path,
     staged_input: &StagedInput,
     parallax_filter_mas: Option<f32>,
 ) -> Result<Option<SourceMetadata>> {
-    let Some(metadata_bytes) = storage.read_optional_bytes(
-        &output_root.join(&metadata_path_for_source(&staged_input.input_name)),
-    )?
+    let Some(metadata_bytes) =
+        read_optional_bytes(&output_root.join(metadata_path_for_source(&staged_input.input_name)))?
     else {
         return Ok(None);
     };
@@ -252,10 +250,7 @@ fn load_existing_source(
     if !metadata_matches(&metadata, staged_input, parallax_filter_mas) {
         return Ok(None);
     }
-    if storage
-        .validate_canonical_layout(output_root, &metadata)
-        .is_err()
-    {
+    if validate_canonical_layout(output_root, &metadata).is_err() {
         return Ok(None);
     }
     Ok(Some(metadata))
@@ -298,15 +293,12 @@ fn write_source_output(
 }
 
 fn ingest_one(
-    storage: &StorageClient,
-    output_root: &StorageRoot,
+    output_root: &Path,
     input: &str,
     parallax_filter_mas: Option<f32>,
 ) -> Result<SourceMetadata> {
     let staged_input = stage_input(input)?;
-    if let Some(metadata) =
-        load_existing_source(storage, output_root, &staged_input, parallax_filter_mas)?
-    {
+    if let Some(metadata) = load_existing_source(output_root, &staged_input, parallax_filter_mas)? {
         return Ok(metadata);
     }
 
@@ -314,52 +306,27 @@ fn ingest_one(
     let (rows, counts) = read_canonical_rows(&staged_input.path, parallax_filter_mas)?;
     let finished_at = Utc::now().to_rfc3339();
 
-    match output_root {
-        StorageRoot::Local(path) => {
-            fs::create_dir_all(path)
-                .with_context(|| format!("failed to create {}", path.display()))?;
-            write_source_output(
-                path,
-                &staged_input,
-                parallax_filter_mas,
-                &rows,
-                counts,
-                started_at,
-                finished_at,
-            )
-        }
-        root @ StorageRoot::Gcs(_) => {
-            let local_output = tempdir().context("failed to create temporary output directory")?;
-            let metadata = write_source_output(
-                local_output.path(),
-                &staged_input,
-                parallax_filter_mas,
-                &rows,
-                counts,
-                started_at,
-                finished_at,
-            )?;
-            storage.upload_directory(local_output.path(), root)?;
-            storage.validate_canonical_layout(root, &metadata)?;
-            Ok(metadata)
-        }
-    }
+    fs::create_dir_all(output_root)
+        .with_context(|| format!("failed to create {}", output_root.display()))?;
+    write_source_output(
+        output_root,
+        &staged_input,
+        parallax_filter_mas,
+        &rows,
+        counts,
+        started_at,
+        finished_at,
+    )
 }
 
 pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
     if config.inputs.is_empty() {
         bail!("at least one --input is required");
     }
-    let output_root = StorageRoot::parse(&config.output_root)?;
-    let storage = StorageClient::new()?;
+    let output_root = local_path(&config.output_root)?;
     let mut metadata = Vec::with_capacity(config.inputs.len());
     for input in &config.inputs {
-        metadata.push(ingest_one(
-            &storage,
-            &output_root,
-            input,
-            config.parallax_filter_mas,
-        )?);
+        metadata.push(ingest_one(&output_root, input, config.parallax_filter_mas)?);
     }
     Ok(IngestResult { metadata })
 }

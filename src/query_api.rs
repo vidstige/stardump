@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -15,14 +17,13 @@ use crate::formats::{
     leaf_filename, serving_directory,
 };
 use crate::octree::{OctreeConfig, morton_encode};
-use crate::storage::{StorageClient, StorageRoot};
+use crate::storage::{local_path, validate_serving_layout};
 
 #[derive(Clone)]
 pub struct QueryService {
     index: OctreeIndex,
     occupied_leaves: HashSet<u32>,
-    serving_root: StorageRoot,
-    storage: StorageClient,
+    serving_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,18 +109,19 @@ async fn query_radius(
 
 impl QueryService {
     pub fn load(root: &str) -> Result<Self> {
-        let data_root = StorageRoot::parse(root)?;
-        let storage = StorageClient::new()?;
+        let data_root = local_path(root)?;
         let index: OctreeIndex =
-            decode_octree_index(&storage.read_bytes(&data_root.join(OCTREE_INDEX_FILENAME))?)
+            decode_octree_index(
+                &fs::read(data_root.join(OCTREE_INDEX_FILENAME))
+                    .with_context(|| format!("failed to read {}", data_root.join(OCTREE_INDEX_FILENAME).display()))?,
+            )
                 .context("failed to parse octree index")?;
-        storage.validate_serving_layout(&data_root, &index)?;
+        validate_serving_layout(&data_root, &index)?;
         let serving_root = data_root.join(&serving_directory(index.depth));
         Ok(Self {
             occupied_leaves: index.leaves.iter().copied().collect(),
             index,
             serving_root,
-            storage,
         })
     }
 
@@ -142,9 +144,13 @@ impl QueryService {
 
         for morton in &intersecting_leaves {
             let rows = decode_serving_rows(
-                &self
-                    .storage
-                    .read_bytes(&self.serving_root.join(&leaf_filename(*morton)))?,
+                &fs::read(self.serving_root.join(leaf_filename(*morton)))
+                    .with_context(|| {
+                        format!(
+                            "failed to read {}",
+                            self.serving_root.join(leaf_filename(*morton)).display()
+                        )
+                    })?,
             )?;
             for row in rows {
                 let distance = distance(center, &row);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -30,10 +31,6 @@ def env_int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
-def join_with_commas(args: list[str]) -> str:
-    return ",".join(args)
-
-
 def current_project_id() -> str:
     project_id = run(["gcloud", "config", "get-value", "project"], capture_output=True)
     if not project_id or project_id == "(unset)":
@@ -56,11 +53,14 @@ def current_settings() -> dict[str, str | int]:
     project_id = current_project_id()
     project_number = current_project_number(project_id)
     image_tag = current_image_tag()
-    bucket_uri = os.environ.get("BUCKET_URI", f"gs://star-dump-data-{project_number}")
+    bucket_name = os.environ.get("BUCKET_NAME", f"star-dump-data-{project_number}")
+    mount_root = os.environ.get("MOUNT_ROOT", "/mnt/gcs")
 
     return {
         "image_uri": os.environ.get("IMAGE_URI", f"gcr.io/{project_id}/star-dump:{image_tag}"),
-        "data_root": os.environ.get("DATA_ROOT", f"{bucket_uri}/runs/full-gaia-dr3"),
+        "bucket_name": bucket_name,
+        "mount_root": mount_root,
+        "data_root": os.environ.get("DATA_ROOT", f"{mount_root}/runs/full-gaia-dr3"),
         "job_prefix": os.environ.get("JOB_PREFIX", "star-dump-ingest-full"),
         "build_index_job_name": os.environ.get("BUILD_INDEX_JOB_NAME", "star-dump-build-index"),
         "service_account_email": os.environ.get(
@@ -71,6 +71,10 @@ def current_settings() -> dict[str, str | int]:
         "octree_depth": env_int("OCTREE_DEPTH", 6),
         "batch_size": env_int("BATCH_SIZE", 32),
     }
+
+
+def join_with_commas(args: list[str]) -> str:
+    return ",".join(args)
 
 
 def job_exists(name: str) -> bool:
@@ -151,12 +155,19 @@ def fetch_gaia_source_urls() -> list[str]:
             raise SystemExit("listing is truncated but NextMarker is missing")
 
 
-def ingest_job_args(image_uri: str, service_account_email: str, data_root: str, parallax_filter_mas: int, urls: list[str]) -> list[str]:
+def ingest_job_args(
+    image_uri: str,
+    service_account_email: str,
+    bucket_name: str,
+    mount_root: str,
+    data_root: str,
+    parallax_filter_mas: int,
+    urls: list[str],
+) -> list[str]:
     ingest_args = []
     for url in urls:
         ingest_args.extend(["--input", url])
     ingest_args.extend(["--output-root", data_root, "--parallax-filter-mas", str(parallax_filter_mas)])
-
     return [
         "--image",
         image_uri,
@@ -166,13 +177,24 @@ def ingest_job_args(image_uri: str, service_account_email: str, data_root: str, 
         "1Gi",
         "--task-timeout=3600",
         "--max-retries=0",
+        "--add-volume",
+        f"name=gcs,type=cloud-storage,bucket={bucket_name},readonly=false",
+        "--add-volume-mount",
+        f"volume=gcs,mount-path={mount_root}",
         "--command",
         "/usr/local/bin/ingest",
         "--args=" + join_with_commas(ingest_args),
     ]
 
 
-def build_index_job_args(image_uri: str, service_account_email: str, data_root: str, octree_depth: int) -> list[str]:
+def build_index_job_args(
+    image_uri: str,
+    service_account_email: str,
+    bucket_name: str,
+    mount_root: str,
+    data_root: str,
+    octree_depth: int,
+) -> list[str]:
     return [
         "--image",
         image_uri,
@@ -182,6 +204,10 @@ def build_index_job_args(image_uri: str, service_account_email: str, data_root: 
         "1Gi",
         "--task-timeout=3600",
         "--max-retries=0",
+        "--add-volume",
+        f"name=gcs,type=cloud-storage,bucket={bucket_name},readonly=false",
+        "--add-volume-mount",
+        f"volume=gcs,mount-path={mount_root}",
         "--command",
         "/usr/local/bin/build-index",
         "--args=" + join_with_commas(["--data-root", data_root, "--octree-depth", str(octree_depth)]),
@@ -287,6 +313,8 @@ def start_ingest() -> None:
         job_args = ingest_job_args(
             settings["image_uri"],
             settings["service_account_email"],
+            settings["bucket_name"],
+            settings["mount_root"],
             settings["data_root"],
             settings["parallax_filter_mas"],
             batch_urls,
@@ -354,6 +382,8 @@ def start_build_index() -> None:
         build_index_job_args(
             settings["image_uri"],
             settings["service_account_email"],
+            settings["bucket_name"],
+            settings["mount_root"],
             data_root,
             octree_depth,
         ),

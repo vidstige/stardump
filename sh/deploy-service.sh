@@ -19,8 +19,9 @@ fi
 project_number="$(gcloud projects describe "${project_id}" --format='value(projectNumber)')"
 image_tag="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${image_tag}}"
-bucket_uri="${BUCKET_URI:-gs://star-dump-data-${project_number}}"
-data_root="${DATA_ROOT:-${bucket_uri}/runs/gaia-source-786097-786431}"
+bucket_name="${BUCKET_NAME:-star-dump-data-${project_number}}"
+mount_root="${MOUNT_ROOT:-/mnt/gcs}"
+data_root="${DATA_ROOT:-${mount_root}/runs/gaia-source-786097-786431}"
 service_name="${SERVICE_NAME:-star-dump-query-api}"
 service_account_name="${SERVICE_ACCOUNT_NAME:-star-dump-run}"
 service_account_email="${SERVICE_ACCOUNT_EMAIL:-${service_account_name}@${project_id}.iam.gserviceaccount.com}"
@@ -31,6 +32,8 @@ gcloud run deploy "${service_name}" \
   --service-account "${service_account_email}" \
   --port 8080 \
   --memory 1Gi \
+  --add-volume "name=gcs,type=cloud-storage,bucket=${bucket_name},readonly=true" \
+  --add-volume-mount "volume=gcs,mount-path=${mount_root}" \
   --command /usr/local/bin/query-api \
   --args="--data-root,${data_root},--bind,0.0.0.0:8080" \
   --allow-unauthenticated

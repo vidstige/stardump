@@ -19,7 +19,8 @@ if [[ -z "${region}" || "${region}" == "(unset)" ]]; then
 fi
 
 project_number="$(gcloud projects describe "${project_id}" --format='value(projectNumber)')"
-bucket_uri="${BUCKET_URI:-gs://star-dump-data-${project_number}}"
+bucket_name="${BUCKET_NAME:-star-dump-data-${project_number}}"
+bucket_uri="gs://${bucket_name}"
 service_account_name="${SERVICE_ACCOUNT_NAME:-star-dump-run}"
 service_account_email="${SERVICE_ACCOUNT_EMAIL:-${service_account_name}@${project_id}.iam.gserviceaccount.com}"
 

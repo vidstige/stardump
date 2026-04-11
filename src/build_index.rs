@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use tempfile::tempdir;
 
 use crate::formats::{
     CANONICAL_ROOT, CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex,
@@ -12,7 +11,9 @@ use crate::formats::{
 };
 use crate::octree::{Bounds3, OctreeConfig};
 use crate::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, maximum_distance_pc_for_quality};
-use crate::storage::{StorageClient, StorageRoot};
+use crate::storage::{
+    list_relative_files_recursive, local_path, validate_canonical_layout, validate_serving_layout,
+};
 
 pub const DEFAULT_DEPTH: u8 = 6;
 // The default quality threshold is 10, and the bright-source Gaia DR3 floor is
@@ -59,20 +60,22 @@ fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 
 }
 
 pub fn load_source_metadata(
-    storage: &StorageClient,
-    data_root: &StorageRoot,
+    data_root: &Path,
 ) -> Result<Vec<SourceMetadata>> {
     let canonical_root = data_root.join(CANONICAL_ROOT);
     let mut metadata = Vec::new();
-    for relative in storage.list_relative_files_recursive(&canonical_root)? {
+    for relative in list_relative_files_recursive(&canonical_root)? {
         if !relative.ends_with(&format!("/{METADATA_FILENAME}")) {
             continue;
         }
 
         let source_root = canonical_root.join(&relative);
-        let source_metadata = decode_source_metadata(&storage.read_bytes(&source_root)?)
+        let source_metadata = decode_source_metadata(
+            &fs::read(&source_root)
+                .with_context(|| format!("failed to read {}", source_root.display()))?,
+        )
             .with_context(|| format!("failed to parse {}", source_root.display()))?;
-        storage.validate_canonical_layout(data_root, &source_metadata)?;
+        validate_canonical_layout(data_root, &source_metadata)?;
         metadata.push(source_metadata);
     }
 
@@ -118,13 +121,15 @@ fn serving_rows_for_canonical_part(
 }
 
 pub fn read_canonical_part_rows(
-    storage: &StorageClient,
-    data_root: &StorageRoot,
+    data_root: &Path,
     source: &SourceMetadata,
     part: &str,
 ) -> Result<Vec<CanonicalRow>> {
     let canonical_root = data_root.join(&source.canonical_directory);
-    decode_canonical_rows(&storage.read_bytes(&canonical_root.join(part))?)
+    decode_canonical_rows(
+        &fs::read(canonical_root.join(part))
+            .with_context(|| format!("failed to read {}", canonical_root.join(part).display()))?,
+    )
 }
 
 fn write_index_output(
@@ -193,48 +198,25 @@ pub fn run_build_index(config: BuildIndexConfig) -> Result<BuildIndexResult> {
     if config.octree_depth == 0 || config.octree_depth > 10 {
         bail!("octree depth must be between 1 and 10");
     }
-    let data_root = StorageRoot::parse(&config.data_root)?;
-    let storage = StorageClient::new()?;
-    let metadata = load_source_metadata(&storage, &data_root)?;
+    let data_root = local_path(&config.data_root)?;
+    let metadata = load_source_metadata(&data_root)?;
     if metadata.is_empty() {
         bail!("no canonical source metadata found under {CANONICAL_ROOT}");
     }
 
-    match data_root {
-        StorageRoot::Local(ref path) => {
-            let mut builder = IndexBuilder::new(path, config.octree_depth, config.bounds)?;
-            for source in &metadata {
-                for part in &source.canonical_parts {
-                    builder.append_rows(read_canonical_part_rows(&storage, &data_root, source, part)?)?;
-                }
-            }
-            let (index, rows_in_bounds) = builder.finish()?;
-            storage.validate_serving_layout(&data_root, &index)?;
-            return Ok(BuildIndexResult {
-                index,
-                sources_seen: metadata.len(),
-                rows_in_bounds,
-            });
-        }
-        ref root @ StorageRoot::Gcs(_) => {
-            let local_output = tempdir().context("failed to create temporary output directory")?;
-            let mut builder =
-                IndexBuilder::new(local_output.path(), config.octree_depth, config.bounds)?;
-            for source in &metadata {
-                for part in &source.canonical_parts {
-                    builder.append_rows(read_canonical_part_rows(&storage, &data_root, source, part)?)?;
-                }
-            }
-            let (index, rows_in_bounds) = builder.finish()?;
-            storage.upload_directory(local_output.path(), &root)?;
-            storage.validate_serving_layout(&data_root, &index)?;
-            return Ok(BuildIndexResult {
-                index,
-                sources_seen: metadata.len(),
-                rows_in_bounds,
-            });
+    let mut builder = IndexBuilder::new(&data_root, config.octree_depth, config.bounds)?;
+    for source in &metadata {
+        for part in &source.canonical_parts {
+            builder.append_rows(read_canonical_part_rows(&data_root, source, part)?)?;
         }
     }
+    let (index, rows_in_bounds) = builder.finish()?;
+    validate_serving_layout(&data_root, &index)?;
+    Ok(BuildIndexResult {
+        index,
+        sources_seen: metadata.len(),
+        rows_in_bounds,
+    })
 }
 
 #[cfg(test)]
