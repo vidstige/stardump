@@ -415,14 +415,37 @@ pub fn write_serving_rows(path: &Path, rows: &[ServingRow]) -> Result<()> {
     let file =
         fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut writer = BufWriter::new(file);
+    write_serving_rows_to_writer(path, rows, &mut writer)?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    Ok(())
+}
+
+pub fn append_serving_rows(path: &Path, rows: &[ServingRow]) -> Result<()> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    write_serving_rows_to_writer(path, rows, &mut writer)?;
+    writer
+        .flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    Ok(())
+}
+
+fn write_serving_rows_to_writer(
+    path: &Path,
+    rows: &[ServingRow],
+    writer: &mut BufWriter<fs::File>,
+) -> Result<()> {
     for row in rows {
         writer
             .write_all(&serving_row_bytes(row))
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
-    writer
-        .flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
     Ok(())
 }
 
