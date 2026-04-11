@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -14,7 +13,6 @@ CDN_BASE = "https://cdn.gea.esac.esa.int/"
 LISTING_BASE = "https://gaia.eu-1.cdn77-storage.com/"
 S3_NAMESPACE = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 STATE_PATH = ".stardump/ingest-state.json"
-POLL_SECONDS = 30
 
 
 def run(args: list[str], *, capture_output: bool = False) -> str:
@@ -318,7 +316,7 @@ def start_ingest() -> None:
     print(f"data_root: {settings['data_root']}")
     print(f"state_file: {STATE_PATH}")
     print("next: python3 -m stardump ingest status")
-    print("then: python3 -m stardump ingest wait")
+    print("then: python3 -m stardump ingest status")
     print("then: python3 -m stardump ingest build-index")
 
 
@@ -333,25 +331,6 @@ def status_ingest() -> None:
 
     if any(row["state"] == "failed" for row in rows):
         raise SystemExit(1)
-
-
-def wait_ingest() -> None:
-    try:
-        state = read_state()
-    except FileNotFoundError:
-        raise SystemExit(f"missing state file: {STATE_PATH}")
-
-    while True:
-        rows = status_rows(state)
-        print_status(rows)
-
-        if any(row["state"] == "failed" for row in rows):
-            raise SystemExit(1)
-
-        if all(row["state"] == "succeeded" for row in rows):
-            return
-
-        time.sleep(POLL_SECONDS)
 
 
 def start_build_index() -> None:

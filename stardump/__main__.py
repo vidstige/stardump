@@ -1,6 +1,6 @@
 import argparse
 
-from .ingest import start_build_index, start_ingest, status_ingest, wait_ingest
+from .ingest import start_build_index, start_ingest, status_ingest
 
 
 def parse_args() -> argparse.Namespace:
@@ -11,7 +11,6 @@ def parse_args() -> argparse.Namespace:
     ingest_commands = ingest.add_subparsers(dest="action", required=True)
     ingest_commands.add_parser("start")
     ingest_commands.add_parser("status")
-    ingest_commands.add_parser("wait")
     ingest_commands.add_parser("build-index")
 
     return parser.parse_args()
@@ -28,9 +27,6 @@ def main() -> None:
         return
     if args.action == "status":
         status_ingest()
-        return
-    if args.action == "wait":
-        wait_ingest()
         return
     if args.action == "build-index":
         start_build_index()

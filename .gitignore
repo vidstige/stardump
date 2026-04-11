@@ -1,3 +1,4 @@
 /target
 /data
 /.stardump
+__pycache__/
