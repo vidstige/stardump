@@ -26,7 +26,6 @@ service_account_name="${SERVICE_ACCOUNT_NAME:-star-dump-run}"
 service_account_email="${SERVICE_ACCOUNT_EMAIL:-${service_account_name}@${project_id}.iam.gserviceaccount.com}"
 ingest_url="${INGEST_URL:-${DEFAULT_INGEST_URL:-}}"
 data_root="${DATA_ROOT:-}"
-parallax_filter_mas="${PARALLAX_FILTER_MAS:-10}"
 
 if [[ -z "${ingest_url}" ]]; then
   echo "INGEST_URL is required" >&2
@@ -52,7 +51,6 @@ fi
 args=(
   --input "${ingest_url}"
   --output-root "${data_root}"
-  --parallax-filter-mas "${parallax_filter_mas}"
 )
 
 gcloud beta run jobs "${deploy_command}" "${job_name}" \

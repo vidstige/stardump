@@ -79,7 +79,6 @@ def current_settings() -> dict[str, str | int]:
             "SERVICE_ACCOUNT_EMAIL",
             f"{os.environ.get('SERVICE_ACCOUNT_NAME', 'star-dump-run')}@{project_id}.iam.gserviceaccount.com",
         ),
-        "parallax_filter_mas": env_int("PARALLAX_FILTER_MAS", 10),
         "octree_depth": env_int("OCTREE_DEPTH", 6),
         "batch_size": env_int("BATCH_SIZE", 32),
     }
@@ -173,13 +172,12 @@ def ingest_job_args(
     bucket_name: str,
     mount_root: str,
     data_root: str,
-    parallax_filter_mas: int,
     urls: list[str],
 ) -> list[str]:
     ingest_args = []
     for url in urls:
         ingest_args.extend(["--input", url])
-    ingest_args.extend(["--output-root", data_root, "--parallax-filter-mas", str(parallax_filter_mas)])
+    ingest_args.extend(["--output-root", data_root])
     return [
         "--image",
         image_uri,
@@ -329,7 +327,6 @@ def start_ingest() -> None:
             settings["bucket_name"],
             settings["mount_root"],
             data_root,
-            settings["parallax_filter_mas"],
             batch_urls,
         )
         create_or_update_job(job_name, job_args)

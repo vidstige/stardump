@@ -309,7 +309,6 @@ mod tests {
         run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
         run_build_index(BuildIndexConfig {
@@ -373,7 +372,6 @@ mod tests {
             run_ingestion(IngestConfig {
                 inputs: vec![input_path.display().to_string()],
                 output_root: output_root.display().to_string(),
-                parallax_filter_mas: None,
             })
             .unwrap();
             run_build_index(BuildIndexConfig {

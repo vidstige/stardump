@@ -19,7 +19,6 @@ use crate::storage::{local_path, read_optional_bytes, validate_canonical_layout}
 pub struct IngestConfig {
     pub inputs: Vec<String>,
     pub output_root: String,
-    pub parallax_filter_mas: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -160,10 +159,7 @@ fn stage_input(input: &str) -> Result<StagedInput> {
     })
 }
 
-fn read_canonical_rows(
-    input_path: &Path,
-    parallax_filter_mas: Option<f32>,
-) -> Result<(Vec<CanonicalRow>, SourceCounts)> {
+fn read_canonical_rows(input_path: &Path) -> Result<(Vec<CanonicalRow>, SourceCounts)> {
     let reader = open_input(&input_path.display().to_string())?;
     let decoder = MultiGzDecoder::new(BufReader::new(reader));
     let mut csv_reader = ReaderBuilder::new()
@@ -185,7 +181,6 @@ fn read_canonical_rows(
     let mut counts = SourceCounts {
         rows_seen: 0,
         rows_with_positive_parallax: 0,
-        rows_after_parallax_filter: 0,
         rows_written: 0,
     };
 
@@ -200,13 +195,6 @@ fn read_canonical_rows(
             continue;
         }
         counts.rows_with_positive_parallax += 1;
-
-        if let Some(minimum_parallax) = parallax_filter_mas {
-            if parallax <= minimum_parallax {
-                continue;
-            }
-        }
-        counts.rows_after_parallax_filter += 1;
 
         rows.push(CanonicalRow {
             source_id: parse_required_u64(record.get(source_id_index), "source_id")?,
@@ -223,21 +211,15 @@ fn read_canonical_rows(
     Ok((rows, counts))
 }
 
-fn metadata_matches(
-    metadata: &SourceMetadata,
-    staged_input: &StagedInput,
-    parallax_filter_mas: Option<f32>,
-) -> bool {
+fn metadata_matches(metadata: &SourceMetadata, staged_input: &StagedInput) -> bool {
     metadata.source_bulk_url == staged_input.source_bulk_url
         && metadata.source_bulk_md5 == staged_input.source_bulk_md5
         && metadata.input_name == staged_input.input_name
-        && metadata.parallax_filter_mas == parallax_filter_mas
 }
 
 fn load_existing_source(
     output_root: &Path,
     staged_input: &StagedInput,
-    parallax_filter_mas: Option<f32>,
 ) -> Result<Option<SourceMetadata>> {
     let Some(metadata_bytes) =
         read_optional_bytes(&output_root.join(metadata_path_for_source(&staged_input.input_name)))?
@@ -247,7 +229,7 @@ fn load_existing_source(
     let Ok(metadata) = decode_source_metadata(&metadata_bytes) else {
         return Ok(None);
     };
-    if !metadata_matches(&metadata, staged_input, parallax_filter_mas) {
+    if !metadata_matches(&metadata, staged_input) {
         return Ok(None);
     }
     if validate_canonical_layout(output_root, &metadata).is_err() {
@@ -259,7 +241,6 @@ fn load_existing_source(
 fn write_source_output(
     output_root: &Path,
     staged_input: &StagedInput,
-    parallax_filter_mas: Option<f32>,
     rows: &[CanonicalRow],
     counts: SourceCounts,
     started_at: String,
@@ -283,7 +264,6 @@ fn write_source_output(
         input_name: staged_input.input_name.clone(),
         canonical_directory,
         canonical_parts,
-        parallax_filter_mas,
         ingestion_started_at: started_at,
         ingestion_finished_at: finished_at,
         counts,
@@ -292,18 +272,14 @@ fn write_source_output(
     Ok(metadata)
 }
 
-fn ingest_one(
-    output_root: &Path,
-    input: &str,
-    parallax_filter_mas: Option<f32>,
-) -> Result<SourceMetadata> {
+fn ingest_one(output_root: &Path, input: &str) -> Result<SourceMetadata> {
     let staged_input = stage_input(input)?;
-    if let Some(metadata) = load_existing_source(output_root, &staged_input, parallax_filter_mas)? {
+    if let Some(metadata) = load_existing_source(output_root, &staged_input)? {
         return Ok(metadata);
     }
 
     let started_at = Utc::now().to_rfc3339();
-    let (rows, counts) = read_canonical_rows(&staged_input.path, parallax_filter_mas)?;
+    let (rows, counts) = read_canonical_rows(&staged_input.path)?;
     let finished_at = Utc::now().to_rfc3339();
 
     fs::create_dir_all(output_root)
@@ -311,7 +287,6 @@ fn ingest_one(
     write_source_output(
         output_root,
         &staged_input,
-        parallax_filter_mas,
         &rows,
         counts,
         started_at,
@@ -326,7 +301,7 @@ pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
     let output_root = local_path(&config.output_root)?;
     let mut metadata = Vec::with_capacity(config.inputs.len());
     for input in &config.inputs {
-        metadata.push(ingest_one(&output_root, input, config.parallax_filter_mas)?);
+        metadata.push(ingest_one(&output_root, input)?);
     }
     Ok(IngestResult { metadata })
 }
@@ -351,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn ingests_filtered_rows_and_writes_canonical_layout() {
+    fn ingests_positive_parallax_rows_and_writes_canonical_layout() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -368,7 +343,6 @@ mod tests {
         let result = run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
 
@@ -386,7 +360,6 @@ mod tests {
         assert_eq!(result.metadata, vec![metadata.clone()]);
         assert_eq!(metadata.counts.rows_seen, 4);
         assert_eq!(metadata.counts.rows_with_positive_parallax, 2);
-        assert_eq!(metadata.counts.rows_after_parallax_filter, 2);
         assert_eq!(metadata.counts.rows_written, 2);
         assert_eq!(metadata.source_bulk_md5.len(), 32);
         assert_eq!(canonical_rows.len(), 2);
@@ -424,7 +397,6 @@ mod tests {
         let result = run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
 
@@ -449,7 +421,6 @@ mod tests {
         let first = run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
         let metadata_path =
@@ -459,7 +430,6 @@ mod tests {
         let second = run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
         let metadata_after = fs::read(metadata_path).unwrap();
@@ -482,7 +452,6 @@ mod tests {
         let first = run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
 
@@ -494,7 +463,6 @@ mod tests {
         let second = run_ingestion(IngestConfig {
             inputs: vec![input_path.display().to_string()],
             output_root: output_path.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
         let metadata = read_source_metadata(

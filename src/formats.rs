@@ -43,7 +43,6 @@ pub struct ServingRow {
 pub struct SourceCounts {
     pub rows_seen: u64,
     pub rows_with_positive_parallax: u64,
-    pub rows_after_parallax_filter: u64,
     pub rows_written: u64,
 }
 
@@ -54,7 +53,6 @@ pub struct SourceMetadata {
     pub input_name: String,
     pub canonical_directory: String,
     pub canonical_parts: Vec<String>,
-    pub parallax_filter_mas: Option<f32>,
     pub ingestion_started_at: String,
     pub ingestion_finished_at: String,
     pub counts: SourceCounts,
@@ -136,22 +134,6 @@ fn parse_metadata_u64(fields: &BTreeMap<String, String>, key: &str) -> Result<u6
         .with_context(|| format!("failed to parse metadata key {key}"))
 }
 
-fn parse_metadata_f32(fields: &BTreeMap<String, String>, key: &str) -> Result<f32> {
-    metadata_field(fields, key)?
-        .parse()
-        .with_context(|| format!("failed to parse metadata key {key}"))
-}
-
-fn parse_metadata_optional_f32(
-    fields: &BTreeMap<String, String>,
-    key: &str,
-) -> Result<Option<f32>> {
-    match metadata_field(fields, key)? {
-        "none" => Ok(None),
-        _ => parse_metadata_f32(fields, key).map(Some),
-    }
-}
-
 fn parse_metadata_parts(fields: &BTreeMap<String, String>, key: &str) -> Result<Vec<String>> {
     let value = metadata_field(fields, key)?;
     if value.is_empty() {
@@ -225,7 +207,6 @@ pub fn decode_source_metadata(bytes: &[u8]) -> Result<SourceMetadata> {
         input_name: metadata_field(&fields, "input_name")?.to_string(),
         canonical_directory: metadata_field(&fields, "canonical_directory")?.to_string(),
         canonical_parts: parse_metadata_parts(&fields, "canonical_parts")?,
-        parallax_filter_mas: parse_metadata_optional_f32(&fields, "parallax_filter_mas")?,
         ingestion_started_at: metadata_field(&fields, "ingestion_started_at")?.to_string(),
         ingestion_finished_at: metadata_field(&fields, "ingestion_finished_at")?.to_string(),
         counts: SourceCounts {
@@ -234,7 +215,6 @@ pub fn decode_source_metadata(bytes: &[u8]) -> Result<SourceMetadata> {
                 &fields,
                 "rows_with_positive_parallax",
             )?,
-            rows_after_parallax_filter: parse_metadata_u64(&fields, "rows_after_parallax_filter")?,
             rows_written: parse_metadata_u64(&fields, "rows_written")?,
         },
     })
@@ -242,9 +222,6 @@ pub fn decode_source_metadata(bytes: &[u8]) -> Result<SourceMetadata> {
 
 pub fn encode_source_metadata(metadata: &SourceMetadata) -> Vec<u8> {
     let canonical_parts = metadata.canonical_parts.join(",");
-    let parallax_filter_mas = metadata
-        .parallax_filter_mas
-        .map_or_else(|| "none".to_string(), |value| value.to_string());
     format!(
         "{METADATA_MAGIC}\n\
 source_bulk_url: {}\n\
@@ -252,24 +229,20 @@ source_bulk_md5: {}\n\
 input_name: {}\n\
 canonical_directory: {}\n\
 canonical_parts: {}\n\
-parallax_filter_mas: {}\n\
 ingestion_started_at: {}\n\
 ingestion_finished_at: {}\n\
 rows_seen: {}\n\
 rows_with_positive_parallax: {}\n\
-rows_after_parallax_filter: {}\n\
 rows_written: {}\n",
         metadata.source_bulk_url,
         metadata.source_bulk_md5,
         metadata.input_name,
         metadata.canonical_directory,
         canonical_parts,
-        parallax_filter_mas,
         metadata.ingestion_started_at,
         metadata.ingestion_finished_at,
         metadata.counts.rows_seen,
         metadata.counts.rows_with_positive_parallax,
-        metadata.counts.rows_after_parallax_filter,
         metadata.counts.rows_written,
     )
     .into_bytes()
@@ -559,13 +532,11 @@ mod tests {
             input_name: "input.csv.gz".to_string(),
             canonical_directory: canonical_directory_path("input.csv.gz"),
             canonical_parts: vec!["part-000.bin".to_string()],
-            parallax_filter_mas: Some(10.0),
             ingestion_started_at: "2026-04-10T00:00:00Z".to_string(),
             ingestion_finished_at: "2026-04-10T00:00:01Z".to_string(),
             counts: SourceCounts {
                 rows_seen: 100,
                 rows_with_positive_parallax: 80,
-                rows_after_parallax_filter: 7,
                 rows_written: 6,
             },
         };

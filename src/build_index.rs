@@ -260,7 +260,6 @@ mod tests {
         run_ingestion(IngestConfig {
             inputs: vec![input_a.display().to_string(), input_b.display().to_string()],
             output_root: output_root.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
 
@@ -315,7 +314,6 @@ mod tests {
         run_ingestion(IngestConfig {
             inputs: vec![input_a.display().to_string(), input_b.display().to_string()],
             output_root: output_root.display().to_string(),
-            parallax_filter_mas: None,
         })
         .unwrap();
 

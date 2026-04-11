@@ -8,9 +8,6 @@ struct Args {
 
     #[arg(long)]
     output_root: String,
-
-    #[arg(long)]
-    parallax_filter_mas: Option<f32>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -18,7 +15,6 @@ fn main() -> anyhow::Result<()> {
     run_ingestion(IngestConfig {
         inputs: args.input,
         output_root: args.output_root,
-        parallax_filter_mas: args.parallax_filter_mas,
     })?;
     Ok(())
 }
