@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use tempfile::tempdir;
 
 use crate::formats::{
-    CANONICAL_ROOT, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow,
-    SourceMetadata, append_serving_rows, decode_canonical_rows, decode_source_metadata,
+    CANONICAL_ROOT, CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex,
+    ServingRow, SourceMetadata, append_serving_rows, decode_canonical_rows, decode_source_metadata,
     leaf_filename, serving_directory, write_octree_index,
 };
 use crate::octree::{Bounds3, OctreeConfig};
@@ -44,7 +44,7 @@ fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 
     ]
 }
 
-fn load_source_metadata(
+pub fn load_source_metadata(
     storage: &StorageClient,
     data_root: &StorageRoot,
 ) -> Result<Vec<SourceMetadata>> {
@@ -81,7 +81,7 @@ fn prepare_output_root(output_root: &Path, octree_depth: u8) -> Result<()> {
 
 fn serving_rows_for_canonical_part(
     octree: OctreeConfig,
-    rows: Vec<crate::formats::CanonicalRow>,
+    rows: Vec<CanonicalRow>,
 ) -> (BTreeMap<u32, Vec<ServingRow>>, u64) {
     let mut serving_rows = BTreeMap::<u32, Vec<ServingRow>>::new();
     let mut rows_in_bounds = 0;
@@ -103,34 +103,14 @@ fn serving_rows_for_canonical_part(
     (serving_rows, rows_in_bounds)
 }
 
-fn stream_serving_rows(
-    output_root: &Path,
+pub fn read_canonical_part_rows(
     storage: &StorageClient,
     data_root: &StorageRoot,
-    octree: OctreeConfig,
-    metadata: &[SourceMetadata],
-) -> Result<(Vec<u32>, u64)> {
-    let serving_root = output_root.join(serving_directory(octree.depth));
-    let mut leaves = BTreeSet::new();
-    let mut rows_in_bounds = 0;
-
-    for source in metadata {
-        let canonical_root = data_root.join(&source.canonical_directory);
-        for part in &source.canonical_parts {
-            let rows = decode_canonical_rows(&storage.read_bytes(&canonical_root.join(part))?)?;
-            let (mut part_serving_rows, part_rows_in_bounds) =
-                serving_rows_for_canonical_part(octree, rows);
-            rows_in_bounds += part_rows_in_bounds;
-
-            for (morton, rows) in &mut part_serving_rows {
-                rows.sort_by_key(|row| row.source_id);
-                append_serving_rows(&serving_root.join(leaf_filename(*morton)), rows)?;
-                leaves.insert(*morton);
-            }
-        }
-    }
-
-    Ok((leaves.into_iter().collect(), rows_in_bounds))
+    source: &SourceMetadata,
+    part: &str,
+) -> Result<Vec<CanonicalRow>> {
+    let canonical_root = data_root.join(&source.canonical_directory);
+    decode_canonical_rows(&storage.read_bytes(&canonical_root.join(part))?)
 }
 
 fn write_index_output(
@@ -148,6 +128,53 @@ fn write_index_output(
     Ok(index)
 }
 
+pub struct IndexBuilder {
+    output_root: PathBuf,
+    octree: OctreeConfig,
+    leaves: BTreeSet<u32>,
+    rows_in_bounds: u64,
+}
+
+impl IndexBuilder {
+    pub fn new(output_root: &Path, octree_depth: u8, bounds: Bounds3) -> Result<Self> {
+        prepare_output_root(output_root, octree_depth)?;
+        Ok(Self {
+            output_root: output_root.to_path_buf(),
+            octree: OctreeConfig {
+                depth: octree_depth,
+                bounds,
+            },
+            leaves: BTreeSet::new(),
+            rows_in_bounds: 0,
+        })
+    }
+
+    pub fn append_rows(&mut self, rows: Vec<CanonicalRow>) -> Result<()> {
+        let serving_root = self.output_root.join(serving_directory(self.octree.depth));
+        let (mut part_serving_rows, part_rows_in_bounds) =
+            serving_rows_for_canonical_part(self.octree, rows);
+        self.rows_in_bounds += part_rows_in_bounds;
+
+        for (morton, rows) in &mut part_serving_rows {
+            rows.sort_by_key(|row| row.source_id);
+            append_serving_rows(&serving_root.join(leaf_filename(*morton)), rows)?;
+            self.leaves.insert(*morton);
+        }
+
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<(OctreeIndex, u64)> {
+        let index = write_index_output(
+            &self.output_root,
+            self.octree.depth,
+            self.octree.bounds,
+            self.leaves.into_iter().collect(),
+        )?;
+        Ok((index, self.rows_in_bounds))
+    }
+}
+
 pub fn run_build_index(config: BuildIndexConfig) -> Result<BuildIndexResult> {
     if config.octree_depth == 0 || config.octree_depth > 10 {
         bail!("octree depth must be between 1 and 10");
@@ -159,17 +186,15 @@ pub fn run_build_index(config: BuildIndexConfig) -> Result<BuildIndexResult> {
         bail!("no canonical source metadata found under {CANONICAL_ROOT}");
     }
 
-    let octree = OctreeConfig {
-        depth: config.octree_depth,
-        bounds: config.bounds,
-    };
-
     match data_root {
         StorageRoot::Local(ref path) => {
-            prepare_output_root(path, config.octree_depth)?;
-            let (leaves, rows_in_bounds) =
-                stream_serving_rows(path, &storage, &data_root, octree, &metadata)?;
-            let index = write_index_output(path, config.octree_depth, config.bounds, leaves)?;
+            let mut builder = IndexBuilder::new(path, config.octree_depth, config.bounds)?;
+            for source in &metadata {
+                for part in &source.canonical_parts {
+                    builder.append_rows(read_canonical_part_rows(&storage, &data_root, source, part)?)?;
+                }
+            }
+            let (index, rows_in_bounds) = builder.finish()?;
             storage.validate_serving_layout(&data_root, &index)?;
             return Ok(BuildIndexResult {
                 index,
@@ -179,11 +204,14 @@ pub fn run_build_index(config: BuildIndexConfig) -> Result<BuildIndexResult> {
         }
         ref root @ StorageRoot::Gcs(_) => {
             let local_output = tempdir().context("failed to create temporary output directory")?;
-            prepare_output_root(local_output.path(), config.octree_depth)?;
-            let (leaves, rows_in_bounds) =
-                stream_serving_rows(local_output.path(), &storage, &data_root, octree, &metadata)?;
-            let index =
-                write_index_output(local_output.path(), config.octree_depth, config.bounds, leaves)?;
+            let mut builder =
+                IndexBuilder::new(local_output.path(), config.octree_depth, config.bounds)?;
+            for source in &metadata {
+                for part in &source.canonical_parts {
+                    builder.append_rows(read_canonical_part_rows(&storage, &data_root, source, part)?)?;
+                }
+            }
+            let (index, rows_in_bounds) = builder.finish()?;
             storage.upload_directory(local_output.path(), &root)?;
             storage.validate_serving_layout(&data_root, &index)?;
             return Ok(BuildIndexResult {
