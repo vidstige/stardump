@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-command -v docker >/dev/null 2>&1 || {
-  echo "missing required command: docker" >&2
-  exit 1
-}
 command -v gcloud >/dev/null 2>&1 || {
   echo "missing required command: gcloud" >&2
   exit 1
@@ -23,6 +19,6 @@ fi
 image_tag="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${image_tag}}"
 
-gcloud auth configure-docker gcr.io --quiet
-docker push "${image_uri}"
+gcloud container images describe "${image_uri}" >/dev/null
+echo "image already published by Cloud Build"
 echo "${image_uri}"

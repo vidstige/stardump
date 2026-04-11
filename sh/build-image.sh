@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-command -v docker >/dev/null 2>&1 || {
-  echo "missing required command: docker" >&2
-  exit 1
-}
 command -v gcloud >/dev/null 2>&1 || {
   echo "missing required command: gcloud" >&2
   exit 1
@@ -23,5 +19,5 @@ fi
 image_tag="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
 image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${image_tag}}"
 
-docker build --tag "${image_uri}" .
+gcloud builds submit --tag "${image_uri}"
 echo "${image_uri}"
