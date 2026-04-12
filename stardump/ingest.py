@@ -46,8 +46,12 @@ def current_project_number(project_id: str) -> str:
     )
 
 
-def current_image_tag() -> str:
-    return os.environ.get("IMAGE_TAG") or run(["git", "rev-parse", "--short", "HEAD"], capture_output=True)
+def current_image_uri(project_id: str) -> str:
+    override = os.environ.get("IMAGE_URI")
+    if override:
+        return override
+
+    return f"gcr.io/{project_id}/star-dump:latest"
 
 
 def run_name(urls: list[str]) -> str:
@@ -65,12 +69,11 @@ def default_data_root(mount_root: str, urls: list[str]) -> str:
 def current_settings() -> dict[str, str | int]:
     project_id = current_project_id()
     project_number = current_project_number(project_id)
-    image_tag = current_image_tag()
     bucket_name = os.environ.get("BUCKET_NAME", f"star-dump-data-{project_number}")
     mount_root = os.environ.get("MOUNT_ROOT", "/mnt/gcs")
 
     return {
-        "image_uri": os.environ.get("IMAGE_URI", f"gcr.io/{project_id}/star-dump:{image_tag}"),
+        "image_uri": current_image_uri(project_id),
         "bucket_name": bucket_name,
         "mount_root": mount_root,
         "job_prefix": os.environ.get("JOB_PREFIX", "star-dump-ingest-full"),
@@ -80,7 +83,7 @@ def current_settings() -> dict[str, str | int]:
             f"{os.environ.get('SERVICE_ACCOUNT_NAME', 'star-dump-run')}@{project_id}.iam.gserviceaccount.com",
         ),
         "octree_depth": env_int("OCTREE_DEPTH", 6),
-        "batch_size": env_int("BATCH_SIZE", 32),
+        "batch_size": env_int("BATCH_SIZE", 1),
     }
 
 
@@ -343,6 +346,7 @@ def start_ingest() -> None:
             "batches": started_batches,
             "build_index_job_name": settings["build_index_job_name"],
             "data_root": data_root,
+            "image_uri": settings["image_uri"],
             "octree_depth": settings["octree_depth"],
             "run_name": run_name(urls),
         }
@@ -377,6 +381,7 @@ def start_build_index() -> None:
     try:
         state = read_state()
         data_root = state["data_root"]
+        image_uri = state["image_uri"]
         octree_depth = state["octree_depth"]
         rows = status_rows(state)
         if any(row["state"] != "succeeded" for row in rows):
@@ -388,13 +393,14 @@ def start_build_index() -> None:
             raise SystemExit(
                 f"missing state file: {STATE_PATH}; set DATA_ROOT explicitly to run build-index"
             )
+        image_uri = settings["image_uri"]
         octree_depth = settings["octree_depth"]
 
     job_name = settings["build_index_job_name"]
     create_or_update_job(
         job_name,
         build_index_job_args(
-            settings["image_uri"],
+            image_uri,
             settings["service_account_email"],
             settings["bucket_name"],
             settings["mount_root"],

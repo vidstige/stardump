@@ -17,8 +17,7 @@ if [[ -z "${project_id}" || "${project_id}" == "(unset)" ]]; then
 fi
 
 project_number="$(gcloud projects describe "${project_id}" --format='value(projectNumber)')"
-image_tag="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
-image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${image_tag}}"
+image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:latest}"
 bucket_name="${BUCKET_NAME:-star-dump-data-${project_number}}"
 mount_root="${MOUNT_ROOT:-/mnt/gcs}"
 job_name="${INGEST_JOB_NAME:-star-dump-ingest}"

@@ -17,7 +17,7 @@ if [[ -z "${project_id}" || "${project_id}" == "(unset)" ]]; then
 fi
 
 export IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
-export IMAGE_URI="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${IMAGE_TAG}}"
+export IMAGE_URI="${IMAGE_URI:-gcr.io/${project_id}/star-dump:latest}"
 
 ./sh/build-image.sh
 ./sh/deploy-service.sh

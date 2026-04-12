@@ -17,7 +17,10 @@ if [[ -z "${project_id}" || "${project_id}" == "(unset)" ]]; then
 fi
 
 image_tag="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
-image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:${image_tag}}"
+image_sha_uri="gcr.io/${project_id}/star-dump:${image_tag}"
+image_latest_uri="gcr.io/${project_id}/star-dump:latest"
 
-gcloud builds submit --tag "${image_uri}"
-echo "${image_uri}"
+gcloud builds submit --tag "${image_sha_uri}"
+gcloud container images add-tag --quiet "${image_sha_uri}" "${image_latest_uri}"
+echo "${image_sha_uri}"
+echo "${image_latest_uri}"
