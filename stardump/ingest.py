@@ -278,9 +278,11 @@ def execution_condition(execution_name: str) -> dict:
             capture_output=True,
         )
     )
+    spec = execution.get("spec", {})
+    status = execution.get("status", {})
 
     completed = None
-    for condition in execution.get("status", {}).get("conditions", []):
+    for condition in status.get("conditions", []):
         if condition.get("type") == "Completed":
             completed = condition
             break
@@ -292,10 +294,21 @@ def execution_condition(execution_name: str) -> dict:
     else:
         state = "failed"
 
+    task_count = int(spec.get("taskCount", 0) or 0)
+    succeeded_count = int(status.get("succeededCount", 0) or 0)
+    running_count = int(status.get("runningCount", 0) or 0)
+    failed_count = int(status.get("failedCount", 0) or 0)
+    pending_count = max(task_count - succeeded_count - running_count - failed_count, 0)
+
     return {
         "state": state,
         "message": (completed or {}).get("message", ""),
-        "log_uri": execution.get("status", {}).get("logUri", ""),
+        "log_uri": status.get("logUri", ""),
+        "task_count": task_count,
+        "succeeded_count": succeeded_count,
+        "running_count": running_count,
+        "failed_count": failed_count,
+        "pending_count": pending_count,
     }
 
 
@@ -327,6 +340,17 @@ def print_status(rows: list[dict]) -> None:
     total = len(rows)
 
     print(f"succeeded: {succeeded}/{total}  running: {running}  failed: {failed}")
+
+    for row in rows:
+        task_count = row["task_count"]
+        if task_count:
+            print(
+                f"{row['execution_name']}: "
+                f"tasks succeeded {row['succeeded_count']}/{task_count}  "
+                f"running {row['running_count']}  "
+                f"pending {row['pending_count']}  "
+                f"failed {row['failed_count']}"
+            )
 
     for row in rows:
         if row["state"] != "failed":
