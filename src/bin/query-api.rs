@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
-use star_dump::query_api::{QueryService, build_app};
+use star_dump::query_api::{QueryCatalog, build_app};
 
 #[derive(Parser)]
 struct Args {
@@ -15,13 +15,13 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let service = Arc::new(QueryService::load(&args.data_root)?);
+    let catalog = Arc::new(QueryCatalog::load(&args.data_root)?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(args.bind).await?;
-        axum::serve(listener, build_app(service)).await?;
+        axum::serve(listener, build_app(catalog)).await?;
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())

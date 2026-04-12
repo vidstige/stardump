@@ -51,11 +51,11 @@ def current_image_tag() -> str:
 
 
 def run_name(urls: list[str]) -> str:
-    digest = hashlib.sha256()
+    digest = hashlib.md5()
     for url in sorted(urls):
         digest.update(url.encode("utf-8"))
         digest.update(b"\n")
-    return digest.hexdigest()[:12]
+    return digest.hexdigest()
 
 
 def default_data_root(mount_root: str, urls: list[str]) -> str:

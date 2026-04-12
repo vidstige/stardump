@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use axum::extract::{RawQuery, State};
+use axum::extract::{Path as AxumPath, RawQuery, State};
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -20,10 +20,15 @@ use crate::octree::{OctreeConfig, morton_encode};
 use crate::storage::{local_path, validate_serving_layout};
 
 #[derive(Clone)]
-pub struct QueryService {
+pub struct QueryDataset {
     index: OctreeIndex,
     occupied_leaves: HashSet<u32>,
     indices_root: PathBuf,
+}
+
+pub struct QueryCatalog {
+    data_root: PathBuf,
+    datasets: RwLock<HashMap<String, Arc<QueryDataset>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,8 +63,23 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
+fn not_found(message: impl Into<String>) -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, message.into())
+}
+
+fn valid_dataset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn dataset_root(data_root: &Path, name: &str) -> PathBuf {
+    data_root.join(name)
+}
+
 fn intersecting_leaves(
-    service: &QueryService,
+    dataset: &QueryDataset,
     octree: OctreeConfig,
     center: [f32; 3],
     radius: f32,
@@ -76,7 +96,7 @@ fn intersecting_leaves(
         for y in ranges[1].0..=ranges[1].1 {
             for z in ranges[2].0..=ranges[2].1 {
                 let morton = morton_encode(x, y, z);
-                if !service.occupied_leaves.contains(&morton) {
+                if !dataset.occupied_leaves.contains(&morton) {
                     continue;
                 }
                 if octree.leaf_bounds(morton).intersects_sphere(center, radius) {
@@ -92,12 +112,43 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
+async fn list_indices(
+    State(catalog): State<Arc<QueryCatalog>>,
+) -> Result<Response, (StatusCode, String)> {
+    let body = tokio::task::spawn_blocking(move || {
+        let names = catalog.list_names()?;
+        Ok::<_, anyhow::Error>(if names.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", names.join("\n"))
+        })
+    })
+    .await
+    .map_err(|error| internal_error(error.into()))?
+    .map_err(internal_error)?;
+    Ok((
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        body,
+    )
+        .into_response())
+}
+
 async fn query_radius(
-    State(service): State<Arc<QueryService>>,
+    State(catalog): State<Arc<QueryCatalog>>,
+    AxumPath(name): AxumPath<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, (StatusCode, String)> {
+    if !valid_dataset_name(&name) {
+        return Err(bad_request("dataset name contains invalid characters"));
+    }
+    let Some(dataset) = catalog.dataset(&name).map_err(internal_error)? else {
+        return Err(not_found(format!("unknown dataset {name}")));
+    };
     let request = parse_query_request(query.as_deref())?;
-    let csv = tokio::task::spawn_blocking(move || query_radius_csv(&service, request))
+    let csv = tokio::task::spawn_blocking(move || query_radius_csv(&dataset, request))
         .await
         .map_err(|error| internal_error(error.into()))??;
     Ok((
@@ -110,9 +161,8 @@ async fn query_radius(
         .into_response())
 }
 
-impl QueryService {
-    pub fn load(root: &str) -> Result<Self> {
-        let data_root = local_path(root)?;
+impl QueryDataset {
+    pub fn load(data_root: &Path) -> Result<Self> {
         let index: OctreeIndex = decode_octree_index(
             &fs::read(data_root.join(OCTREE_INDEX_FILENAME)).with_context(|| {
                 format!(
@@ -122,8 +172,8 @@ impl QueryService {
             })?,
         )
         .context("failed to parse octree index")?;
-        validate_serving_layout(&data_root, &index)?;
-        let indices_root = data_root.join(&indices_directory(index.depth));
+        validate_serving_layout(data_root, &index)?;
+        let indices_root = data_root.join(indices_directory(index.depth));
         Ok(Self {
             occupied_leaves: index.leaves.iter().copied().collect(),
             index,
@@ -176,11 +226,71 @@ impl QueryService {
     }
 }
 
-pub fn build_app(service: Arc<QueryService>) -> Router {
+impl QueryCatalog {
+    pub fn load(root: &str) -> Result<Self> {
+        Ok(Self {
+            data_root: local_path(root)?,
+            datasets: RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub fn list_names(&self) -> Result<Vec<String>> {
+        if !self.data_root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&self.data_root)
+            .with_context(|| format!("failed to read {}", self.data_root.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read {}", self.data_root.display()))?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .is_dir()
+            {
+                continue;
+            }
+
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !valid_dataset_name(&name) || !path.join(OCTREE_INDEX_FILENAME).is_file() {
+                continue;
+            }
+            names.push(name);
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    pub fn dataset(&self, name: &str) -> Result<Option<Arc<QueryDataset>>> {
+        if let Some(dataset) = self.datasets.read().unwrap().get(name) {
+            return Ok(Some(dataset.clone()));
+        }
+
+        let root = dataset_root(&self.data_root, name);
+        if !root.join(OCTREE_INDEX_FILENAME).is_file() {
+            return Ok(None);
+        }
+
+        let dataset = Arc::new(QueryDataset::load(&root)?);
+        let mut datasets = self.datasets.write().unwrap();
+        Ok(Some(
+            datasets
+                .entry(name.to_string())
+                .or_insert_with(|| dataset.clone())
+                .clone(),
+        ))
+    }
+}
+
+pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/query/radius", get(query_radius))
-        .with_state(service)
+        .route("/indices", get(list_indices))
+        .route("/query/{name}/radius", get(query_radius))
+        .with_state(catalog)
 }
 
 fn parse_query_parameter(query: &str, name: &str) -> Result<Option<String>, (StatusCode, String)> {
@@ -261,11 +371,11 @@ fn encode_matches_csv(matches: &[RadiusQueryMatch]) -> Result<String, (StatusCod
 }
 
 pub fn query_radius_csv(
-    service: &QueryService,
+    dataset: &QueryDataset,
     request: RadiusQueryRequest,
 ) -> Result<String, (StatusCode, String)> {
     validate_request(&request)?;
-    let matches = service.query_radius(request).map_err(internal_error)?;
+    let matches = dataset.query_radius(request).map_err(internal_error)?;
     encode_matches_csv(&matches)
 }
 
@@ -296,8 +406,9 @@ mod tests {
     #[test]
     fn serves_exact_radius_queries_over_written_shards() {
         let dir = tempdir().unwrap();
+        let data_root = dir.path().join("datasets");
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
-        let output_path = dir.path().join("run");
+        let output_path = data_root.join("run");
 
         write_gzip_file(
             &input_path,
@@ -318,17 +429,17 @@ mod tests {
         })
         .unwrap();
 
-        let service = Arc::new(QueryService::load(&output_path.display().to_string()).unwrap());
+        let catalog = Arc::new(QueryCatalog::load(&data_root.display().to_string()).unwrap());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let request = Request::builder()
                 .method("GET")
-                .uri("/query/radius?x=0.0&y=0.0&z=0.0&r=11.0&limit=10")
+                .uri("/query/run/radius?x=0.0&y=0.0&z=0.0&r=11.0&limit=10")
                 .body(Body::empty())
                 .unwrap();
 
             let response = {
-                let app = build_app(service.clone());
+                let app = build_app(catalog.clone());
                 app.oneshot(request).await.unwrap()
             };
             assert_eq!(response.status(), StatusCode::OK);
@@ -349,7 +460,6 @@ mod tests {
             assert_eq!(records[1].get(3), Some("2"));
             assert_eq!(records[2].get(3), Some("3"));
         });
-        drop(service);
     }
 
     #[test]
@@ -382,8 +492,8 @@ mod tests {
             .unwrap();
         }
 
-        let service_a = QueryService::load(&output_a.display().to_string()).unwrap();
-        let service_b = QueryService::load(&output_b.display().to_string()).unwrap();
+        let dataset_a = QueryDataset::load(&output_a).unwrap();
+        let dataset_b = QueryDataset::load(&output_b).unwrap();
         let request = RadiusQueryRequest {
             x: 0.0,
             y: 0.0,
@@ -392,8 +502,8 @@ mod tests {
             limit: Some(10),
         };
 
-        let response_a = service_a.query_radius(request).unwrap();
-        let response_b = service_b
+        let response_a = dataset_a.query_radius(request).unwrap();
+        let response_b = dataset_b
             .query_radius(RadiusQueryRequest {
                 x: 0.0,
                 y: 0.0,
@@ -404,5 +514,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(response_a, response_b);
+    }
+
+    #[test]
+    fn lists_available_indices() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path().join("datasets");
+        let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
+
+        write_gzip_file(
+            &input_path,
+            "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
+             1,0,0,100,1,12.5,0.3\n",
+        );
+
+        for name in ["alpha", "beta"] {
+            let output_root = data_root.join(name);
+            run_ingestion(IngestConfig {
+                inputs: vec![input_path.display().to_string()],
+                output_root: output_root.display().to_string(),
+            })
+            .unwrap();
+            run_build_index(BuildIndexConfig {
+                data_root: output_root.display().to_string(),
+                octree_depth: DEFAULT_DEPTH,
+                bounds: DEFAULT_BOUNDS,
+            })
+            .unwrap();
+        }
+
+        let catalog = Arc::new(QueryCatalog::load(&data_root.display().to_string()).unwrap());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let response = {
+                let app = build_app(catalog);
+                app.oneshot(
+                    Request::builder()
+                        .uri("/indices")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            };
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(std::str::from_utf8(&body).unwrap(), "alpha\nbeta\n");
+        });
     }
 }
