@@ -174,10 +174,8 @@ def ingest_job_args(
     data_root: str,
     urls: list[str],
 ) -> list[str]:
-    ingest_args = []
-    for url in urls:
-        ingest_args.extend(["--input", url])
-    ingest_args.extend(["--output-root", data_root])
+    ingest_args = [f"--input={url}" for url in urls]
+    ingest_args.append(f"--output-root={data_root}")
     return [
         "--image",
         image_uri,
