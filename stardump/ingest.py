@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -76,19 +77,35 @@ def current_settings() -> dict[str, str | int]:
         "image_uri": current_image_uri(project_id),
         "bucket_name": bucket_name,
         "mount_root": mount_root,
-        "job_prefix": os.environ.get("JOB_PREFIX", "star-dump-ingest-full"),
+        "ingest_job_name": os.environ.get("INGEST_JOB_NAME", "star-dump-ingest"),
         "build_index_job_name": os.environ.get("BUILD_INDEX_JOB_NAME", "star-dump-build-index"),
         "service_account_email": os.environ.get(
             "SERVICE_ACCOUNT_EMAIL",
             f"{os.environ.get('SERVICE_ACCOUNT_NAME', 'star-dump-run')}@{project_id}.iam.gserviceaccount.com",
         ),
         "octree_depth": env_int("OCTREE_DEPTH", 6),
-        "batch_size": env_int("BATCH_SIZE", 1),
+        "parallelism": env_int("PARALLELISM", 0),
     }
 
 
 def join_with_commas(args: list[str]) -> str:
     return ",".join(args)
+
+
+def upload_manifest(bucket_name: str, run_name: str, urls: list[str]) -> str:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as file:
+        for url in urls:
+            file.write(url)
+            file.write("\n")
+        manifest_path = file.name
+
+    object_uri = f"gs://{bucket_name}/{run_name}/inputs.txt"
+    try:
+        run(["gcloud", "storage", "cp", manifest_path, object_uri])
+    finally:
+        os.unlink(manifest_path)
+
+    return object_uri
 
 
 def job_exists(name: str) -> bool:
@@ -175,10 +192,14 @@ def ingest_job_args(
     bucket_name: str,
     mount_root: str,
     data_root: str,
-    urls: list[str],
+    input_manifest: str,
+    task_count: int,
+    parallelism: int,
 ) -> list[str]:
-    ingest_args = [f"--input={url}" for url in urls]
-    ingest_args.append(f"--output-root={data_root}")
+    ingest_args = [
+        f"--input-manifest={input_manifest}",
+        f"--output-root={data_root}",
+    ]
     return [
         "--image",
         image_uri,
@@ -188,6 +209,10 @@ def ingest_job_args(
         "1Gi",
         "--task-timeout=3600",
         "--max-retries=0",
+        "--tasks",
+        str(task_count),
+        "--parallelism",
+        str(parallelism),
         "--add-volume",
         f"name=gcs,type=cloud-storage,bucket={bucket_name},readonly=false",
         "--add-volume-mount",
@@ -223,10 +248,6 @@ def build_index_job_args(
         "/usr/local/bin/build-index",
         "--args=" + join_with_commas(["--data-root", data_root, "--octree-depth", str(octree_depth)]),
     ]
-
-
-def batched(values: list[str], size: int) -> list[list[str]]:
-    return [values[index:index + size] for index in range(0, len(values), size)]
 
 
 def write_state(state: dict) -> None:
@@ -278,15 +299,22 @@ def execution_condition(execution_name: str) -> dict:
     }
 
 
+def state_executions(state: dict) -> list[dict]:
+    executions = state.get("executions")
+    if executions is not None:
+        return executions
+    return state.get("batches", [])
+
+
 def status_rows(state: dict) -> list[dict]:
     rows = []
-    for batch in state["batches"]:
+    for execution in state_executions(state):
         rows.append(
             {
-                "job_name": batch["job_name"],
-                "execution_name": batch["execution_name"],
-                "input_count": batch["input_count"],
-                **execution_condition(batch["execution_name"]),
+                "job_name": execution["job_name"],
+                "execution_name": execution["execution_name"],
+                "input_count": execution["input_count"],
+                **execution_condition(execution["execution_name"]),
             }
         )
     return rows
@@ -315,46 +343,49 @@ def start_ingest() -> None:
     urls = fetch_gaia_source_urls()
     if not urls:
         raise SystemExit("failed to fetch Gaia source URL list")
+    run_id = run_name(urls)
     data_root = os.environ.get("DATA_ROOT", default_data_root(settings["mount_root"], urls))
-
-    batches = batched(urls, settings["batch_size"])
-    started_batches = []
-
-    for batch_index, batch_urls in enumerate(batches):
-        job_name = f"{settings['job_prefix']}-{batch_index:03d}"
-        job_args = ingest_job_args(
-            settings["image_uri"],
-            settings["service_account_email"],
-            settings["bucket_name"],
-            settings["mount_root"],
-            data_root,
-            batch_urls,
-        )
-        create_or_update_job(job_name, job_args)
-        execution_name = execute_job_async(job_name)
-        started_batches.append(
-            {
-                "job_name": job_name,
-                "execution_name": execution_name,
-                "input_count": len(batch_urls),
-            }
-        )
-        print(f"started {job_name} as {execution_name}")
+    input_manifest = upload_manifest(settings["bucket_name"], run_id, urls)
+    task_count = len(urls)
+    parallelism = settings["parallelism"] or task_count
+    job_name = settings["ingest_job_name"]
+    job_args = ingest_job_args(
+        settings["image_uri"],
+        settings["service_account_email"],
+        settings["bucket_name"],
+        settings["mount_root"],
+        data_root,
+        f"{settings['mount_root']}/{run_id}/inputs.txt",
+        task_count,
+        parallelism,
+    )
+    create_or_update_job(job_name, job_args)
+    execution_name = execute_job_async(job_name)
+    executions = [
+        {
+            "job_name": job_name,
+            "execution_name": execution_name,
+            "input_count": len(urls),
+        }
+    ]
+    print(f"started {job_name} as {execution_name}")
 
     write_state(
         {
-            "batches": started_batches,
+            "executions": executions,
             "build_index_job_name": settings["build_index_job_name"],
             "data_root": data_root,
             "image_uri": settings["image_uri"],
+            "input_manifest": input_manifest,
             "octree_depth": settings["octree_depth"],
-            "run_name": run_name(urls),
+            "run_name": run_id,
         }
     )
 
     print(f"gaia_source_files: {len(urls)}")
-    print(f"ingest_batches: {len(batches)}")
-    print(f"run_name: {run_name(urls)}")
+    print(f"ingest_tasks: {task_count}")
+    print(f"parallelism: {parallelism}")
+    print(f"run_name: {run_id}")
     print(f"data_root: {data_root}")
     print(f"state_file: {STATE_PATH}")
     print("next: python3 -m stardump ingest status")
