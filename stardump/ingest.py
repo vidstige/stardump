@@ -29,11 +29,6 @@ def run(args: list[str], *, capture_output: bool = False) -> str:
     return result.stdout.strip() if capture_output else ""
 
 
-def env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    return int(value) if value else default
-
-
 def current_project_id() -> str:
     project_id = run(["gcloud", "config", "get-value", "project"], capture_output=True)
     if not project_id or project_id == "(unset)":
@@ -48,12 +43,16 @@ def current_project_number(project_id: str) -> str:
     )
 
 
-def current_image_uri(project_id: str) -> str:
-    override = os.environ.get("IMAGE_URI")
-    if override:
-        return override
-
+def default_image_uri(project_id: str) -> str:
     return f"gcr.io/{project_id}/star-dump:latest"
+
+
+def default_bucket_name(project_number: str) -> str:
+    return f"star-dump-data-{project_number}"
+
+
+def default_service_account_email(project_id: str) -> str:
+    return f"star-dump-run@{project_id}.iam.gserviceaccount.com"
 
 
 def run_name(urls: list[str]) -> str:
@@ -66,27 +65,6 @@ def run_name(urls: list[str]) -> str:
 
 def default_data_root(mount_root: str, urls: list[str]) -> str:
     return f"{mount_root}/{run_name(urls)}"
-
-
-def current_settings() -> dict[str, str | int]:
-    project_id = current_project_id()
-    project_number = current_project_number(project_id)
-    bucket_name = os.environ.get("BUCKET_NAME", f"star-dump-data-{project_number}")
-    mount_root = os.environ.get("MOUNT_ROOT", "/mnt/gcs")
-
-    return {
-        "image_uri": current_image_uri(project_id),
-        "bucket_name": bucket_name,
-        "mount_root": mount_root,
-        "ingest_job_name": os.environ.get("INGEST_JOB_NAME", "star-dump-ingest"),
-        "build_index_job_name": os.environ.get("BUILD_INDEX_JOB_NAME", "star-dump-build-index"),
-        "service_account_email": os.environ.get(
-            "SERVICE_ACCOUNT_EMAIL",
-            f"{os.environ.get('SERVICE_ACCOUNT_NAME', 'star-dump-run')}@{project_id}.iam.gserviceaccount.com",
-        ),
-        "octree_depth": env_int("OCTREE_DEPTH", 6),
-        "parallelism": env_int("PARALLELISM", 0),
-    }
 
 
 def join_with_commas(args: list[str]) -> str:
@@ -381,25 +359,39 @@ def print_status(rows: list[dict]) -> None:
             print(row["log_uri"])
 
 
-def start_ingest() -> None:
-    settings = current_settings()
+def start_ingest(
+    *,
+    image_uri: str | None,
+    bucket_name: str | None,
+    mount_root: str,
+    ingest_job_name: str,
+    build_index_job_name: str,
+    service_account_email: str | None,
+    parallelism: int,
+    data_root: str | None,
+) -> None:
+    project_id = current_project_id()
+    project_number = current_project_number(project_id)
+    image_uri = image_uri or default_image_uri(project_id)
+    bucket_name = bucket_name or default_bucket_name(project_number)
+    service_account_email = service_account_email or default_service_account_email(project_id)
     urls = fetch_gaia_source_urls()
     if not urls:
         raise SystemExit("failed to fetch Gaia source URL list")
+
     checksums = fetch_gaia_source_md5s()
     run_id = run_name(urls)
-    data_root = os.environ.get("DATA_ROOT", default_data_root(settings["mount_root"], urls))
-    input_manifest = upload_manifest(settings["bucket_name"], run_id, urls, checksums)
+    data_root = data_root or default_data_root(mount_root, urls)
+    input_manifest = upload_manifest(bucket_name, run_id, urls, checksums)
     task_count = len(urls)
-    parallelism = settings["parallelism"] or task_count
-    job_name = settings["ingest_job_name"]
+    job_name = ingest_job_name
     job_args = ingest_job_args(
-        settings["image_uri"],
-        settings["service_account_email"],
-        settings["bucket_name"],
-        settings["mount_root"],
+        image_uri,
+        service_account_email,
+        bucket_name,
+        mount_root,
         data_root,
-        f"{settings['mount_root']}/{run_id}/inputs.txt",
+        f"{mount_root}/{run_id}/inputs.txt",
         task_count,
         parallelism,
     )
@@ -417,11 +409,10 @@ def start_ingest() -> None:
     write_state(
         {
             "executions": executions,
-            "build_index_job_name": settings["build_index_job_name"],
+            "build_index_job_name": build_index_job_name,
             "data_root": data_root,
-            "image_uri": settings["image_uri"],
+            "image_uri": image_uri,
             "input_manifest": input_manifest,
-            "octree_depth": settings["octree_depth"],
             "run_name": run_id,
         }
     )
@@ -433,7 +424,6 @@ def start_ingest() -> None:
     print(f"data_root: {data_root}")
     print(f"state_file: {STATE_PATH}")
     print("next: python3 -m stardump ingest status")
-    print("then: python3 -m stardump ingest status")
     print("then: python3 -m stardump ingest build-index")
 
 
@@ -450,35 +440,45 @@ def status_ingest() -> None:
         raise SystemExit(1)
 
 
-def start_build_index() -> None:
-    settings = current_settings()
+def start_build_index(
+    *,
+    image_uri: str | None,
+    bucket_name: str | None,
+    mount_root: str,
+    build_index_job_name: str,
+    service_account_email: str | None,
+    octree_depth: int,
+    data_root: str | None,
+) -> None:
+    project_id = current_project_id()
+    project_number = current_project_number(project_id)
 
     try:
         state = read_state()
-        data_root = state["data_root"]
-        image_uri = state["image_uri"]
-        octree_depth = state["octree_depth"]
+    except FileNotFoundError:
+        state = None
+
+    if state is not None:
         rows = status_rows(state)
         if any(row["state"] != "succeeded" for row in rows):
             print_status(rows)
             raise SystemExit("cannot start build-index before all ingest batches succeeded")
-    except FileNotFoundError:
-        data_root = os.environ.get("DATA_ROOT")
-        if not data_root:
-            raise SystemExit(
-                f"missing state file: {STATE_PATH}; set DATA_ROOT explicitly to run build-index"
-            )
-        image_uri = settings["image_uri"]
-        octree_depth = settings["octree_depth"]
 
-    job_name = settings["build_index_job_name"]
+    image_uri = image_uri or (state or {}).get("image_uri") or default_image_uri(project_id)
+    bucket_name = bucket_name or default_bucket_name(project_number)
+    service_account_email = service_account_email or default_service_account_email(project_id)
+    data_root = data_root or (state or {}).get("data_root")
+    if not data_root:
+        raise SystemExit(f"missing state file: {STATE_PATH}; pass --data-root to run build-index")
+
+    job_name = build_index_job_name
     create_or_update_job(
         job_name,
         build_index_job_args(
             image_uri,
-            settings["service_account_email"],
-            settings["bucket_name"],
-            settings["mount_root"],
+            service_account_email,
+            bucket_name,
+            mount_root,
             data_root,
             octree_depth,
         ),
