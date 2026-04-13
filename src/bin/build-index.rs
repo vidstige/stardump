@@ -2,10 +2,11 @@ use clap::Parser;
 
 use star_dump::build_index::{
     BuildIndexConfig, BuildIndexResult, DEFAULT_DEPTH, IndexBuilder, bounds_for_quality_threshold,
-    load_source_metadata, read_canonical_part_rows, run_build_index,
+    create_staging_output, load_source_metadata, publish_staged_index, read_canonical_part_rows,
+    run_build_index,
 };
 use star_dump::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, passes_parallax_quality};
-use star_dump::storage::{local_path, validate_serving_layout};
+use star_dump::storage::local_path;
 
 #[derive(Parser)]
 struct Args {
@@ -37,8 +38,9 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
         });
     }
 
+    let (_staging_dir, staging_root) = create_staging_output(args.octree_depth)?;
     let mut builder = IndexBuilder::new(
-        &data_root,
+        &staging_root,
         args.octree_depth,
         bounds_for_quality_threshold(args.quality_threshold),
     )?;
@@ -59,7 +61,7 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
         }
     }
     let (index, rows_in_bounds) = builder.finish()?;
-    validate_serving_layout(&data_root, &index)?;
+    publish_staged_index(&staging_root, &data_root, &index)?;
     Ok(BuildIndexResult {
         index,
         sources_seen: metadata.len(),

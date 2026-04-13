@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use tempfile::TempDir;
 
 use crate::formats::{
     CANONICAL_ROOT, CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, OctreeIndex,
@@ -93,6 +94,51 @@ fn prepare_output_root(output_root: &Path, octree_depth: u8) -> Result<()> {
     Ok(())
 }
 
+fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+
+    for entry in
+        fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read {}", source.display()))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", source_path.display()))?
+            .is_dir()
+        {
+            copy_directory_recursive(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_index_output(
+    output_root: &Path,
+    octree_depth: u8,
+    bounds: Bounds3,
+    leaves: Vec<u32>,
+) -> Result<OctreeIndex> {
+    let index = OctreeIndex {
+        depth: octree_depth,
+        bounds,
+        leaves,
+    };
+    write_octree_index(&output_root.join(OCTREE_INDEX_FILENAME), &index)?;
+    Ok(index)
+}
+
 fn serving_rows_for_canonical_part(
     octree: OctreeConfig,
     rows: Vec<CanonicalRow>,
@@ -129,19 +175,42 @@ pub fn read_canonical_part_rows(
     )
 }
 
-fn write_index_output(
-    output_root: &Path,
-    octree_depth: u8,
-    bounds: Bounds3,
-    leaves: Vec<u32>,
-) -> Result<OctreeIndex> {
-    let index = OctreeIndex {
-        depth: octree_depth,
-        bounds,
-        leaves,
-    };
-    write_octree_index(&output_root.join(OCTREE_INDEX_FILENAME), &index)?;
-    Ok(index)
+pub fn create_staging_output(octree_depth: u8) -> Result<(TempDir, PathBuf)> {
+    let staging_dir =
+        tempfile::tempdir().context("failed to create temporary staging directory")?;
+    let output_root = staging_dir.path().join("dataset");
+    prepare_output_root(&output_root, octree_depth)?;
+    Ok((staging_dir, output_root))
+}
+
+pub fn publish_staged_index(
+    staging_root: &Path,
+    data_root: &Path,
+    index: &OctreeIndex,
+) -> Result<()> {
+    validate_serving_layout(staging_root, index)?;
+
+    let staged_indices_root = staging_root.join(indices_directory(index.depth));
+    let final_indices_root = data_root.join(indices_directory(index.depth));
+    if final_indices_root.exists() {
+        fs::remove_dir_all(&final_indices_root)
+            .with_context(|| format!("failed to clear {}", final_indices_root.display()))?;
+    }
+    copy_directory_recursive(&staged_indices_root, &final_indices_root)?;
+
+    fs::copy(
+        staging_root.join(OCTREE_INDEX_FILENAME),
+        data_root.join(OCTREE_INDEX_FILENAME),
+    )
+    .with_context(|| {
+        format!(
+            "failed to copy {} to {}",
+            staging_root.join(OCTREE_INDEX_FILENAME).display(),
+            data_root.join(OCTREE_INDEX_FILENAME).display()
+        )
+    })?;
+
+    Ok(())
 }
 
 pub struct IndexBuilder {
@@ -201,14 +270,15 @@ pub fn run_build_index(config: BuildIndexConfig) -> Result<BuildIndexResult> {
         bail!("no canonical source metadata found under {CANONICAL_ROOT}");
     }
 
-    let mut builder = IndexBuilder::new(&data_root, config.octree_depth, config.bounds)?;
+    let (_staging_dir, staging_root) = create_staging_output(config.octree_depth)?;
+    let mut builder = IndexBuilder::new(&staging_root, config.octree_depth, config.bounds)?;
     for source in &metadata {
         for part in &source.canonical_parts {
             builder.append_rows(read_canonical_part_rows(&data_root, source, part)?)?;
         }
     }
     let (index, rows_in_bounds) = builder.finish()?;
-    validate_serving_layout(&data_root, &index)?;
+    publish_staged_index(&staging_root, &data_root, &index)?;
     Ok(BuildIndexResult {
         index,
         sources_seen: metadata.len(),
