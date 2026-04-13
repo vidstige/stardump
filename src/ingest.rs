@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,13 +18,20 @@ use crate::storage::{local_path, read_optional_bytes, validate_canonical_layout}
 
 #[derive(Clone, Debug)]
 pub struct IngestConfig {
-    pub inputs: Vec<String>,
-    pub output_root: String,
+    inputs: Vec<String>,
+    input_manifest: Option<String>,
+    output_root: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct IngestResult {
     pub metadata: Vec<SourceMetadata>,
+}
+
+#[derive(Clone, Debug)]
+struct InputSpec {
+    input: String,
+    expected_md5: Option<String>,
 }
 
 #[derive(Debug)]
@@ -33,6 +41,26 @@ struct StagedInput {
     source_bulk_url: String,
     source_bulk_md5: String,
     _tempdir: Option<tempfile::TempDir>,
+}
+
+impl IngestConfig {
+    pub fn new(output_root: String) -> Self {
+        Self {
+            inputs: Vec::new(),
+            input_manifest: None,
+            output_root,
+        }
+    }
+
+    pub fn with_inputs(mut self, inputs: Vec<String>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    pub fn with_input_manifest(mut self, input_manifest: Option<String>) -> Self {
+        self.input_manifest = input_manifest;
+        self
+    }
 }
 
 fn parse_optional_f32(value: Option<&str>) -> Result<Option<f32>> {
@@ -79,6 +107,75 @@ fn input_name(input: &str) -> String {
     input.rsplit('/').next().unwrap_or(input).trim().to_string()
 }
 
+fn parse_cloud_run_usize(name: &str) -> Result<Option<usize>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value.parse()?)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_manifest(path: &str) -> Result<Vec<InputSpec>> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            if let Some((expected_md5, input)) = line.split_once('\t') {
+                InputSpec {
+                    input: input.to_string(),
+                    expected_md5: Some(expected_md5.to_string()),
+                }
+            } else {
+                InputSpec {
+                    input: line.to_string(),
+                    expected_md5: None,
+                }
+            }
+        })
+        .collect())
+}
+
+fn sharded_inputs(inputs: Vec<InputSpec>) -> Result<Vec<InputSpec>> {
+    let task_index = parse_cloud_run_usize("CLOUD_RUN_TASK_INDEX")?;
+    let task_count = parse_cloud_run_usize("CLOUD_RUN_TASK_COUNT")?;
+
+    match (task_index, task_count) {
+        (Some(index), Some(count)) => {
+            if count == 0 {
+                bail!("CLOUD_RUN_TASK_COUNT must be greater than zero");
+            }
+            if index >= count {
+                bail!("CLOUD_RUN_TASK_INDEX must be less than CLOUD_RUN_TASK_COUNT");
+            }
+            Ok(inputs
+                .into_iter()
+                .enumerate()
+                .filter_map(|(offset, input)| (offset % count == index).then_some(input))
+                .collect())
+        }
+        (None, None) => Ok(inputs),
+        _ => bail!("CLOUD_RUN_TASK_INDEX and CLOUD_RUN_TASK_COUNT must be set together"),
+    }
+}
+
+fn collect_inputs(inputs: Vec<String>, input_manifest: Option<String>) -> Result<Vec<InputSpec>> {
+    let mut all_inputs = inputs
+        .into_iter()
+        .map(|input| InputSpec {
+            input,
+            expected_md5: None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(input_manifest) = input_manifest {
+        all_inputs.extend(read_manifest(&input_manifest)?);
+    }
+    if all_inputs.is_empty() {
+        bail!("at least one --input or --input-manifest value is required");
+    }
+    sharded_inputs(all_inputs)
+}
+
 fn open_input(input: &str) -> Result<Box<dyn Read>> {
     if input.starts_with("http://") || input.starts_with("https://") {
         let response = reqwest::blocking::get(input)
@@ -120,7 +217,7 @@ fn copy_with_md5<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> Result<St
     }
 }
 
-fn stage_input(input: &str) -> Result<StagedInput> {
+fn stage_input(input: &str, trusted_md5: Option<&str>) -> Result<StagedInput> {
     let input_name = input_name(input);
     if input.starts_with("http://") || input.starts_with("https://") {
         let tempdir = tempdir().context("failed to create temporary input directory")?;
@@ -136,6 +233,11 @@ fn stage_input(input: &str) -> Result<StagedInput> {
         writer
             .flush()
             .with_context(|| format!("failed to flush {}", path.display()))?;
+        if let Some(trusted_md5) = trusted_md5 {
+            if source_bulk_md5 != trusted_md5 {
+                bail!("trusted md5 mismatch for {input}");
+            }
+        }
         return Ok(StagedInput {
             path,
             input_name,
@@ -150,6 +252,11 @@ fn stage_input(input: &str) -> Result<StagedInput> {
         fs::File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let source_bulk_md5 = md5_hex(&mut reader)?;
+    if let Some(trusted_md5) = trusted_md5 {
+        if source_bulk_md5 != trusted_md5 {
+            bail!("trusted md5 mismatch for {input}");
+        }
+    }
     Ok(StagedInput {
         path,
         input_name,
@@ -211,25 +318,32 @@ fn read_canonical_rows(input_path: &Path) -> Result<(Vec<CanonicalRow>, SourceCo
     Ok((rows, counts))
 }
 
-fn metadata_matches(metadata: &SourceMetadata, staged_input: &StagedInput) -> bool {
-    metadata.source_bulk_url == staged_input.source_bulk_url
-        && metadata.source_bulk_md5 == staged_input.source_bulk_md5
-        && metadata.input_name == staged_input.input_name
+fn metadata_matches(
+    metadata: &SourceMetadata,
+    source_bulk_url: &str,
+    source_bulk_md5: &str,
+    input_name: &str,
+) -> bool {
+    metadata.source_bulk_url == source_bulk_url
+        && metadata.source_bulk_md5 == source_bulk_md5
+        && metadata.input_name == input_name
 }
 
 fn load_existing_source(
     output_root: &Path,
-    staged_input: &StagedInput,
+    source_bulk_url: &str,
+    source_bulk_md5: &str,
+    input_name: &str,
 ) -> Result<Option<SourceMetadata>> {
     let Some(metadata_bytes) =
-        read_optional_bytes(&output_root.join(metadata_path_for_source(&staged_input.input_name)))?
+        read_optional_bytes(&output_root.join(metadata_path_for_source(input_name)))?
     else {
         return Ok(None);
     };
     let Ok(metadata) = decode_source_metadata(&metadata_bytes) else {
         return Ok(None);
     };
-    if !metadata_matches(&metadata, staged_input) {
+    if !metadata_matches(&metadata, source_bulk_url, source_bulk_md5, input_name) {
         return Ok(None);
     }
     if validate_canonical_layout(output_root, &metadata).is_err() {
@@ -272,9 +386,26 @@ fn write_source_output(
     Ok(metadata)
 }
 
-fn ingest_one(output_root: &Path, input: &str) -> Result<SourceMetadata> {
-    let staged_input = stage_input(input)?;
-    if let Some(metadata) = load_existing_source(output_root, &staged_input)? {
+fn ingest_one(
+    output_root: &Path,
+    input: &str,
+    trusted_md5: Option<&str>,
+) -> Result<SourceMetadata> {
+    let input_name = input_name(input);
+    if let Some(trusted_md5) = trusted_md5 {
+        if let Some(metadata) = load_existing_source(output_root, input, trusted_md5, &input_name)?
+        {
+            return Ok(metadata);
+        }
+    }
+
+    let staged_input = stage_input(input, trusted_md5)?;
+    if let Some(metadata) = load_existing_source(
+        output_root,
+        &staged_input.source_bulk_url,
+        &staged_input.source_bulk_md5,
+        &staged_input.input_name,
+    )? {
         return Ok(metadata);
     }
 
@@ -295,13 +426,30 @@ fn ingest_one(output_root: &Path, input: &str) -> Result<SourceMetadata> {
 }
 
 pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
-    if config.inputs.is_empty() {
-        bail!("at least one --input is required");
+    let input_specs = collect_inputs(config.inputs, config.input_manifest)?;
+    if input_specs.is_empty() {
+        return Ok(IngestResult {
+            metadata: Vec::new(),
+        });
     }
     let output_root = local_path(&config.output_root)?;
-    let mut metadata = Vec::with_capacity(config.inputs.len());
-    for input in &config.inputs {
-        metadata.push(ingest_one(&output_root, input)?);
+    let mut trusted_md5_by_input = HashMap::new();
+    let inputs = input_specs
+        .into_iter()
+        .map(|input_spec| {
+            if let Some(expected_md5) = input_spec.expected_md5 {
+                trusted_md5_by_input.insert(input_spec.input.clone(), expected_md5);
+            }
+            input_spec.input
+        })
+        .collect::<Vec<_>>();
+    let mut metadata = Vec::with_capacity(inputs.len());
+    for input in &inputs {
+        metadata.push(ingest_one(
+            &output_root,
+            input,
+            trusted_md5_by_input.get(input).map(String::as_str),
+        )?);
     }
     Ok(IngestResult { metadata })
 }
@@ -317,6 +465,10 @@ mod tests {
     use crate::formats::{read_canonical_rows, read_source_metadata};
 
     use super::*;
+
+    fn test_config(inputs: Vec<String>, output_path: &Path) -> IngestConfig {
+        IngestConfig::new(output_path.display().to_string()).with_inputs(inputs)
+    }
 
     fn write_gzip_file(path: &Path, body: &str) {
         let file = fs::File::create(path).unwrap();
@@ -340,10 +492,10 @@ mod tests {
              4,0,0,-1,0.3,15.5,1.2\n",
         );
 
-        let result = run_ingestion(IngestConfig {
-            inputs: vec![input_path.display().to_string()],
-            output_root: output_path.display().to_string(),
-        })
+        let result = run_ingestion(test_config(
+            vec![input_path.display().to_string()],
+            &output_path,
+        ))
         .unwrap();
 
         let metadata = read_source_metadata(
@@ -394,10 +546,10 @@ mod tests {
              2,1,2,null,3,13.2,0.5\n",
         );
 
-        let result = run_ingestion(IngestConfig {
-            inputs: vec![input_path.display().to_string()],
-            output_root: output_path.display().to_string(),
-        })
+        let result = run_ingestion(test_config(
+            vec![input_path.display().to_string()],
+            &output_path,
+        ))
         .unwrap();
 
         assert_eq!(result.metadata[0].counts.rows_seen, 2);
@@ -418,19 +570,19 @@ mod tests {
              2,90,0,100,1,13.5,0.6\n",
         );
 
-        let first = run_ingestion(IngestConfig {
-            inputs: vec![input_path.display().to_string()],
-            output_root: output_path.display().to_string(),
-        })
+        let first = run_ingestion(test_config(
+            vec![input_path.display().to_string()],
+            &output_path,
+        ))
         .unwrap();
         let metadata_path =
             output_path.join(metadata_path_for_source(&first.metadata[0].input_name));
         let metadata_before = fs::read(&metadata_path).unwrap();
 
-        let second = run_ingestion(IngestConfig {
-            inputs: vec![input_path.display().to_string()],
-            output_root: output_path.display().to_string(),
-        })
+        let second = run_ingestion(test_config(
+            vec![input_path.display().to_string()],
+            &output_path,
+        ))
         .unwrap();
         let metadata_after = fs::read(metadata_path).unwrap();
 
@@ -449,10 +601,10 @@ mod tests {
             "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
              1,0,0,100,1,12.5,0.3\n",
         );
-        let first = run_ingestion(IngestConfig {
-            inputs: vec![input_path.display().to_string()],
-            output_root: output_path.display().to_string(),
-        })
+        let first = run_ingestion(test_config(
+            vec![input_path.display().to_string()],
+            &output_path,
+        ))
         .unwrap();
 
         write_gzip_file(
@@ -460,10 +612,10 @@ mod tests {
             "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
              7,0,0,100,1,14.5,0.8\n",
         );
-        let second = run_ingestion(IngestConfig {
-            inputs: vec![input_path.display().to_string()],
-            output_root: output_path.display().to_string(),
-        })
+        let second = run_ingestion(test_config(
+            vec![input_path.display().to_string()],
+            &output_path,
+        ))
         .unwrap();
         let metadata = read_source_metadata(
             &output_path.join(metadata_path_for_source(&second.metadata[0].input_name)),
@@ -482,5 +634,55 @@ mod tests {
         );
         assert_eq!(canonical_rows.len(), 1);
         assert_eq!(canonical_rows[0].source_id, 7);
+    }
+
+    #[test]
+    fn skips_remote_input_before_download_when_trusted_md5_matches() {
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("run");
+        let input = "https://example.invalid/GaiaSource_786097-786431.csv.gz".to_string();
+        let trusted_md5 = "0123456789abcdef0123456789abcdef".to_string();
+        let rows = vec![CanonicalRow {
+            source_id: 1,
+            ra: 0.0,
+            dec: 0.0,
+            parallax: 10.0,
+            parallax_error: 1.0,
+            phot_g_mean_mag: 12.0,
+            bp_rp: 0.5,
+        }];
+        let counts = SourceCounts {
+            rows_seen: 1,
+            rows_with_positive_parallax: 1,
+            rows_written: 1,
+        };
+
+        fs::create_dir_all(&output_path).unwrap();
+        write_source_output(
+            &output_path,
+            &StagedInput {
+                path: PathBuf::new(),
+                input_name: input_name(&input),
+                source_bulk_url: input.clone(),
+                source_bulk_md5: trusted_md5.clone(),
+                _tempdir: None,
+            },
+            &rows,
+            counts,
+            "2026-01-01T00:00:00Z".to_string(),
+            "2026-01-01T00:00:01Z".to_string(),
+        )
+        .unwrap();
+
+        let manifest_path = dir.path().join("inputs.txt");
+        fs::write(&manifest_path, format!("{trusted_md5}\t{input}\n")).unwrap();
+        let result = run_ingestion(
+            IngestConfig::new(output_path.display().to_string())
+                .with_input_manifest(Some(manifest_path.display().to_string())),
+        )
+        .unwrap();
+
+        assert_eq!(result.metadata.len(), 1);
+        assert_eq!(result.metadata[0].counts.rows_written, 1);
     }
 }

@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 PREFIX = "Gaia/gdr3/gaia_source/"
 CDN_BASE = "https://cdn.gea.esac.esa.int/"
 LISTING_BASE = "https://gaia.eu-1.cdn77-storage.com/"
+MD5SUM_URL = f"{CDN_BASE}{PREFIX}_MD5SUM.txt"
 S3_NAMESPACE = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 STATE_PATH = ".stardump/ingest-state.json"
 
@@ -92,9 +93,27 @@ def join_with_commas(args: list[str]) -> str:
     return ",".join(args)
 
 
-def upload_manifest(bucket_name: str, run_name: str, urls: list[str]) -> str:
+def fetch_gaia_source_md5s() -> dict[str, str]:
+    checksums = {}
+    with urllib.request.urlopen(MD5SUM_URL) as response:
+        for line in response.read().decode("utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            checksum, filename = line.split(None, 1)
+            checksums[filename] = checksum
+    return checksums
+
+
+def upload_manifest(bucket_name: str, run_name: str, urls: list[str], checksums: dict[str, str]) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as file:
         for url in urls:
+            filename = url.rsplit("/", 1)[-1]
+            checksum = checksums.get(filename)
+            if not checksum:
+                raise SystemExit(f"missing checksum for {filename} in {MD5SUM_URL}")
+            file.write(checksum)
+            file.write("\t")
             file.write(url)
             file.write("\n")
         manifest_path = file.name
@@ -367,9 +386,10 @@ def start_ingest() -> None:
     urls = fetch_gaia_source_urls()
     if not urls:
         raise SystemExit("failed to fetch Gaia source URL list")
+    checksums = fetch_gaia_source_md5s()
     run_id = run_name(urls)
     data_root = os.environ.get("DATA_ROOT", default_data_root(settings["mount_root"], urls))
-    input_manifest = upload_manifest(settings["bucket_name"], run_id, urls)
+    input_manifest = upload_manifest(settings["bucket_name"], run_id, urls, checksums)
     task_count = len(urls)
     parallelism = settings["parallelism"] or task_count
     job_name = settings["ingest_job_name"]
