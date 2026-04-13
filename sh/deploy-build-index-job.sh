@@ -33,8 +33,9 @@ fi
 gcloud beta run jobs "${deploy_command}" "${job_name}" \
   --image "${image_uri}" \
   --service-account "${service_account_email}" \
-  --memory 1Gi \
-  --task-timeout=3600 \
+  --cpu 4 \
+  --memory 8Gi \
+  --task-timeout=14400 \
   --max-retries=0 \
   --add-volume "name=gcs,type=cloud-storage,bucket=${bucket_name},readonly=false" \
   --add-volume-mount "volume=gcs,mount-path=${mount_root}" \
