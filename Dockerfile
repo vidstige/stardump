@@ -21,8 +21,9 @@ RUN useradd --create-home --uid 10001 stardump
 COPY --from=build /app/target/release/ingest /usr/local/bin/ingest
 COPY --from=build /app/target/release/build-index /usr/local/bin/build-index
 COPY --from=build /app/target/release/query-api /usr/local/bin/query-api
+COPY sh/ingest-job-entrypoint.sh /usr/local/bin/ingest-job
 COPY sh/build-index-job-entrypoint.sh /usr/local/bin/build-index-job
-RUN chmod 755 /usr/local/bin/build-index-job
+RUN chmod 755 /usr/local/bin/ingest-job /usr/local/bin/build-index-job
 
 USER stardump
 ENTRYPOINT ["/usr/local/bin/query-api"]

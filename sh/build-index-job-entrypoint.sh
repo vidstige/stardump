@@ -1,30 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+config_path="/mnt/gcs/.stardump/build-index-config.txt"
 data_root=""
-passthrough=()
+octree_depth=""
 
-while (($# > 0)); do
-  case "$1" in
-    --data-root)
-      data_root="$2"
-      passthrough+=("$1" "$2")
-      shift 2
-      ;;
-    --data-root=*)
-      data_root="${1#*=}"
-      passthrough+=("$1")
-      shift
-      ;;
-    *)
-      passthrough+=("$1")
-      shift
-      ;;
+while IFS='=' read -r key value; do
+  case "${key}" in
+    data_root) data_root="${value}" ;;
+    octree_depth) octree_depth="${value}" ;;
   esac
-done
+done < "${config_path}"
 
-if [[ -z "${data_root}" ]]; then
-  echo "missing required argument: --data-root" >&2
+if [[ -z "${data_root}" || -z "${octree_depth}" ]]; then
+  echo "invalid build-index config: ${config_path}" >&2
   exit 1
 fi
 
@@ -32,7 +21,10 @@ tmp_root="$(mktemp -d /tmp/build-index.XXXXXX)"
 trap 'rm -rf "${tmp_root}"' EXIT
 
 output_root="${tmp_root}/dataset"
-/usr/local/bin/build-index "${passthrough[@]}" "--output-root=${output_root}"
+/usr/local/bin/build-index \
+  "--data-root=${data_root}" \
+  "--octree-depth=${octree_depth}" \
+  "--output-root=${output_root}"
 
 rm -rf "${data_root}/indices"
 mkdir -p "${data_root}/indices"
