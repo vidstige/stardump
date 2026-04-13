@@ -16,13 +16,13 @@ use crate::formats::{
     OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow, decode_octree_index, decode_serving_rows,
     indices_directory, leaf_filename,
 };
-use crate::octree::{OctreeConfig, morton_encode};
+use crate::octree::OctreeConfig;
 use crate::storage::{local_path, validate_serving_layout};
 
 #[derive(Clone)]
 pub struct QueryDataset {
     index: OctreeIndex,
-    occupied_leaves: HashSet<u32>,
+    occupied_nodes_by_depth: Vec<HashSet<u32>>,
     indices_root: PathBuf,
 }
 
@@ -78,33 +78,61 @@ fn dataset_root(data_root: &Path, name: &str) -> PathBuf {
     data_root.join(name)
 }
 
+fn occupied_nodes_by_depth(leaves: &[u32], depth: u8) -> Vec<HashSet<u32>> {
+    let mut nodes = (0..=depth).map(|_| HashSet::new()).collect::<Vec<_>>();
+    for &leaf in leaves {
+        for node_depth in 0..=depth {
+            let shift = 3 * (depth - node_depth) as u32;
+            nodes[node_depth as usize].insert(leaf >> shift);
+        }
+    }
+    nodes
+}
+
+fn collect_intersecting_leaves(
+    dataset: &QueryDataset,
+    octree: OctreeConfig,
+    center: [f32; 3],
+    radius: f32,
+    depth: u8,
+    node: u32,
+    leaves: &mut Vec<u32>,
+) {
+    if !dataset.occupied_nodes_by_depth[depth as usize].contains(&node) {
+        return;
+    }
+
+    let bounds = octree.bounds.leaf_bounds(depth, node);
+    if !bounds.intersects_sphere(center, radius) {
+        return;
+    }
+
+    if depth == octree.depth {
+        leaves.push(node);
+        return;
+    }
+
+    for child in 0..8 {
+        collect_intersecting_leaves(
+            dataset,
+            octree,
+            center,
+            radius,
+            depth + 1,
+            (node << 3) | child,
+            leaves,
+        );
+    }
+}
+
 fn intersecting_leaves(
     dataset: &QueryDataset,
     octree: OctreeConfig,
     center: [f32; 3],
     radius: f32,
 ) -> Vec<u32> {
-    let Some(ranges) = octree.leaf_ranges_for_bounds(
-        [center[0] - radius, center[1] - radius, center[2] - radius],
-        [center[0] + radius, center[1] + radius, center[2] + radius],
-    ) else {
-        return Vec::new();
-    };
-
     let mut leaves = Vec::new();
-    for x in ranges[0].0..=ranges[0].1 {
-        for y in ranges[1].0..=ranges[1].1 {
-            for z in ranges[2].0..=ranges[2].1 {
-                let morton = morton_encode(x, y, z);
-                if !dataset.occupied_leaves.contains(&morton) {
-                    continue;
-                }
-                if octree.leaf_bounds(morton).intersects_sphere(center, radius) {
-                    leaves.push(morton);
-                }
-            }
-        }
-    }
+    collect_intersecting_leaves(dataset, octree, center, radius, 0, 0, &mut leaves);
     leaves
 }
 
@@ -175,7 +203,7 @@ impl QueryDataset {
         validate_serving_layout(data_root, &index)?;
         let indices_root = data_root.join(indices_directory(index.depth));
         Ok(Self {
-            occupied_leaves: index.leaves.iter().copied().collect(),
+            occupied_nodes_by_depth: occupied_nodes_by_depth(&index.leaves, index.depth),
             index,
             indices_root,
         })
@@ -377,4 +405,122 @@ pub fn query_radius_csv(
     validate_request(&request)?;
     let matches = dataset.query_radius(request).map_err(internal_error)?;
     encode_matches_csv(&matches)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use crate::formats::OctreeIndex;
+    use crate::octree::{Bounds3, morton_encode};
+
+    use super::*;
+
+    fn synthetic_dataset(depth: u8) -> QueryDataset {
+        let mut leaves = Vec::new();
+        for x in 96..112 {
+            for y in 96..112 {
+                for z in 96..112 {
+                    leaves.push(morton_encode(x, y, z));
+                }
+            }
+        }
+        leaves.sort_unstable();
+
+        QueryDataset {
+            occupied_nodes_by_depth: occupied_nodes_by_depth(&leaves, depth),
+            index: OctreeIndex {
+                depth,
+                bounds: Bounds3 {
+                    min: [-4000.0, -4000.0, -4000.0],
+                    max: [4000.0, 4000.0, 4000.0],
+                },
+                leaves,
+            },
+            indices_root: PathBuf::new(),
+        }
+    }
+
+    fn flat_intersecting_leaves(
+        dataset: &QueryDataset,
+        octree: OctreeConfig,
+        center: [f32; 3],
+        radius: f32,
+    ) -> Vec<u32> {
+        let Some(ranges) = octree.leaf_ranges_for_bounds(
+            [center[0] - radius, center[1] - radius, center[2] - radius],
+            [center[0] + radius, center[1] + radius, center[2] + radius],
+        ) else {
+            return Vec::new();
+        };
+
+        let occupied_leaves = &dataset.occupied_nodes_by_depth[octree.depth as usize];
+        let mut leaves = Vec::new();
+        for x in ranges[0].0..=ranges[0].1 {
+            for y in ranges[1].0..=ranges[1].1 {
+                for z in ranges[2].0..=ranges[2].1 {
+                    let morton = morton_encode(x, y, z);
+                    if !occupied_leaves.contains(&morton) {
+                        continue;
+                    }
+                    if octree.leaf_bounds(morton).intersects_sphere(center, radius) {
+                        leaves.push(morton);
+                    }
+                }
+            }
+        }
+        leaves
+    }
+
+    #[test]
+    fn recursive_intersection_matches_flat_enumeration() {
+        let dataset = synthetic_dataset(7);
+        let octree = OctreeConfig {
+            depth: dataset.index.depth,
+            bounds: dataset.index.bounds,
+        };
+        let center = [0.0, 0.0, 0.0];
+        let radius = 250.0;
+
+        let mut recursive = intersecting_leaves(&dataset, octree, center, radius);
+        let mut flat = flat_intersecting_leaves(&dataset, octree, center, radius);
+        recursive.sort_unstable();
+        flat.sort_unstable();
+
+        assert_eq!(recursive, flat);
+    }
+
+    #[test]
+    #[ignore = "benchmark"]
+    fn clustered_query_traversal_benchmark() {
+        let dataset = synthetic_dataset(8);
+        let octree = OctreeConfig {
+            depth: dataset.index.depth,
+            bounds: dataset.index.bounds,
+        };
+        let center = [0.0, 0.0, 0.0];
+        let radius = 600.0;
+
+        let started = Instant::now();
+        let mut recursive_count = 0;
+        for _ in 0..500 {
+            recursive_count += intersecting_leaves(&dataset, octree, center, radius).len();
+        }
+        let recursive_elapsed = started.elapsed();
+
+        let started = Instant::now();
+        let mut flat_count = 0;
+        for _ in 0..500 {
+            flat_count += flat_intersecting_leaves(&dataset, octree, center, radius).len();
+        }
+        let flat_elapsed = started.elapsed();
+
+        assert_eq!(recursive_count, flat_count);
+        eprintln!(
+            "recursive={:?} flat={:?} speedup={:.2}x",
+            recursive_elapsed,
+            flat_elapsed,
+            flat_elapsed.as_secs_f64() / recursive_elapsed.as_secs_f64()
+        );
+    }
 }
