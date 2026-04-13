@@ -55,6 +55,7 @@ fn builds_index_from_multiple_canonical_sources() {
 
     let result = run_build_index(BuildIndexConfig {
         data_root: output_root.display().to_string(),
+        output_root: output_root.display().to_string(),
         octree_depth: DEFAULT_DEPTH,
         bounds: DEFAULT_BOUNDS,
     })
@@ -109,6 +110,7 @@ fn appends_rows_from_multiple_sources_into_one_leaf() {
 
     let result = run_build_index(BuildIndexConfig {
         data_root: output_root.display().to_string(),
+        output_root: output_root.display().to_string(),
         octree_depth: DEFAULT_DEPTH,
         bounds: DEFAULT_BOUNDS,
     })
@@ -150,6 +152,7 @@ fn serves_exact_radius_queries_over_written_shards() {
     .unwrap();
     run_build_index(BuildIndexConfig {
         data_root: output_path.display().to_string(),
+        output_root: output_path.display().to_string(),
         octree_depth: DEFAULT_DEPTH,
         bounds: DEFAULT_BOUNDS,
     })
@@ -212,6 +215,7 @@ fn returns_stable_results_for_repeated_ingestion_runs() {
         .unwrap();
         run_build_index(BuildIndexConfig {
             data_root: output_root.display().to_string(),
+            output_root: output_root.display().to_string(),
             octree_depth: DEFAULT_DEPTH,
             bounds: DEFAULT_BOUNDS,
         })
@@ -263,6 +267,7 @@ fn lists_available_indices() {
         .unwrap();
         run_build_index(BuildIndexConfig {
             data_root: output_root.display().to_string(),
+            output_root: output_root.display().to_string(),
             octree_depth: DEFAULT_DEPTH,
             bounds: DEFAULT_BOUNDS,
         })

@@ -39,7 +39,7 @@ gcloud beta run jobs "${deploy_command}" "${job_name}" \
   --max-retries=0 \
   --add-volume "name=gcs,type=cloud-storage,bucket=${bucket_name},readonly=false" \
   --add-volume-mount "volume=gcs,mount-path=${mount_root}" \
-  --command /usr/local/bin/build-index
+  --command /usr/local/bin/build-index-job
 
 echo "image: ${image_uri}"
 echo "build_index_job: ${job_name}"

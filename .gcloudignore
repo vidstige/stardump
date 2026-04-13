@@ -5,6 +5,8 @@
 /.stardump
 /docs
 /sh
+!/sh/
+!/sh/build-index-job-entrypoint.sh
 /stardump
 __pycache__/
 *.pyc

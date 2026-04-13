@@ -244,7 +244,7 @@ def build_index_job_args(
         "--add-volume-mount",
         f"volume=gcs,mount-path={mount_root}",
         "--command",
-        "/usr/local/bin/build-index",
+        "/usr/local/bin/build-index-job",
         "--args=" + join_with_commas(["--data-root", data_root, "--octree-depth", str(octree_depth)]),
     ]
 
