@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::time::Instant;
 
 use star_dump::build_index::{
     BuildIndexConfig, BuildIndexResult, DEFAULT_DEPTH, IndexBuilder, bounds_for_quality_threshold,
@@ -32,6 +33,7 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
     let data_root = local_path(&args.data_root)?;
     let output_root = local_path(args.output_root.as_deref().unwrap_or(&args.data_root))?;
     let metadata = load_source_metadata(&data_root)?;
+    let started = Instant::now();
 
     if metadata.is_empty() {
         return run_build_index(BuildIndexConfig {
@@ -49,7 +51,9 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
         args.octree_depth,
         bounds_for_quality_threshold(args.quality_threshold),
     )?;
-    for source in &metadata {
+    let source_count = metadata.len();
+    let mut rows_kept = 0_u64;
+    for (index, source) in metadata.iter().enumerate() {
         for part in &source.canonical_parts {
             let rows = read_canonical_part_rows(&data_root, source, part)?
                 .into_iter()
@@ -61,12 +65,27 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
                         args.quality_threshold,
                     )
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            rows_kept += rows.len() as u64;
             builder.append_rows(rows)?;
         }
+        println!(
+            "build-index: sources {}/{} rows_kept={} elapsed_s={:.1}",
+            index + 1,
+            source_count,
+            rows_kept,
+            started.elapsed().as_secs_f32(),
+        );
     }
     let (index, rows_in_bounds) = builder.finish()?;
     validate_serving_layout(&output_root, &index)?;
+    println!(
+        "build-index: finished sources={} rows_in_bounds={} leaves={} elapsed_s={:.1}",
+        source_count,
+        rows_in_bounds,
+        index.leaves.len(),
+        started.elapsed().as_secs_f32(),
+    );
     Ok(BuildIndexResult {
         index,
         sources_seen: metadata.len(),
