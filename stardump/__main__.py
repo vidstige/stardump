@@ -1,6 +1,6 @@
 import argparse
 
-from .ingest import start_build_index, start_ingest, status_ingest
+from .ingest import index_status, start_build_index, start_ingest, status_ingest
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,6 +17,11 @@ def parse_args() -> argparse.Namespace:
     start.add_argument("--data-root")
 
     ingest_commands.add_parser("status")
+
+    index_status_parser = ingest_commands.add_parser("index-status")
+    index_status_parser.add_argument("--bucket-name")
+    index_status_parser.add_argument("--data-root")
+    index_status_parser.add_argument("--octree-depth", type=int, default=6)
 
     build_index = ingest_commands.add_parser("build-index")
     build_index.add_argument("--bucket-name")
@@ -43,6 +48,13 @@ def main() -> None:
         return
     if args.action == "status":
         status_ingest()
+        return
+    if args.action == "index-status":
+        index_status(
+            bucket_name=args.bucket_name,
+            data_root=args.data_root,
+            octree_depth=args.octree_depth,
+        )
         return
     if args.action == "build-index":
         start_build_index(

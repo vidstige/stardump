@@ -186,6 +186,72 @@ def read_state() -> dict:
         return json.load(file)
 
 
+def bucket_name_from_state_or_project(bucket_name: str | None) -> str:
+    if bucket_name is not None:
+        return bucket_name
+    return default_bucket_name(current_project_number(current_project_id()))
+
+
+def data_root_from_state(data_root: str | None) -> str:
+    if data_root is not None:
+        return data_root
+
+    try:
+        state = read_state()
+    except FileNotFoundError:
+        raise SystemExit(f"missing state file: {STATE_PATH}; pass --data-root")
+
+    data_root = state.get("data_root")
+    if not data_root:
+        raise SystemExit(f"missing data_root in state file: {STATE_PATH}; pass --data-root")
+    return data_root
+
+
+def object_prefix(data_root: str) -> str:
+    prefix = f"{MOUNT_ROOT}/"
+    if data_root.startswith(prefix):
+        return data_root[len(prefix) :]
+    raise SystemExit(f"unsupported data root: {data_root}; expected to start with {prefix}")
+
+
+def storage_ls(url: str) -> list[str]:
+    result = subprocess.run(
+        ["gcloud", "storage", "ls", "--recursive", url],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return [line for line in result.stdout.splitlines() if line]
+
+    output = result.stderr + result.stdout
+    if "matched no objects" in output:
+        return []
+
+    raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+
+
+def index_status(
+    *,
+    bucket_name: str | None,
+    data_root: str | None,
+    octree_depth: int,
+) -> None:
+    bucket_name = bucket_name_from_state_or_project(bucket_name)
+    data_root = data_root_from_state(data_root)
+    prefix = object_prefix(data_root)
+    leaf_urls = storage_ls(f"gs://{bucket_name}/{prefix}/indices/depth={octree_depth}/**")
+    index_urls = storage_ls(f"gs://{bucket_name}/{prefix}/index.octree")
+    max_leaf_count = 8**octree_depth
+    leaf_count = len(leaf_urls)
+
+    print(f"data_root: {data_root}")
+    print(f"octree_depth: {octree_depth}")
+    print(f"published_leaf_files: {leaf_count}")
+    print(f"max_possible_leaf_files: {max_leaf_count}")
+    print(f"share_of_max_tree: {leaf_count / max_leaf_count:.2%}")
+    print(f"index_octree: {'present' if index_urls else 'absent'}")
+
+
 def execution_condition(execution_name: str) -> dict:
     execution = json.loads(
         run(
