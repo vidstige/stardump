@@ -1,0 +1,16 @@
+{
+  "name": "gaia-viz-viewer",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js",
+    "check": "tsc --noEmit",
+    "start": "python3 -m http.server 8000"
+  },
+  "dependencies": {
+    "regl": "^2.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.3",
+    "typescript": "^5.8.3"
+  }
+}
