@@ -1,18 +1,57 @@
 import createRegl from "regl";
 
 type Mat4 = Float32Array;
+type Vec3 = [number, number, number];
 
 type Star = {
-  position: [number, number, number];
-  color: [number, number, number];
+  position: Vec3;
+  color: Vec3;
   size: number;
 };
 
-function subtract(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+type Camera = {
+  position: Vec3;
+  yaw: number;
+  pitch: number;
+  fovY: number;
+  near: number;
+  far: number;
+};
+
+type FrustumParams = {
+  aspect: number;
+  near: number;
+  far: number;
+  fovY: number;
+};
+
+type QueryFrustum = FrustumParams & {
+  position: Vec3;
+  forward: Vec3;
+  up: Vec3;
+};
+
+declare global {
+  interface Window {
+    gaiaViewer?: {
+      getFrustum: () => QueryFrustum;
+    };
+  }
+}
+
+function add(a: Vec3, b: Vec3): Vec3 {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+
+function subtract(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
 
-function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+function scale(v: Vec3, amount: number): Vec3 {
+  return [v[0] * amount, v[1] * amount, v[2] * amount];
+}
+
+function cross(a: Vec3, b: Vec3): Vec3 {
   return [
     a[1] * b[2] - a[2] * b[1],
     a[2] * b[0] - a[0] * b[2],
@@ -20,26 +59,30 @@ function cross(a: [number, number, number], b: [number, number, number]): [numbe
   ];
 }
 
-function normalize(v: [number, number, number]): [number, number, number] {
+function normalize(v: Vec3): Vec3 {
   const length = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / length, v[1] / length, v[2] / length];
 }
 
-function perspective(fovy: number, aspect: number, near: number, far: number): Mat4 {
-  const f = 1 / Math.tan(fovy / 2);
-  const nf = 1 / (near - far);
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function projectionMatrix(frustum: FrustumParams): Mat4 {
+  const f = 1 / Math.tan(frustum.fovY / 2);
+  const nf = 1 / (frustum.near - frustum.far);
   return new Float32Array([
-    f / aspect, 0, 0, 0,
+    f / frustum.aspect, 0, 0, 0,
     0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0,
+    0, 0, (frustum.far + frustum.near) * nf, -1,
+    0, 0, 2 * frustum.far * frustum.near * nf, 0,
   ]);
 }
 
 function lookAt(
-  eye: [number, number, number],
-  center: [number, number, number],
-  up: [number, number, number],
+  eye: Vec3,
+  center: Vec3,
+  up: Vec3,
 ): Mat4 {
   const z = normalize(subtract(eye, center));
   const x = normalize(cross(up, z));
@@ -60,10 +103,42 @@ function randomBetween(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
+function cameraForward(camera: Camera): Vec3 {
+  return normalize([
+    Math.cos(camera.pitch) * Math.sin(camera.yaw),
+    Math.sin(camera.pitch),
+    -Math.cos(camera.pitch) * Math.cos(camera.yaw),
+  ]);
+}
+
+function cameraBasis(camera: Camera): { forward: Vec3; right: Vec3; up: Vec3 } {
+  const forward = cameraForward(camera);
+  const right = normalize(cross(forward, [0, 1, 0]));
+  const up = normalize(cross(right, forward));
+  return { forward, right, up };
+}
+
+function createFrustum(camera: Camera, aspect: number): QueryFrustum {
+  const { forward, up } = cameraBasis(camera);
+  return {
+    position: camera.position,
+    forward,
+    up,
+    aspect,
+    near: camera.near,
+    far: camera.far,
+    fovY: camera.fovY,
+  };
+}
+
+function viewMatrix(frustum: QueryFrustum): Mat4 {
+  return lookAt(frustum.position, add(frustum.position, frustum.forward), frustum.up);
+}
+
 function createStars(count: number): Star[] {
   const stars: Star[] = [];
   for (let i = 0; i < count; i += 1) {
-    const radius = Math.pow(Math.random(), 0.45) * 40;
+    const radius = Math.pow(Math.random(), 0.45) * 90;
     const theta = randomBetween(0, Math.PI * 2);
     const phi = Math.acos(randomBetween(-1, 1));
     const twinkle = Math.random();
@@ -80,7 +155,7 @@ function createStars(count: number): Star[] {
         randomBetween(0.78, 0.94),
         twinkle > 0.9 ? 0.9 : randomBetween(0.72, 0.98),
       ],
-      size: twinkle > 0.97 ? randomBetween(7, 10) : randomBetween(2, 5),
+      size: twinkle > 0.97 ? randomBetween(2.2, 3.2) : randomBetween(0.8, 1.8),
     });
   }
   return stars;
@@ -107,53 +182,71 @@ const positions = stars.map((star) => star.position);
 const colors = stars.map((star) => star.color);
 const sizes = stars.map((star) => star.size);
 
-const state = {
-  distance: 90,
-  yaw: 0.5,
-  pitch: 0.3,
-  dragging: false,
-  lastX: 0,
-  lastY: 0,
+const camera: Camera = {
+  position: [0, 0, 120],
+  yaw: 0,
+  pitch: 0,
+  fovY: Math.PI / 3,
+  near: 0.1,
+  far: 300,
 };
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+const keyState = new Set<string>();
+let currentFrustum = createFrustum(camera, 1);
+let previousTime = 0;
+
+window.gaiaViewer = {
+  getFrustum: () => currentFrustum,
+};
+
+function updateCamera(deltaTime: number): void {
+  const { forward, right } = cameraBasis(camera);
+  const speed = 30 * deltaTime;
+  let movement: Vec3 = [0, 0, 0];
+
+  if (keyState.has("KeyW")) {
+    movement = add(movement, forward);
+  }
+  if (keyState.has("KeyS")) {
+    movement = subtract(movement, forward);
+  }
+  if (keyState.has("KeyA")) {
+    movement = subtract(movement, right);
+  }
+  if (keyState.has("KeyD")) {
+    movement = add(movement, right);
+  }
+
+  if (movement[0] || movement[1] || movement[2]) {
+    camera.position = add(camera.position, scale(normalize(movement), speed));
+  }
 }
 
-canvas.addEventListener("pointerdown", (event) => {
-  state.dragging = true;
-  state.lastX = event.clientX;
-  state.lastY = event.clientY;
-  canvas.setPointerCapture(event.pointerId);
+canvas.addEventListener("click", () => {
+  void canvas.requestPointerLock();
 });
 
-canvas.addEventListener("pointermove", (event) => {
-  if (!state.dragging) {
+document.addEventListener("mousemove", (event) => {
+  if (document.pointerLockElement !== canvas) {
     return;
   }
 
-  const dx = event.clientX - state.lastX;
-  const dy = event.clientY - state.lastY;
-  state.lastX = event.clientX;
-  state.lastY = event.clientY;
-  state.yaw += dx * 0.005;
-  state.pitch = clamp(state.pitch + dy * 0.005, -1.2, 1.2);
+  camera.yaw += event.movementX * 0.0025;
+  camera.pitch = clamp(camera.pitch - event.movementY * 0.0025, -1.45, 1.45);
 });
 
-function stopDragging(event: PointerEvent): void {
-  state.dragging = false;
-  if (canvas.hasPointerCapture(event.pointerId)) {
-    canvas.releasePointerCapture(event.pointerId);
+window.addEventListener("keydown", (event) => {
+  if (event.code.startsWith("Key")) {
+    keyState.add(event.code);
   }
-}
+  if (["KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
+    event.preventDefault();
+  }
+});
 
-canvas.addEventListener("pointerup", stopDragging);
-canvas.addEventListener("pointercancel", stopDragging);
-
-canvas.addEventListener("wheel", (event) => {
-  event.preventDefault();
-  state.distance = clamp(state.distance + event.deltaY * 0.04, 30, 180);
-}, { passive: false });
+window.addEventListener("keyup", (event) => {
+  keyState.delete(event.code);
+});
 
 const drawStars = regl({
   vert: `
@@ -171,7 +264,7 @@ const drawStars = regl({
 
     void main() {
       vec4 viewPosition = view * vec4(position, 1.0);
-      float depthScale = clamp(120.0 / -viewPosition.z, 0.7, 3.0);
+      float depthScale = clamp(40.0 / -viewPosition.z, 0.6, 1.8);
       gl_Position = projection * viewPosition;
       gl_PointSize = size * pixelRatio * depthScale;
       vColor = color;
@@ -200,18 +293,15 @@ const drawStars = regl({
   },
   uniforms: {
     projection: ({ viewportWidth, viewportHeight }) =>
-      perspective(Math.PI / 4, viewportWidth / viewportHeight, 0.01, 500),
-    view: ({ time }) => {
-      if (!state.dragging) {
-        state.yaw += time === 0 ? 0 : 0.0008;
-      }
-
-      const eye: [number, number, number] = [
-        Math.cos(state.pitch) * Math.cos(state.yaw) * state.distance,
-        Math.sin(state.pitch) * state.distance,
-        Math.cos(state.pitch) * Math.sin(state.yaw) * state.distance,
-      ];
-      return lookAt(eye, [0, 0, 0], [0, 1, 0]);
+      projectionMatrix({
+        aspect: viewportWidth / viewportHeight,
+        near: camera.near,
+        far: camera.far,
+        fovY: camera.fovY,
+      }),
+    view: ({ viewportWidth, viewportHeight }) => {
+      currentFrustum = createFrustum(camera, viewportWidth / viewportHeight);
+      return viewMatrix(currentFrustum);
     },
     pixelRatio: () => window.devicePixelRatio || 1,
   },
@@ -231,7 +321,11 @@ const drawStars = regl({
   },
 });
 
-regl.frame(() => {
+regl.frame(({ time }) => {
+  const deltaTime = previousTime === 0 ? 0 : time - previousTime;
+  previousTime = time;
+  updateCamera(deltaTime);
+
   regl.clear({
     color: [0.015, 0.025, 0.06, 1],
     depth: 1,
