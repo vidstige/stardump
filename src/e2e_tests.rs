@@ -1,7 +1,7 @@
+use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::f32::consts::FRAC_PI_2;
 
 use axum::body::{self, Body};
 use axum::http::{Request, StatusCode};
@@ -163,16 +163,14 @@ fn serves_frustum_queries_with_a_limit() {
         let request = Request::builder()
             .method("GET")
             .uri(format!(
-                "/query/run/frustum?x={}&y={}&z={}&fx={}&fy={}&fz={}&ux={}&uy={}&uz={}&near={}&far={}&fovy={}&aspect={}&limit=2",
+                "/query/run/frustum?x={}&y={}&z={}&qx={}&qy={}&qz={}&qw={}&near={}&far={}&fovy={}&aspect={}&limit=2",
                 -20.0,
                 0.0,
                 0.0,
-                1.0,
                 0.0,
+                -FRAC_1_SQRT_2,
                 0.0,
-                0.0,
-                1.0,
-                0.0,
+                FRAC_1_SQRT_2,
                 1.0,
                 40.0,
                 FRAC_PI_2,
@@ -290,12 +288,10 @@ fn frustum_queries_match_for_repeated_ingestion_runs() {
         x: -20.0,
         y: 0.0,
         z: 0.0,
-        fx: 1.0,
-        fy: 0.0,
-        fz: 0.0,
-        ux: 0.0,
-        uy: 1.0,
-        uz: 0.0,
+        qx: 0.0,
+        qy: -FRAC_1_SQRT_2,
+        qz: 0.0,
+        qw: FRAC_1_SQRT_2,
         near: 1.0,
         far: 40.0,
         fovy: FRAC_PI_2,
@@ -309,12 +305,10 @@ fn frustum_queries_match_for_repeated_ingestion_runs() {
             x: -20.0,
             y: 0.0,
             z: 0.0,
-            fx: 1.0,
-            fy: 0.0,
-            fz: 0.0,
-            ux: 0.0,
-            uy: 1.0,
-            uz: 0.0,
+            qx: 0.0,
+            qy: -FRAC_1_SQRT_2,
+            qz: 0.0,
+            qw: FRAC_1_SQRT_2,
             near: 1.0,
             far: 40.0,
             fovy: FRAC_PI_2,

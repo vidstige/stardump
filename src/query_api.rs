@@ -45,12 +45,10 @@ pub struct FrustumQueryRequest {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    pub fx: f32,
-    pub fy: f32,
-    pub fz: f32,
-    pub ux: f32,
-    pub uy: f32,
-    pub uz: f32,
+    pub qx: f32,
+    pub qy: f32,
+    pub qz: f32,
+    pub qw: f32,
     pub near: f32,
     pub far: f32,
     pub fovy: f32,
@@ -128,6 +126,21 @@ fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
         return None;
     }
     Some(scale(v, 1.0 / len))
+}
+
+fn normalize_quaternion(q: [f32; 4]) -> Option<[f32; 4]> {
+    let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if !len.is_finite() || len == 0.0 {
+        return None;
+    }
+    Some([q[0] / len, q[1] / len, q[2] / len, q[3] / len])
+}
+
+fn rotate_vector(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let qv = [q[0], q[1], q[2]];
+    let uv = cross(qv, v);
+    let uuv = cross(qv, uv);
+    add(v, add(scale(uv, 2.0 * q[3]), scale(uuv, 2.0)))
 }
 
 fn bad_request(message: impl Into<String>) -> (StatusCode, String) {
@@ -239,14 +252,14 @@ fn plane_from_points(a: [f32; 3], b: [f32; 3], c: [f32; 3], inside: [f32; 3]) ->
 
 fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
     let position = [request.x, request.y, request.z];
-    let forward = normalize([request.fx, request.fy, request.fz])
+    let orientation = normalize_quaternion([request.qx, request.qy, request.qz, request.qw])
+        .ok_or_else(|| anyhow::anyhow!("orientation quaternion must be non-zero"))?;
+    let forward = normalize(rotate_vector(orientation, [0.0, 0.0, -1.0]))
         .ok_or_else(|| anyhow::anyhow!("forward vector must be non-zero"))?;
-    let up_hint = normalize([request.ux, request.uy, request.uz])
+    let right = normalize(rotate_vector(orientation, [1.0, 0.0, 0.0]))
+        .ok_or_else(|| anyhow::anyhow!("right vector must be non-zero"))?;
+    let up = normalize(rotate_vector(orientation, [0.0, 1.0, 0.0]))
         .ok_or_else(|| anyhow::anyhow!("up vector must be non-zero"))?;
-    let right = normalize(cross(forward, up_hint))
-        .ok_or_else(|| anyhow::anyhow!("forward and up vectors must not be parallel"))?;
-    let up = normalize(cross(right, forward))
-        .ok_or_else(|| anyhow::anyhow!("derived up vector must be non-zero"))?;
     let near_center = add(position, scale(forward, request.near));
     let far_center = add(position, scale(forward, request.far));
     let near_half_height = request.near * (request.fovy * 0.5).tan();
@@ -608,12 +621,10 @@ fn parse_frustum_query_request(query: Option<&str>) -> Result<FrustumQueryReques
         x: parse_required_f32(query, "x")?,
         y: parse_required_f32(query, "y")?,
         z: parse_required_f32(query, "z")?,
-        fx: parse_required_f32(query, "fx")?,
-        fy: parse_required_f32(query, "fy")?,
-        fz: parse_required_f32(query, "fz")?,
-        ux: parse_required_f32(query, "ux")?,
-        uy: parse_required_f32(query, "uy")?,
-        uz: parse_required_f32(query, "uz")?,
+        qx: parse_required_f32(query, "qx")?,
+        qy: parse_required_f32(query, "qy")?,
+        qz: parse_required_f32(query, "qz")?,
+        qw: parse_required_f32(query, "qw")?,
         near: parse_required_f32(query, "near")?,
         far: parse_required_f32(query, "far")?,
         fovy: parse_required_f32(query, "fovy")?,
@@ -640,12 +651,10 @@ pub fn validate_frustum_request(request: &FrustumQueryRequest) -> Result<(), (St
         request.x,
         request.y,
         request.z,
-        request.fx,
-        request.fy,
-        request.fz,
-        request.ux,
-        request.uy,
-        request.uz,
+        request.qx,
+        request.qy,
+        request.qz,
+        request.qw,
         request.near,
         request.far,
         request.fovy,
@@ -668,19 +677,8 @@ pub fn validate_frustum_request(request: &FrustumQueryRequest) -> Result<(), (St
     if request.aspect <= 0.0 {
         return Err(bad_request("aspect must be a positive finite number"));
     }
-    if normalize([request.fx, request.fy, request.fz]).is_none() {
-        return Err(bad_request("forward vector must be non-zero"));
-    }
-    if normalize([request.ux, request.uy, request.uz]).is_none() {
-        return Err(bad_request("up vector must be non-zero"));
-    }
-    if normalize(cross(
-        [request.fx, request.fy, request.fz],
-        [request.ux, request.uy, request.uz],
-    ))
-    .is_none()
-    {
-        return Err(bad_request("forward and up vectors must not be parallel"));
+    if normalize_quaternion([request.qx, request.qy, request.qz, request.qw]).is_none() {
+        return Err(bad_request("orientation quaternion must be non-zero"));
     }
     if request.limit == Some(0) {
         return Err(bad_request("limit must be greater than zero"));
@@ -724,8 +722,9 @@ pub fn query_frustum_csv(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::f32::consts::FRAC_PI_6;
+    use std::f32::consts::FRAC_1_SQRT_2;
+    use std::io::Write;
 
     use tempfile::tempdir;
 
@@ -833,12 +832,10 @@ mod tests {
                 x: -2.0,
                 y: 0.0,
                 z: 0.0,
-                fx: 1.0,
-                fy: 0.0,
-                fz: 0.0,
-                ux: 0.0,
-                uy: 1.0,
-                uz: 0.0,
+                qx: 0.0,
+                qy: -FRAC_1_SQRT_2,
+                qz: 0.0,
+                qw: FRAC_1_SQRT_2,
                 near: 0.5,
                 far: 4.0,
                 fovy: FRAC_PI_6,

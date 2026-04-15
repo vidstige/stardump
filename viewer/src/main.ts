@@ -2,6 +2,7 @@ import createRegl from "regl";
 
 type Mat4 = Float32Array;
 type Vec3 = [number, number, number];
+type Quaternion = [number, number, number, number];
 
 type Star = {
   position: Vec3;
@@ -22,13 +23,17 @@ type FrustumParams = {
   aspect: number;
   near: number;
   far: number;
-  fovY: number;
+  fovy: number;
 };
 
 type QueryFrustum = FrustumParams & {
-  position: Vec3;
-  forward: Vec3;
-  up: Vec3;
+  x: number;
+  y: number;
+  z: number;
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
 };
 
 declare global {
@@ -64,12 +69,17 @@ function normalize(v: Vec3): Vec3 {
   return [v[0] / length, v[1] / length, v[2] / length];
 }
 
+function normalizeQuaternion(q: Quaternion): Quaternion {
+  const length = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0] / length, q[1] / length, q[2] / length, q[3] / length];
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
 function projectionMatrix(frustum: FrustumParams): Mat4 {
-  const f = 1 / Math.tan(frustum.fovY / 2);
+  const f = 1 / Math.tan(frustum.fovy / 2);
   const nf = 1 / (frustum.near - frustum.far);
   return new Float32Array([
     f / frustum.aspect, 0, 0, 0,
@@ -118,21 +128,90 @@ function cameraBasis(camera: Camera): { forward: Vec3; right: Vec3; up: Vec3 } {
   return { forward, right, up };
 }
 
+function quaternionFromBasis(right: Vec3, up: Vec3, back: Vec3): Quaternion {
+  const m00 = right[0];
+  const m01 = up[0];
+  const m02 = back[0];
+  const m10 = right[1];
+  const m11 = up[1];
+  const m12 = back[1];
+  const m20 = right[2];
+  const m21 = up[2];
+  const m22 = back[2];
+  const trace = m00 + m11 + m22;
+
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    return normalizeQuaternion([
+      (m21 - m12) / s,
+      (m02 - m20) / s,
+      (m10 - m01) / s,
+      0.25 * s,
+    ]);
+  }
+  if (m00 > m11 && m00 > m22) {
+    const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    return normalizeQuaternion([
+      0.25 * s,
+      (m01 + m10) / s,
+      (m02 + m20) / s,
+      (m21 - m12) / s,
+    ]);
+  }
+  if (m11 > m22) {
+    const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    return normalizeQuaternion([
+      (m01 + m10) / s,
+      0.25 * s,
+      (m12 + m21) / s,
+      (m02 - m20) / s,
+    ]);
+  }
+
+  const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
+  return normalizeQuaternion([
+    (m02 + m20) / s,
+    (m12 + m21) / s,
+    0.25 * s,
+    (m10 - m01) / s,
+  ]);
+}
+
+function rotateVector(q: Quaternion, v: Vec3): Vec3 {
+  const qv: Vec3 = [q[0], q[1], q[2]];
+  const uv = cross(qv, v);
+  const uuv = cross(qv, uv);
+  return add(v, add(scale(uv, 2 * q[3]), scale(uuv, 2)));
+}
+
+function cameraQuaternion(camera: Camera): Quaternion {
+  const { right, up, forward } = cameraBasis(camera);
+  return quaternionFromBasis(right, up, scale(forward, -1));
+}
+
 function createFrustum(camera: Camera, aspect: number): QueryFrustum {
-  const { forward, up } = cameraBasis(camera);
+  const orientation = cameraQuaternion(camera);
   return {
-    position: camera.position,
-    forward,
-    up,
+    x: camera.position[0],
+    y: camera.position[1],
+    z: camera.position[2],
+    qx: orientation[0],
+    qy: orientation[1],
+    qz: orientation[2],
+    qw: orientation[3],
     aspect,
     near: camera.near,
     far: camera.far,
-    fovY: camera.fovY,
+    fovy: camera.fovY,
   };
 }
 
 function viewMatrix(frustum: QueryFrustum): Mat4 {
-  return lookAt(frustum.position, add(frustum.position, frustum.forward), frustum.up);
+  const orientation: Quaternion = [frustum.qx, frustum.qy, frustum.qz, frustum.qw];
+  const position: Vec3 = [frustum.x, frustum.y, frustum.z];
+  const forward = rotateVector(orientation, [0, 0, -1]);
+  const up = rotateVector(orientation, [0, 1, 0]);
+  return lookAt(position, add(position, forward), up);
 }
 
 function createStars(count: number): Star[] {
@@ -297,7 +376,7 @@ const drawStars = regl({
         aspect: viewportWidth / viewportHeight,
         near: camera.near,
         far: camera.far,
-        fovY: camera.fovY,
+        fovy: camera.fovY,
       }),
     view: ({ viewportWidth, viewportHeight }) => {
       currentFrustum = createFrustum(camera, viewportWidth / viewportHeight);
