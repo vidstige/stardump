@@ -3,10 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::formats::{
-    CANONICAL_ROW_SIZE, OctreeIndex, SERVING_ROW_SIZE, SourceMetadata, indices_directory,
-    leaf_filename,
-};
+use crate::formats::{CANONICAL_ROW_SIZE, PackedOctreeIndex, SourceMetadata};
 
 fn ensure_row_multiple(size: u64, row_size: u64, label: &str) -> Result<u64> {
     if size % row_size != 0 {
@@ -65,21 +62,19 @@ pub fn validate_canonical_layout(root: &Path, metadata: &SourceMetadata) -> Resu
     Ok(canonical_rows)
 }
 
-pub fn validate_serving_layout(root: &Path, index: &OctreeIndex) -> Result<u64> {
-    let indices_root = root.join(indices_directory(index.depth));
-    let mut serving_rows = 0;
-    for morton in &index.leaves {
-        let size = fs::metadata(indices_root.join(leaf_filename(*morton)))
-            .with_context(|| {
-                format!(
-                    "failed to read metadata for {}",
-                    indices_root.join(leaf_filename(*morton)).display()
-                )
-            })?
-            .len();
-        serving_rows += ensure_row_multiple(size, SERVING_ROW_SIZE, "index object")?;
+pub fn validate_packed_index_layout(root: &Path, index: &PackedOctreeIndex) -> Result<u64> {
+    let path = root.join("index.octree");
+    let size = fs::metadata(&path)
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .len();
+    if size != index.file_size() {
+        bail!(
+            "packed index size {} does not match expected {}",
+            size,
+            index.file_size()
+        );
     }
-    Ok(serving_rows)
+    Ok(index.point_count)
 }
 
 fn collect_local_files(root: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {

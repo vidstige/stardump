@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -8,17 +8,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::octree::Bounds3;
 
 pub const CANONICAL_ROOT: &str = "canonical";
-pub const INDICES_ROOT: &str = "indices";
 pub const CANONICAL_ROW_SIZE: u64 = 32;
-pub const SERVING_ROW_SIZE: u64 = 20;
-pub const LEAF_FILENAME_WIDTH: usize = 8;
 pub const METADATA_FILENAME: &str = "metadata.txt";
 pub const OCTREE_INDEX_FILENAME: &str = "index.octree";
+pub const PACKED_OCTREE_NODE_SIZE: u64 = 12;
+pub const PACKED_POINT_SIZE: u64 = 14;
 
 const METADATA_MAGIC: &str = "STARDUMP-METADATA 1";
-const OCTREE_INDEX_MAGIC: [u8; 8] = *b"OCTREE\0\0";
-const OCTREE_INDEX_VERSION: u32 = 1;
-const OCTREE_HEADER_SIZE: usize = 44;
+const PACKED_OCTREE_MAGIC: [u8; 8] = *b"OCTPACK\0";
+const PACKED_OCTREE_VERSION: u16 = 1;
+const PACKED_OCTREE_HEADER_SIZE: usize = 28;
+const QUANTIZATION_SCALE: f32 = 65_535.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanonicalRow {
@@ -29,14 +29,6 @@ pub struct CanonicalRow {
     pub parallax_error: f32,
     pub phot_g_mean_mag: f32,
     pub bp_rp: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ServingRow {
-    pub source_id: u64,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,11 +50,27 @@ pub struct SourceMetadata {
     pub counts: SourceCounts,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PackedPoint {
+    pub source_id: u64,
+    pub x_local: u16,
+    pub y_local: u16,
+    pub z_local: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PackedOctreeNode {
+    pub child_mask: u8,
+    pub first: u32,
+    pub count: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
-pub struct OctreeIndex {
+pub struct PackedOctreeIndex {
     pub depth: u8,
-    pub bounds: Bounds3,
-    pub leaves: Vec<u32>,
+    pub half_extent_pc: f32,
+    pub point_count: u64,
+    pub nodes: Vec<PackedOctreeNode>,
 }
 
 fn canonical_row_bytes(row: &CanonicalRow) -> [u8; CANONICAL_ROW_SIZE as usize] {
@@ -77,21 +85,21 @@ fn canonical_row_bytes(row: &CanonicalRow) -> [u8; CANONICAL_ROW_SIZE as usize] 
     bytes
 }
 
-fn serving_row_bytes(row: &ServingRow) -> [u8; SERVING_ROW_SIZE as usize] {
-    let mut bytes = [0_u8; SERVING_ROW_SIZE as usize];
-    bytes[0..8].copy_from_slice(&row.source_id.to_le_bytes());
-    bytes[8..12].copy_from_slice(&row.x.to_le_bytes());
-    bytes[12..16].copy_from_slice(&row.y.to_le_bytes());
-    bytes[16..20].copy_from_slice(&row.z.to_le_bytes());
+fn packed_point_bytes(point: &PackedPoint) -> [u8; PACKED_POINT_SIZE as usize] {
+    let mut bytes = [0_u8; PACKED_POINT_SIZE as usize];
+    bytes[0..8].copy_from_slice(&point.source_id.to_le_bytes());
+    bytes[8..10].copy_from_slice(&point.x_local.to_le_bytes());
+    bytes[10..12].copy_from_slice(&point.y_local.to_le_bytes());
+    bytes[12..14].copy_from_slice(&point.z_local.to_le_bytes());
     bytes
 }
 
-fn read_rows<T, F>(path: &Path, row_size: u64, decode: F) -> Result<Vec<T>>
-where
-    F: Fn(&[u8]) -> T,
-{
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    decode_rows(&bytes, row_size, decode)
+fn packed_octree_node_bytes(node: &PackedOctreeNode) -> [u8; PACKED_OCTREE_NODE_SIZE as usize] {
+    let mut bytes = [0_u8; PACKED_OCTREE_NODE_SIZE as usize];
+    bytes[0] = node.child_mask;
+    bytes[4..8].copy_from_slice(&node.first.to_le_bytes());
+    bytes[8..12].copy_from_slice(&node.count.to_le_bytes());
+    bytes
 }
 
 fn parse_metadata_fields(text: &str) -> Result<BTreeMap<String, String>> {
@@ -142,12 +150,52 @@ fn parse_metadata_parts(fields: &BTreeMap<String, String>, key: &str) -> Result<
     Ok(value.split(',').map(str::to_string).collect())
 }
 
+fn decode_rows<T, F>(bytes: &[u8], row_size: u64, decode: F) -> Result<Vec<T>>
+where
+    F: Fn(&[u8]) -> T,
+{
+    if bytes.len() as u64 % row_size != 0 {
+        bail!(
+            "buffer size {} is not a multiple of row size {row_size}",
+            bytes.len()
+        );
+    }
+    Ok(bytes
+        .chunks_exact(row_size as usize)
+        .map(decode)
+        .collect::<Vec<_>>())
+}
+
+fn read_rows<T, F>(path: &Path, row_size: u64, decode: F) -> Result<Vec<T>>
+where
+    F: Fn(&[u8]) -> T,
+{
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    decode_rows(&bytes, row_size, decode)
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
+    let end = offset + 2;
+    let chunk = bytes
+        .get(offset..end)
+        .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
+    Ok(u16::from_le_bytes(chunk.try_into().unwrap()))
+}
+
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
     let end = offset + 4;
     let chunk = bytes
         .get(offset..end)
         .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
     Ok(u32::from_le_bytes(chunk.try_into().unwrap()))
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Result<u64> {
+    let end = offset + 8;
+    let chunk = bytes
+        .get(offset..end)
+        .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
+    Ok(u64::from_le_bytes(chunk.try_into().unwrap()))
 }
 
 fn read_f32(bytes: &[u8], offset: usize) -> Result<f32> {
@@ -158,16 +206,80 @@ fn read_f32(bytes: &[u8], offset: usize) -> Result<f32> {
     Ok(f32::from_le_bytes(chunk.try_into().unwrap()))
 }
 
+fn decode_canonical_row(chunk: &[u8]) -> CanonicalRow {
+    CanonicalRow {
+        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+        ra: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+        dec: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+        parallax: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        parallax_error: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+        phot_g_mean_mag: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+        bp_rp: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
+    }
+}
+
+fn decode_packed_point(chunk: &[u8]) -> PackedPoint {
+    PackedPoint {
+        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+        x_local: u16::from_le_bytes(chunk[8..10].try_into().unwrap()),
+        y_local: u16::from_le_bytes(chunk[10..12].try_into().unwrap()),
+        z_local: u16::from_le_bytes(chunk[12..14].try_into().unwrap()),
+    }
+}
+
+fn decode_packed_octree_node(chunk: &[u8]) -> PackedOctreeNode {
+    PackedOctreeNode {
+        child_mask: chunk[0],
+        first: u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
+        count: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+    }
+}
+
+fn parse_packed_octree_header(bytes: &[u8]) -> Result<(u8, f32, u32, u64)> {
+    if bytes.len() < PACKED_OCTREE_HEADER_SIZE {
+        bail!(
+            "packed octree header is too short: {} < {}",
+            bytes.len(),
+            PACKED_OCTREE_HEADER_SIZE
+        );
+    }
+
+    if bytes[0..8] != PACKED_OCTREE_MAGIC {
+        bail!("invalid packed octree magic");
+    }
+
+    let version = read_u16(bytes, 8)?;
+    if version != PACKED_OCTREE_VERSION {
+        bail!("unsupported packed octree version {version}");
+    }
+
+    Ok((
+        bytes[10],
+        read_f32(bytes, 12)?,
+        read_u32(bytes, 16)?,
+        read_u64(bytes, 20)?,
+    ))
+}
+
+fn quantize_axis(value: f32, min: f32, size: f32) -> u16 {
+    let normalized = if size == 0.0 {
+        0.0
+    } else {
+        ((value - min) / size).clamp(0.0, 1.0)
+    };
+    (normalized * QUANTIZATION_SCALE).round() as u16
+}
+
+fn dequantize_axis(value: u16, min: f32, size: f32) -> f32 {
+    min + size * (value as f32 / QUANTIZATION_SCALE)
+}
+
 pub fn canonical_directory_path(input_name: &str) -> String {
     let name = input_name
         .strip_prefix("GaiaSource_")
         .and_then(|value| value.strip_suffix(".csv.gz"))
         .unwrap_or(input_name);
     format!("{CANONICAL_ROOT}/{name}")
-}
-
-pub fn indices_directory(depth: u8) -> String {
-    format!("{INDICES_ROOT}/depth={depth}")
 }
 
 pub fn metadata_path_for_source(input_name: &str) -> String {
@@ -178,24 +290,68 @@ pub fn metadata_path_for_source(input_name: &str) -> String {
     )
 }
 
-pub fn leaf_filename(morton: u32) -> String {
-    format!("leaf-{morton:0width$}.bin", width = LEAF_FILENAME_WIDTH)
+impl PackedOctreeIndex {
+    pub fn bounds(&self) -> Bounds3 {
+        Bounds3 {
+            min: [
+                -self.half_extent_pc,
+                -self.half_extent_pc,
+                -self.half_extent_pc,
+            ],
+            max: [
+                self.half_extent_pc,
+                self.half_extent_pc,
+                self.half_extent_pc,
+            ],
+        }
+    }
+
+    pub fn point_data_offset(&self) -> u64 {
+        PACKED_OCTREE_HEADER_SIZE as u64 + self.nodes.len() as u64 * PACKED_OCTREE_NODE_SIZE
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.point_data_offset() + self.point_count * PACKED_POINT_SIZE
+    }
+}
+
+pub fn quantize_point(bounds: Bounds3, point: [f32; 3], source_id: u64) -> PackedPoint {
+    let size = bounds.max[0] - bounds.min[0];
+    PackedPoint {
+        source_id,
+        x_local: quantize_axis(point[0], bounds.min[0], size),
+        y_local: quantize_axis(point[1], bounds.min[1], size),
+        z_local: quantize_axis(point[2], bounds.min[2], size),
+    }
+}
+
+pub fn dequantize_point(bounds: Bounds3, point: &PackedPoint) -> [f32; 3] {
+    let size = bounds.max[0] - bounds.min[0];
+    [
+        dequantize_axis(point.x_local, bounds.min[0], size),
+        dequantize_axis(point.y_local, bounds.min[1], size),
+        dequantize_axis(point.z_local, bounds.min[2], size),
+    ]
 }
 
 pub fn read_canonical_rows(path: &Path) -> Result<Vec<CanonicalRow>> {
     read_rows(path, CANONICAL_ROW_SIZE, decode_canonical_row)
 }
 
-pub fn read_serving_rows(path: &Path) -> Result<Vec<ServingRow>> {
-    read_rows(path, SERVING_ROW_SIZE, decode_serving_row)
-}
-
 pub fn decode_canonical_rows(bytes: &[u8]) -> Result<Vec<CanonicalRow>> {
     decode_rows(bytes, CANONICAL_ROW_SIZE, decode_canonical_row)
 }
 
-pub fn decode_serving_rows(bytes: &[u8]) -> Result<Vec<ServingRow>> {
-    decode_rows(bytes, SERVING_ROW_SIZE, decode_serving_row)
+pub fn decode_packed_points(bytes: &[u8]) -> Result<Vec<PackedPoint>> {
+    decode_rows(bytes, PACKED_POINT_SIZE, decode_packed_point)
+}
+
+pub fn encode_packed_points(points: &[PackedPoint]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(points.len() * PACKED_POINT_SIZE as usize);
+    for point in points {
+        bytes.extend_from_slice(&packed_point_bytes(point));
+    }
+    bytes
 }
 
 pub fn decode_source_metadata(bytes: &[u8]) -> Result<SourceMetadata> {
@@ -248,9 +404,102 @@ rows_written: {}\n",
     .into_bytes()
 }
 
+pub fn encode_packed_octree(index: &PackedOctreeIndex) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(index.point_data_offset() as usize);
+    bytes.extend_from_slice(&PACKED_OCTREE_MAGIC);
+    bytes.extend_from_slice(&PACKED_OCTREE_VERSION.to_le_bytes());
+    bytes.push(index.depth);
+    bytes.push(0);
+    bytes.extend_from_slice(&index.half_extent_pc.to_le_bytes());
+    bytes.extend_from_slice(&(index.nodes.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&index.point_count.to_le_bytes());
+    for node in &index.nodes {
+        bytes.extend_from_slice(&packed_octree_node_bytes(node));
+    }
+    bytes
+}
+
+pub fn decode_packed_octree(bytes: &[u8]) -> Result<PackedOctreeIndex> {
+    let (depth, half_extent_pc, node_count, point_count) = parse_packed_octree_header(bytes)?;
+    let nodes_start = PACKED_OCTREE_HEADER_SIZE;
+    let nodes_end = nodes_start + node_count as usize * PACKED_OCTREE_NODE_SIZE as usize;
+    let node_bytes = bytes
+        .get(nodes_start..nodes_end)
+        .ok_or_else(|| anyhow!("packed octree node table is truncated"))?;
+    let nodes = decode_rows(
+        node_bytes,
+        PACKED_OCTREE_NODE_SIZE,
+        decode_packed_octree_node,
+    )?;
+    let index = PackedOctreeIndex {
+        depth,
+        half_extent_pc,
+        point_count,
+        nodes,
+    };
+    if bytes.len() as u64 != index.file_size() {
+        bail!(
+            "packed octree size {} does not match expected {}",
+            bytes.len(),
+            index.file_size()
+        );
+    }
+    Ok(index)
+}
+
 pub fn read_source_metadata(path: &Path) -> Result<SourceMetadata> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     decode_source_metadata(&bytes).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+pub fn read_packed_octree(path: &Path) -> Result<PackedOctreeIndex> {
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut header = [0_u8; PACKED_OCTREE_HEADER_SIZE];
+    reader
+        .read_exact(&mut header)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let (_, _, node_count, _) = parse_packed_octree_header(&header)?;
+    let mut bytes = header.to_vec();
+    let mut node_bytes = vec![0_u8; node_count as usize * PACKED_OCTREE_NODE_SIZE as usize];
+    reader
+        .read_exact(&mut node_bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    bytes.extend_from_slice(&node_bytes);
+    let mut index = decode_packed_octree_prefix(&bytes)?;
+    let actual_size = fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .len();
+    if actual_size != index.file_size() {
+        bail!(
+            "packed octree size {} does not match expected {}",
+            actual_size,
+            index.file_size()
+        );
+    }
+    index.nodes.shrink_to_fit();
+    Ok(index)
+}
+
+pub fn decode_packed_octree_prefix(bytes: &[u8]) -> Result<PackedOctreeIndex> {
+    let (depth, half_extent_pc, node_count, point_count) = parse_packed_octree_header(bytes)?;
+    let nodes_start = PACKED_OCTREE_HEADER_SIZE;
+    let nodes_end = nodes_start + node_count as usize * PACKED_OCTREE_NODE_SIZE as usize;
+    let node_bytes = bytes
+        .get(nodes_start..nodes_end)
+        .ok_or_else(|| anyhow!("packed octree node table is truncated"))?;
+    let nodes = decode_rows(
+        node_bytes,
+        PACKED_OCTREE_NODE_SIZE,
+        decode_packed_octree_node,
+    )?;
+    Ok(PackedOctreeIndex {
+        depth,
+        half_extent_pc,
+        point_count,
+        nodes,
+    })
 }
 
 pub fn write_source_metadata(path: &Path, metadata: &SourceMetadata) -> Result<()> {
@@ -262,111 +511,7 @@ pub fn write_source_metadata(path: &Path, metadata: &SourceMetadata) -> Result<(
         .with_context(|| format!("failed to write {}", path.display()))?;
     writer
         .flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
-    Ok(())
-}
-
-pub fn decode_octree_index(bytes: &[u8]) -> Result<OctreeIndex> {
-    if bytes.len() < OCTREE_HEADER_SIZE {
-        bail!(
-            "octree index is too short: expected at least {OCTREE_HEADER_SIZE} bytes, got {}",
-            bytes.len()
-        );
-    }
-    if bytes[0..8] != OCTREE_INDEX_MAGIC {
-        bail!("invalid octree index magic");
-    }
-
-    let version = read_u32(bytes, 8)?;
-    if version != OCTREE_INDEX_VERSION {
-        bail!("unsupported octree index version {version}");
-    }
-
-    let depth = read_u32(bytes, 12)?;
-    let depth = u8::try_from(depth).context("octree depth does not fit in u8")?;
-    let bounds = Bounds3 {
-        min: [
-            read_f32(bytes, 16)?,
-            read_f32(bytes, 20)?,
-            read_f32(bytes, 24)?,
-        ],
-        max: [
-            read_f32(bytes, 28)?,
-            read_f32(bytes, 32)?,
-            read_f32(bytes, 36)?,
-        ],
-    };
-    let leaf_count = read_u32(bytes, 40)? as usize;
-    let expected_len = OCTREE_HEADER_SIZE + leaf_count * 4;
-    if bytes.len() != expected_len {
-        bail!(
-            "octree index length {} does not match expected length {}",
-            bytes.len(),
-            expected_len
-        );
-    }
-
-    let mut leaves = Vec::with_capacity(leaf_count);
-    for chunk in bytes[OCTREE_HEADER_SIZE..].chunks_exact(4) {
-        leaves.push(u32::from_le_bytes(chunk.try_into().unwrap()));
-    }
-
-    Ok(OctreeIndex {
-        depth,
-        bounds,
-        leaves,
-    })
-}
-
-pub fn encode_octree_index(index: &OctreeIndex) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(OCTREE_HEADER_SIZE + index.leaves.len() * 4);
-    bytes.extend_from_slice(&OCTREE_INDEX_MAGIC);
-    bytes.extend_from_slice(&OCTREE_INDEX_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&(index.depth as u32).to_le_bytes());
-    for value in index.bounds.min {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    for value in index.bounds.max {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes.extend_from_slice(&(index.leaves.len() as u32).to_le_bytes());
-    for morton in &index.leaves {
-        bytes.extend_from_slice(&morton.to_le_bytes());
-    }
-    bytes
-}
-
-pub fn read_octree_index(path: &Path) -> Result<OctreeIndex> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    decode_octree_index(&bytes).with_context(|| format!("failed to parse {}", path.display()))
-}
-
-pub fn write_octree_index(path: &Path, index: &OctreeIndex) -> Result<()> {
-    let file =
-        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    writer
-        .write_all(&encode_octree_index(index))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    writer
-        .flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
-    Ok(())
-}
-
-pub fn row_count(path: &Path, row_size: u64) -> Result<u64> {
-    let len = fs::metadata(path)
-        .with_context(|| format!("failed to read metadata for {}", path.display()))?
-        .len();
-    if len % row_size != 0 {
-        bail!(
-            "file {} length {} is not a multiple of row size {}",
-            path.display(),
-            len,
-            row_size
-        );
-    }
-    Ok(len / row_size)
+        .with_context(|| format!("failed to flush {}", path.display()))
 }
 
 pub fn write_canonical_rows(path: &Path, rows: &[CanonicalRow]) -> Result<()> {
@@ -380,86 +525,7 @@ pub fn write_canonical_rows(path: &Path, rows: &[CanonicalRow]) -> Result<()> {
     }
     writer
         .flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
-    Ok(())
-}
-
-pub fn write_serving_rows(path: &Path, rows: &[ServingRow]) -> Result<()> {
-    let file =
-        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    write_serving_rows_to_writer(path, rows, &mut writer)?;
-    writer
-        .flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
-    Ok(())
-}
-
-pub fn append_serving_rows(path: &Path, rows: &[ServingRow]) -> Result<()> {
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    write_serving_rows_to_writer(path, rows, &mut writer)?;
-    writer
-        .flush()
-        .with_context(|| format!("failed to flush {}", path.display()))?;
-    Ok(())
-}
-
-fn write_serving_rows_to_writer(
-    path: &Path,
-    rows: &[ServingRow],
-    writer: &mut BufWriter<fs::File>,
-) -> Result<()> {
-    for row in rows {
-        writer
-            .write_all(&serving_row_bytes(row))
-            .with_context(|| format!("failed to write {}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn decode_rows<T, F>(bytes: &[u8], row_size: u64, decode: F) -> Result<Vec<T>>
-where
-    F: Fn(&[u8]) -> T,
-{
-    if bytes.len() as u64 % row_size != 0 {
-        bail!(
-            "buffer length {} is not a multiple of row size {}",
-            bytes.len(),
-            row_size
-        );
-    }
-
-    let mut rows = Vec::with_capacity(bytes.len() / row_size as usize);
-    for chunk in bytes.chunks_exact(row_size as usize) {
-        rows.push(decode(chunk));
-    }
-    Ok(rows)
-}
-
-fn decode_canonical_row(chunk: &[u8]) -> CanonicalRow {
-    CanonicalRow {
-        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-        ra: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-        dec: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-        parallax: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
-        parallax_error: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
-        phot_g_mean_mag: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
-        bp_rp: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
-    }
-}
-
-fn decode_serving_row(chunk: &[u8]) -> ServingRow {
-    ServingRow {
-        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-        x: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-        y: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-        z: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
-    }
+        .with_context(|| format!("failed to flush {}", path.display()))
 }
 
 #[cfg(test)]
@@ -469,90 +535,124 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_binary_rows() {
+    fn canonical_rows_round_trip() {
         let dir = tempdir().unwrap();
-        let canonical_path = dir.path().join("canonical.bin");
-        let serving_path = dir.path().join("serving.bin");
-
-        let canonical_rows = vec![
+        let path = dir.path().join("canonical.bin");
+        let rows = vec![
             CanonicalRow {
                 source_id: 1,
-                ra: 2.0,
-                dec: 3.0,
-                parallax: 4.0,
-                parallax_error: 0.5,
-                phot_g_mean_mag: 12.5,
-                bp_rp: 0.25,
+                ra: 1.5,
+                dec: -2.5,
+                parallax: 4.5,
+                parallax_error: 0.25,
+                phot_g_mean_mag: 12.3,
+                bp_rp: f32::NAN,
             },
             CanonicalRow {
-                source_id: 5,
-                ra: 6.0,
-                dec: 7.0,
-                parallax: 8.0,
-                parallax_error: 1.5,
-                phot_g_mean_mag: 13.5,
-                bp_rp: 0.75,
-            },
-        ];
-        let serving_rows = vec![
-            ServingRow {
-                source_id: 9,
-                x: 1.5,
-                y: 2.5,
-                z: 3.5,
-            },
-            ServingRow {
-                source_id: 10,
-                x: 4.5,
-                y: 5.5,
-                z: 6.5,
+                source_id: 2,
+                ra: 9.5,
+                dec: 8.5,
+                parallax: 7.5,
+                parallax_error: 0.5,
+                phot_g_mean_mag: 13.4,
+                bp_rp: 1.25,
             },
         ];
 
-        write_canonical_rows(&canonical_path, &canonical_rows).unwrap();
-        write_serving_rows(&serving_path, &serving_rows).unwrap();
+        write_canonical_rows(&path, &rows).unwrap();
 
-        assert_eq!(
-            read_canonical_rows(&canonical_path).unwrap(),
-            canonical_rows
-        );
-        assert_eq!(read_serving_rows(&serving_path).unwrap(), serving_rows);
-        assert_eq!(row_count(&canonical_path, CANONICAL_ROW_SIZE).unwrap(), 2);
-        assert_eq!(row_count(&serving_path, SERVING_ROW_SIZE).unwrap(), 2);
+        let round_trip = read_canonical_rows(&path).unwrap();
+        assert_eq!(round_trip[0].source_id, rows[0].source_id);
+        assert!(round_trip[0].bp_rp.is_nan());
+        assert_eq!(round_trip[1], rows[1]);
     }
 
     #[test]
-    fn round_trips_control_files() {
+    fn metadata_round_trip() {
         let dir = tempdir().unwrap();
-        let metadata_path = dir.path().join(METADATA_FILENAME);
-        let index_path = dir.path().join(OCTREE_INDEX_FILENAME);
+        let path = dir.path().join(METADATA_FILENAME);
         let metadata = SourceMetadata {
             source_bulk_url: "https://example.test/input.csv.gz".to_string(),
-            source_bulk_md5: "0123456789abcdef0123456789abcdef".to_string(),
+            source_bulk_md5: "abc123".to_string(),
             input_name: "input.csv.gz".to_string(),
             canonical_directory: canonical_directory_path("input.csv.gz"),
             canonical_parts: vec!["part-000.bin".to_string()],
-            ingestion_started_at: "2026-04-10T00:00:00Z".to_string(),
-            ingestion_finished_at: "2026-04-10T00:00:01Z".to_string(),
+            ingestion_started_at: "2025-01-01T00:00:00Z".to_string(),
+            ingestion_finished_at: "2025-01-01T00:00:01Z".to_string(),
             counts: SourceCounts {
-                rows_seen: 100,
-                rows_with_positive_parallax: 80,
-                rows_written: 6,
+                rows_seen: 10,
+                rows_with_positive_parallax: 8,
+                rows_written: 8,
             },
         };
-        let index = OctreeIndex {
-            depth: 6,
-            bounds: Bounds3 {
-                min: [-1.0, -2.0, -3.0],
-                max: [1.0, 2.0, 3.0],
-            },
-            leaves: vec![1, 7, 42],
+
+        write_source_metadata(&path, &metadata).unwrap();
+        assert_eq!(read_source_metadata(&path).unwrap(), metadata);
+    }
+
+    #[test]
+    fn packed_octree_round_trip() {
+        let index = PackedOctreeIndex {
+            depth: 7,
+            half_extent_pc: 4_000.0,
+            point_count: 3,
+            nodes: vec![
+                PackedOctreeNode {
+                    child_mask: 0b0000_0011,
+                    first: 1,
+                    count: 0,
+                },
+                PackedOctreeNode {
+                    child_mask: 0,
+                    first: 0,
+                    count: 2,
+                },
+                PackedOctreeNode {
+                    child_mask: 0,
+                    first: 2,
+                    count: 1,
+                },
+            ],
         };
+        let mut bytes = encode_packed_octree(&index);
+        bytes.extend_from_slice(&encode_packed_points(&[
+            PackedPoint {
+                source_id: 1,
+                x_local: 2,
+                y_local: 3,
+                z_local: 4,
+            },
+            PackedPoint {
+                source_id: 5,
+                x_local: 6,
+                y_local: 7,
+                z_local: 8,
+            },
+            PackedPoint {
+                source_id: 9,
+                x_local: 10,
+                y_local: 11,
+                z_local: 12,
+            },
+        ]));
 
-        write_source_metadata(&metadata_path, &metadata).unwrap();
-        write_octree_index(&index_path, &index).unwrap();
+        assert_eq!(decode_packed_octree(&bytes).unwrap(), index);
+    }
 
-        assert_eq!(read_source_metadata(&metadata_path).unwrap(), metadata);
-        assert_eq!(read_octree_index(&index_path).unwrap(), index);
+    #[test]
+    fn packed_point_quantization_round_trip_stays_within_one_step() {
+        let bounds = Bounds3 {
+            min: [0.0, 0.0, 0.0],
+            max: [62.5, 62.5, 62.5],
+        };
+        let original = [12.345, 23.456, 34.567];
+        let quantized = quantize_point(bounds, original, 7);
+        let round_trip = dequantize_point(bounds, &quantized);
+        let step = (bounds.max[0] - bounds.min[0]) / QUANTIZATION_SCALE;
+
+        assert_eq!(quantized.source_id, 7);
+        for axis in 0..3 {
+            assert!((round_trip[axis] - original[axis]).abs() <= step);
+        }
     }
 }

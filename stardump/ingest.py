@@ -234,22 +234,23 @@ def index_status(
     *,
     bucket_name: str | None,
     data_root: str | None,
-    octree_depth: int,
 ) -> None:
     bucket_name = bucket_name_from_state_or_project(bucket_name)
     data_root = data_root_from_state(data_root)
     prefix = object_prefix(data_root)
-    leaf_urls = storage_ls(f"gs://{bucket_name}/{prefix}/indices/depth={octree_depth}/**")
     index_urls = storage_ls(f"gs://{bucket_name}/{prefix}/index.octree")
-    max_leaf_count = 8**octree_depth
-    leaf_count = len(leaf_urls)
+    index_size = storage_size(index_urls[0]) if index_urls else None
 
     print(f"data_root: {data_root}")
-    print(f"octree_depth: {octree_depth}")
-    print(f"published_leaf_files: {leaf_count}")
-    print(f"max_possible_leaf_files: {max_leaf_count}")
-    print(f"share_of_max_tree: {leaf_count / max_leaf_count:.2%}")
     print(f"index_octree: {'present' if index_urls else 'absent'}")
+    if index_size is not None:
+        print(f"index_octree_bytes: {index_size}")
+
+
+def storage_size(url: str) -> int:
+    output = run(["gcloud", "storage", "du", url], capture_output=True)
+    size, _ = output.split(maxsplit=1)
+    return int(size)
 
 
 def execution_condition(execution_name: str) -> dict:

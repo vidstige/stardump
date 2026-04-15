@@ -10,9 +10,7 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 use crate::build_index::{BuildIndexConfig, DEFAULT_BOUNDS, DEFAULT_DEPTH, run_build_index};
-use crate::formats::{
-    OCTREE_INDEX_FILENAME, decode_serving_rows, indices_directory, leaf_filename, read_octree_index,
-};
+use crate::formats::{OCTREE_INDEX_FILENAME, read_packed_octree};
 use crate::ingest::{IngestConfig, run_ingestion};
 use crate::query_api::{QueryCatalog, QueryDataset, RadiusQueryRequest, build_app};
 
@@ -28,7 +26,7 @@ fn ingest_config(output_root: &Path, inputs: Vec<String>) -> IngestConfig {
 }
 
 #[test]
-fn builds_index_from_multiple_canonical_sources() {
+fn builds_packed_index_from_multiple_canonical_sources() {
     let dir = tempdir().unwrap();
     let input_a = dir.path().join("GaiaSource_000000-000001.csv.gz");
     let input_b = dir.path().join("GaiaSource_000002-000003.csv.gz");
@@ -60,79 +58,17 @@ fn builds_index_from_multiple_canonical_sources() {
         bounds: DEFAULT_BOUNDS,
     })
     .unwrap();
-    let index = read_octree_index(&output_root.join(OCTREE_INDEX_FILENAME)).unwrap();
-    let total_rows: usize = index
-        .leaves
-        .iter()
-        .map(|leaf| {
-            decode_serving_rows(
-                &std::fs::read(
-                    output_root
-                        .join(indices_directory(DEFAULT_DEPTH))
-                        .join(leaf_filename(*leaf)),
-                )
-                .unwrap(),
-            )
-            .unwrap()
-            .len()
-        })
-        .sum();
+    let index = read_packed_octree(&output_root.join(OCTREE_INDEX_FILENAME)).unwrap();
 
     assert_eq!(result.index, index);
     assert_eq!(result.sources_seen, 2);
     assert_eq!(result.rows_in_bounds, 4);
-    assert_eq!(total_rows, 4);
+    assert_eq!(index.point_count, 4);
+    assert!(!index.nodes.is_empty());
 }
 
 #[test]
-fn appends_rows_from_multiple_sources_into_one_leaf() {
-    let dir = tempdir().unwrap();
-    let input_a = dir.path().join("GaiaSource_000000-000001.csv.gz");
-    let input_b = dir.path().join("GaiaSource_000002-000003.csv.gz");
-    let output_root = dir.path().join("run");
-
-    write_gzip_file(
-        &input_a,
-        "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
-         1,0,0,100,1,12.5,0.3\n",
-    );
-    write_gzip_file(
-        &input_b,
-        "source_id,ra,dec,parallax,parallax_error,phot_g_mean_mag,bp_rp\n\
-         2,0,0,100,1,13.5,0.6\n",
-    );
-
-    run_ingestion(ingest_config(
-        &output_root,
-        vec![input_a.display().to_string(), input_b.display().to_string()],
-    ))
-    .unwrap();
-
-    let result = run_build_index(BuildIndexConfig {
-        data_root: output_root.display().to_string(),
-        output_root: output_root.display().to_string(),
-        octree_depth: DEFAULT_DEPTH,
-        bounds: DEFAULT_BOUNDS,
-    })
-    .unwrap();
-
-    assert_eq!(result.index.leaves.len(), 1);
-    let rows = decode_serving_rows(
-        &std::fs::read(
-            output_root
-                .join(indices_directory(DEFAULT_DEPTH))
-                .join(leaf_filename(result.index.leaves[0])),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let source_ids: Vec<u64> = rows.iter().map(|row| row.source_id).collect();
-
-    assert_eq!(source_ids, vec![1, 2]);
-}
-
-#[test]
-fn serves_exact_radius_queries_over_written_shards() {
+fn serves_exact_radius_queries_over_packed_index() {
     let dir = tempdir().unwrap();
     let data_root = dir.path().join("datasets");
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");

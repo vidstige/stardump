@@ -28,20 +28,6 @@ echo "build-index-job: starting local build data_root=${data_root} octree_depth=
   "--output-root=${output_root}"
 echo "build-index-job: local build finished"
 
-rm -rf "${data_root}/indices"
-mkdir -p "${data_root}/indices"
-
-echo "build-index-job: publishing indices"
-find "${output_root}/indices" -type d | while read -r source_dir; do
-  relative_dir="${source_dir#"${output_root}/"}"
-  mkdir -p "${data_root}/${relative_dir}"
-done
-
-find "${output_root}/indices" -type f | while read -r source_file; do
-  relative_file="${source_file#"${output_root}/"}"
-  cat "${source_file}" > "${data_root}/${relative_file}"
-done
-
 rm -f "${data_root}/index.octree"
 cat "${output_root}/index.octree" > "${data_root}/index.octree"
 echo "build-index-job: publish finished"

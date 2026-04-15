@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -13,17 +14,16 @@ use axum::routing::get;
 use csv::Writer;
 
 use crate::formats::{
-    OCTREE_INDEX_FILENAME, OctreeIndex, ServingRow, decode_octree_index, decode_serving_rows,
-    indices_directory, leaf_filename,
+    OCTREE_INDEX_FILENAME, PackedOctreeIndex, PackedOctreeNode, decode_packed_points,
+    dequantize_point, read_packed_octree,
 };
-use crate::octree::OctreeConfig;
-use crate::storage::{local_path, validate_serving_layout};
+use crate::octree::Bounds3;
+use crate::storage::{local_path, validate_packed_index_layout};
 
 #[derive(Clone)]
 pub struct QueryDataset {
-    index: OctreeIndex,
-    occupied_nodes_by_depth: Vec<HashSet<u32>>,
-    indices_root: PathBuf,
+    index: PackedOctreeIndex,
+    index_path: PathBuf,
 }
 
 pub struct QueryCatalog {
@@ -48,10 +48,10 @@ pub struct RadiusQueryMatch {
     pub source_id: u64,
 }
 
-fn distance(center: [f32; 3], row: &ServingRow) -> f32 {
-    let dx = row.x as f64 - center[0] as f64;
-    let dy = row.y as f64 - center[1] as f64;
-    let dz = row.z as f64 - center[2] as f64;
+fn distance(center: [f32; 3], point: [f32; 3]) -> f32 {
+    let dx = point[0] as f64 - center[0] as f64;
+    let dy = point[1] as f64 - center[1] as f64;
+    let dz = point[2] as f64 - center[2] as f64;
     (dx * dx + dy * dy + dz * dz).sqrt() as f32
 }
 
@@ -78,62 +78,71 @@ fn dataset_root(data_root: &Path, name: &str) -> PathBuf {
     data_root.join(name)
 }
 
-fn occupied_nodes_by_depth(leaves: &[u32], depth: u8) -> Vec<HashSet<u32>> {
-    let mut nodes = (0..=depth).map(|_| HashSet::new()).collect::<Vec<_>>();
-    for &leaf in leaves {
-        for node_depth in 0..=depth {
-            let shift = 3 * (depth - node_depth) as u32;
-            nodes[node_depth as usize].insert(leaf >> shift);
-        }
-    }
-    nodes
+fn read_leaf_points(
+    file: &mut fs::File,
+    index: &PackedOctreeIndex,
+    node: PackedOctreeNode,
+) -> Result<Vec<crate::formats::PackedPoint>> {
+    let offset = index.point_data_offset() + node.first as u64 * crate::formats::PACKED_POINT_SIZE;
+    let byte_count = node.count as usize * crate::formats::PACKED_POINT_SIZE as usize;
+    let mut bytes = vec![0_u8; byte_count];
+    file.seek(SeekFrom::Start(offset))
+        .context("failed to seek packed point range")?;
+    file.read_exact(&mut bytes)
+        .context("failed to read packed point range")?;
+    decode_packed_points(&bytes)
 }
 
-fn collect_intersecting_leaves(
-    dataset: &QueryDataset,
-    octree: OctreeConfig,
+fn collect_matches(
+    file: &mut fs::File,
+    index: &PackedOctreeIndex,
     center: [f32; 3],
     radius: f32,
-    depth: u8,
-    node: u32,
-    leaves: &mut Vec<u32>,
-) {
-    if !dataset.occupied_nodes_by_depth[depth as usize].contains(&node) {
-        return;
-    }
-
-    let bounds = octree.bounds.leaf_bounds(depth, node);
+    bounds: Bounds3,
+    node_index: u32,
+    matches: &mut Vec<RadiusQueryMatch>,
+) -> Result<()> {
     if !bounds.intersects_sphere(center, radius) {
-        return;
+        return Ok(());
     }
 
-    if depth == octree.depth {
-        leaves.push(node);
-        return;
+    let node = *index
+        .nodes
+        .get(node_index as usize)
+        .ok_or_else(|| anyhow::anyhow!("node index {node_index} is out of bounds"))?;
+
+    if node.child_mask == 0 {
+        for point in read_leaf_points(file, index, node)? {
+            let xyz = dequantize_point(bounds, &point);
+            if distance(center, xyz) <= radius {
+                matches.push(RadiusQueryMatch {
+                    x: xyz[0],
+                    y: xyz[1],
+                    z: xyz[2],
+                    source_id: point.source_id,
+                });
+            }
+        }
+        return Ok(());
     }
 
+    let mut child_index = node.first;
     for child in 0..8 {
-        collect_intersecting_leaves(
-            dataset,
-            octree,
+        if node.child_mask & (1 << child) == 0 {
+            continue;
+        }
+        collect_matches(
+            file,
+            index,
             center,
             radius,
-            depth + 1,
-            (node << 3) | child,
-            leaves,
-        );
+            bounds.child_bounds(child),
+            child_index,
+            matches,
+        )?;
+        child_index += 1;
     }
-}
-
-fn intersecting_leaves(
-    dataset: &QueryDataset,
-    octree: OctreeConfig,
-    center: [f32; 3],
-    radius: f32,
-) -> Vec<u32> {
-    let mut leaves = Vec::new();
-    collect_intersecting_leaves(dataset, octree, center, radius, 0, 0, &mut leaves);
-    leaves
+    Ok(())
 }
 
 async fn health() -> StatusCode {
@@ -191,22 +200,10 @@ async fn query_radius(
 
 impl QueryDataset {
     pub fn load(data_root: &Path) -> Result<Self> {
-        let index: OctreeIndex = decode_octree_index(
-            &fs::read(data_root.join(OCTREE_INDEX_FILENAME)).with_context(|| {
-                format!(
-                    "failed to read {}",
-                    data_root.join(OCTREE_INDEX_FILENAME).display()
-                )
-            })?,
-        )
-        .context("failed to parse octree index")?;
-        validate_serving_layout(data_root, &index)?;
-        let indices_root = data_root.join(indices_directory(index.depth));
-        Ok(Self {
-            occupied_nodes_by_depth: occupied_nodes_by_depth(&index.leaves, index.depth),
-            index,
-            indices_root,
-        })
+        let index_path = data_root.join(OCTREE_INDEX_FILENAME);
+        let index = read_packed_octree(&index_path).context("failed to parse packed octree")?;
+        validate_packed_index_layout(data_root, &index)?;
+        Ok(Self { index, index_path })
     }
 
     pub fn query_radius(&self, request: RadiusQueryRequest) -> Result<Vec<RadiusQueryMatch>> {
@@ -218,37 +215,24 @@ impl QueryDataset {
             bail!("limit must be greater than zero");
         }
 
-        let center = [request.x, request.y, request.z];
-        let octree = OctreeConfig {
-            depth: self.index.depth,
-            bounds: self.index.bounds,
-        };
-        let mut matches = Vec::new();
-        let intersecting_leaves = intersecting_leaves(self, octree, center, request.radius);
-
-        for morton in &intersecting_leaves {
-            let rows = decode_serving_rows(
-                &fs::read(self.indices_root.join(leaf_filename(*morton))).with_context(|| {
-                    format!(
-                        "failed to read {}",
-                        self.indices_root.join(leaf_filename(*morton)).display()
-                    )
-                })?,
-            )?;
-            for row in rows {
-                let distance = distance(center, &row);
-                if distance <= request.radius {
-                    matches.push(RadiusQueryMatch {
-                        x: row.x,
-                        y: row.y,
-                        z: row.z,
-                        source_id: row.source_id,
-                    });
-                }
-            }
+        if self.index.nodes.is_empty() {
+            return Ok(Vec::new());
         }
 
-        matches.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        let center = [request.x, request.y, request.z];
+        let mut file = fs::File::open(&self.index_path)
+            .with_context(|| format!("failed to open {}", self.index_path.display()))?;
+        let mut matches = Vec::new();
+        collect_matches(
+            &mut file,
+            &self.index,
+            center,
+            request.radius,
+            self.index.bounds(),
+            0,
+            &mut matches,
+        )?;
+        matches.sort_by_key(|row| row.source_id);
         matches.truncate(limit);
         Ok(matches)
     }
@@ -409,118 +393,67 @@ pub fn query_radius_csv(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::io::Write;
 
-    use crate::formats::OctreeIndex;
-    use crate::octree::{Bounds3, morton_encode};
+    use tempfile::tempdir;
+
+    use crate::formats::{
+        PackedOctreeNode, PackedPoint, encode_packed_octree, encode_packed_points,
+    };
 
     use super::*;
 
-    fn synthetic_dataset(depth: u8) -> QueryDataset {
-        let mut leaves = Vec::new();
-        for x in 96..112 {
-            for y in 96..112 {
-                for z in 96..112 {
-                    leaves.push(morton_encode(x, y, z));
-                }
-            }
-        }
-        leaves.sort_unstable();
-
-        QueryDataset {
-            occupied_nodes_by_depth: occupied_nodes_by_depth(&leaves, depth),
-            index: OctreeIndex {
-                depth,
-                bounds: Bounds3 {
-                    min: [-4000.0, -4000.0, -4000.0],
-                    max: [4000.0, 4000.0, 4000.0],
+    #[test]
+    fn query_radius_reads_leaf_payloads_from_packed_index() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(OCTREE_INDEX_FILENAME);
+        let index = PackedOctreeIndex {
+            depth: 1,
+            half_extent_pc: 1.0,
+            point_count: 2,
+            nodes: vec![
+                PackedOctreeNode {
+                    child_mask: 0b0000_0001,
+                    first: 1,
+                    count: 0,
                 },
-                leaves,
+                PackedOctreeNode {
+                    child_mask: 0,
+                    first: 0,
+                    count: 2,
+                },
+            ],
+        };
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(&encode_packed_octree(&index)).unwrap();
+        file.write_all(&encode_packed_points(&[
+            PackedPoint {
+                source_id: 1,
+                x_local: 0,
+                y_local: 0,
+                z_local: 0,
             },
-            indices_root: PathBuf::new(),
-        }
-    }
+            PackedPoint {
+                source_id: 2,
+                x_local: u16::MAX,
+                y_local: u16::MAX,
+                z_local: u16::MAX,
+            },
+        ]))
+        .unwrap();
 
-    fn flat_intersecting_leaves(
-        dataset: &QueryDataset,
-        octree: OctreeConfig,
-        center: [f32; 3],
-        radius: f32,
-    ) -> Vec<u32> {
-        let Some(ranges) = octree.leaf_ranges_for_bounds(
-            [center[0] - radius, center[1] - radius, center[2] - radius],
-            [center[0] + radius, center[1] + radius, center[2] + radius],
-        ) else {
-            return Vec::new();
-        };
+        let dataset = QueryDataset::load(dir.path()).unwrap();
+        let matches = dataset
+            .query_radius(RadiusQueryRequest {
+                x: -0.99,
+                y: -0.99,
+                z: -0.99,
+                radius: 0.1,
+                limit: Some(10),
+            })
+            .unwrap();
 
-        let occupied_leaves = &dataset.occupied_nodes_by_depth[octree.depth as usize];
-        let mut leaves = Vec::new();
-        for x in ranges[0].0..=ranges[0].1 {
-            for y in ranges[1].0..=ranges[1].1 {
-                for z in ranges[2].0..=ranges[2].1 {
-                    let morton = morton_encode(x, y, z);
-                    if !occupied_leaves.contains(&morton) {
-                        continue;
-                    }
-                    if octree.leaf_bounds(morton).intersects_sphere(center, radius) {
-                        leaves.push(morton);
-                    }
-                }
-            }
-        }
-        leaves
-    }
-
-    #[test]
-    fn recursive_intersection_matches_flat_enumeration() {
-        let dataset = synthetic_dataset(7);
-        let octree = OctreeConfig {
-            depth: dataset.index.depth,
-            bounds: dataset.index.bounds,
-        };
-        let center = [0.0, 0.0, 0.0];
-        let radius = 250.0;
-
-        let mut recursive = intersecting_leaves(&dataset, octree, center, radius);
-        let mut flat = flat_intersecting_leaves(&dataset, octree, center, radius);
-        recursive.sort_unstable();
-        flat.sort_unstable();
-
-        assert_eq!(recursive, flat);
-    }
-
-    #[test]
-    #[ignore = "benchmark"]
-    fn clustered_query_traversal_benchmark() {
-        let dataset = synthetic_dataset(8);
-        let octree = OctreeConfig {
-            depth: dataset.index.depth,
-            bounds: dataset.index.bounds,
-        };
-        let center = [0.0, 0.0, 0.0];
-        let radius = 600.0;
-
-        let started = Instant::now();
-        let mut recursive_count = 0;
-        for _ in 0..500 {
-            recursive_count += intersecting_leaves(&dataset, octree, center, radius).len();
-        }
-        let recursive_elapsed = started.elapsed();
-
-        let started = Instant::now();
-        let mut flat_count = 0;
-        for _ in 0..500 {
-            flat_count += flat_intersecting_leaves(&dataset, octree, center, radius).len();
-        }
-        let flat_elapsed = started.elapsed();
-
-        assert_eq!(recursive_count, flat_count);
-        eprintln!(
-            "recursive={:?} flat={:?} speedup={:.2}x",
-            recursive_elapsed,
-            flat_elapsed,
-            flat_elapsed.as_secs_f64() / recursive_elapsed.as_secs_f64()
-        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].source_id, 1);
     }
 }

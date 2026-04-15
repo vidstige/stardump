@@ -10,22 +10,6 @@ pub struct OctreeConfig {
     pub bounds: Bounds3,
 }
 
-fn expand_bits(value: u32) -> u32 {
-    let mut value = value & 0x3f;
-    value = (value | (value << 8)) & 0x0000_f00f;
-    value = (value | (value << 4)) & 0x000c_30c3;
-    value = (value | (value << 2)) & 0x0024_9249;
-    value
-}
-
-fn compact_bits(value: u32) -> u32 {
-    let mut value = value & 0x0024_9249;
-    value = (value ^ (value >> 2)) & 0x000c_30c3;
-    value = (value ^ (value >> 4)) & 0x0000_f00f;
-    value = (value ^ (value >> 8)) & 0x0000_003f;
-    value
-}
-
 fn axis_index(value: f32, min: f32, max: f32, scale: u32) -> Option<u32> {
     if !value.is_finite() || value < min || value > max {
         return None;
@@ -82,15 +66,25 @@ fn clamp_distance(value: f32, min: f32, max: f32) -> f32 {
 }
 
 pub fn morton_encode(x: u32, y: u32, z: u32) -> u32 {
-    expand_bits(x) | (expand_bits(y) << 1) | (expand_bits(z) << 2)
+    let mut code = 0_u32;
+    for bit in 0..10 {
+        code |= ((x >> bit) & 1) << (3 * bit);
+        code |= ((y >> bit) & 1) << (3 * bit + 1);
+        code |= ((z >> bit) & 1) << (3 * bit + 2);
+    }
+    code
 }
 
 pub fn morton_decode(code: u32) -> [u32; 3] {
-    [
-        compact_bits(code),
-        compact_bits(code >> 1),
-        compact_bits(code >> 2),
-    ]
+    let mut x = 0_u32;
+    let mut y = 0_u32;
+    let mut z = 0_u32;
+    for bit in 0..10 {
+        x |= ((code >> (3 * bit)) & 1) << bit;
+        y |= ((code >> (3 * bit + 1)) & 1) << bit;
+        z |= ((code >> (3 * bit + 2)) & 1) << bit;
+    }
+    [x, y, z]
 }
 
 impl Bounds3 {
@@ -124,6 +118,26 @@ impl Bounds3 {
         let dy = clamp_distance(center[1], self.min[1], self.max[1]);
         let dz = clamp_distance(center[2], self.min[2], self.max[2]);
         dx * dx + dy * dy + dz * dz <= radius * radius
+    }
+
+    pub fn child_bounds(&self, child: u8) -> Bounds3 {
+        let mid = [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+            (self.min[2] + self.max[2]) * 0.5,
+        ];
+        Bounds3 {
+            min: [
+                if child & 1 == 0 { self.min[0] } else { mid[0] },
+                if child & 2 == 0 { self.min[1] } else { mid[1] },
+                if child & 4 == 0 { self.min[2] } else { mid[2] },
+            ],
+            max: [
+                if child & 1 == 0 { mid[0] } else { self.max[0] },
+                if child & 2 == 0 { mid[1] } else { self.max[1] },
+                if child & 4 == 0 { mid[2] } else { self.max[2] },
+            ],
+        }
     }
 }
 
@@ -181,6 +195,12 @@ mod tests {
     fn morton_round_trip_preserves_axis_indices() {
         let code = morton_encode(3, 17, 42);
         assert_eq!(morton_decode(code), [3, 17, 42]);
+    }
+
+    #[test]
+    fn morton_round_trip_preserves_seven_bit_values() {
+        let code = morton_encode(127, 126, 125);
+        assert_eq!(morton_decode(code), [127, 126, 125]);
     }
 
     #[test]

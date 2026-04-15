@@ -6,7 +6,7 @@ use star_dump::build_index::{
     load_source_metadata, read_canonical_part_rows, run_build_index,
 };
 use star_dump::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, passes_parallax_quality};
-use star_dump::storage::{local_path, validate_serving_layout};
+use star_dump::storage::{local_path, validate_packed_index_layout};
 
 #[derive(Parser)]
 struct Args {
@@ -78,12 +78,13 @@ fn run_quality_filtered_build_index(args: Args) -> anyhow::Result<BuildIndexResu
         );
     }
     let (index, rows_in_bounds) = builder.finish()?;
-    validate_serving_layout(&output_root, &index)?;
+    validate_packed_index_layout(&output_root, &index)?;
     println!(
-        "build-index: finished sources={} rows_in_bounds={} leaves={} elapsed_s={:.1}",
+        "build-index: finished sources={} rows_in_bounds={} nodes={} points={} elapsed_s={:.1}",
         source_count,
         rows_in_bounds,
-        index.leaves.len(),
+        index.nodes.len(),
+        index.point_count,
         started.elapsed().as_secs_f32(),
     );
     Ok(BuildIndexResult {
