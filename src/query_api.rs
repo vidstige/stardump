@@ -7,11 +7,12 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::{Path as AxumPath, RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use csv::Writer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::formats::{
     OCTREE_INDEX_FILENAME, PackedOctreeIndex, PackedOctreeNode, decode_packed_points,
@@ -564,6 +565,7 @@ pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
         .route("/indices", get(list_indices))
         .route("/query/{name}/radius", get(query_radius))
         .route("/query/{name}/frustum", get(query_frustum))
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
         .with_state(catalog)
 }
 
