@@ -600,7 +600,7 @@ fn parse_query_parameter(query: &str, name: &str) -> Result<Option<String>, (Sta
     Ok(value)
 }
 
-fn parse_required_f32(query: &str, name: &str) -> Result<f32, (StatusCode, String)> {
+fn parse_required<T: std::str::FromStr>(query: &str, name: &str) -> Result<T, (StatusCode, String)> {
     let value = parse_query_parameter(query, name)?
         .ok_or_else(|| bad_request(format!("missing query parameter {name}")))?;
     value
@@ -608,42 +608,42 @@ fn parse_required_f32(query: &str, name: &str) -> Result<f32, (StatusCode, Strin
         .map_err(|_| bad_request(format!("query parameter {name} must be a number")))
 }
 
-fn parse_optional_usize(query: &str, name: &str) -> Result<Option<usize>, (StatusCode, String)> {
+fn parse_optional<T: std::str::FromStr>(query: &str, name: &str) -> Result<Option<T>, (StatusCode, String)> {
     let Some(value) = parse_query_parameter(query, name)? else {
         return Ok(None);
     };
     value
         .parse()
         .map(Some)
-        .map_err(|_| bad_request(format!("query parameter {name} must be an integer")))
+        .map_err(|_| bad_request(format!("query parameter {name} must be a number")))
 }
 
 fn parse_query_request(query: Option<&str>) -> Result<RadiusQueryRequest, (StatusCode, String)> {
     let query = query.unwrap_or_default();
     Ok(RadiusQueryRequest {
-        x: parse_required_f32(query, "x")?,
-        y: parse_required_f32(query, "y")?,
-        z: parse_required_f32(query, "z")?,
-        radius: parse_required_f32(query, "r")?,
-        limit: parse_optional_usize(query, "limit")?,
+        x: parse_required(query, "x")?,
+        y: parse_required(query, "y")?,
+        z: parse_required(query, "z")?,
+        radius: parse_required(query, "r")?,
+        limit: parse_optional(query, "limit")?,
     })
 }
 
 fn parse_frustum_query_request(query: Option<&str>) -> Result<FrustumQueryRequest, (StatusCode, String)> {
     let query = query.unwrap_or_default();
     Ok(FrustumQueryRequest {
-        x: parse_required_f32(query, "x")?,
-        y: parse_required_f32(query, "y")?,
-        z: parse_required_f32(query, "z")?,
-        qx: parse_required_f32(query, "qx")?,
-        qy: parse_required_f32(query, "qy")?,
-        qz: parse_required_f32(query, "qz")?,
-        qw: parse_required_f32(query, "qw")?,
-        near: parse_required_f32(query, "near")?,
-        far: parse_required_f32(query, "far")?,
-        fovy: parse_required_f32(query, "fovy")?,
-        aspect: parse_required_f32(query, "aspect")?,
-        limit: parse_optional_usize(query, "limit")?,
+        x: parse_required(query, "x")?,
+        y: parse_required(query, "y")?,
+        z: parse_required(query, "z")?,
+        qx: parse_required(query, "qx")?,
+        qy: parse_required(query, "qy")?,
+        qz: parse_required(query, "qz")?,
+        qw: parse_required(query, "qw")?,
+        near: parse_required(query, "near")?,
+        far: parse_required(query, "far")?,
+        fovy: parse_required(query, "fovy")?,
+        aspect: parse_required(query, "aspect")?,
+        limit: parse_optional(query, "limit")?,
     })
 }
 
