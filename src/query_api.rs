@@ -65,18 +65,90 @@ pub struct QueryMatch {
     pub source_id: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Vec3 {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl Vec3 {
+    fn dot(self, other: Vec3) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    fn cross(self, other: Vec3) -> Vec3 {
+        Vec3 {
+            x: self.y * other.z - self.z * other.y,
+            y: self.z * other.x - self.x * other.z,
+            z: self.x * other.y - self.y * other.x,
+        }
+    }
+
+    fn length(self) -> f32 {
+        self.dot(self).sqrt()
+    }
+
+    fn normalize(self) -> Option<Vec3> {
+        let len = self.length();
+        if !len.is_finite() || len == 0.0 {
+            return None;
+        }
+        Some(self * (1.0 / len))
+    }
+}
+
+impl std::ops::Add for Vec3 {
+    type Output = Vec3;
+    fn add(self, other: Vec3) -> Vec3 {
+        Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }
+    }
+}
+
+impl std::ops::Sub for Vec3 {
+    type Output = Vec3;
+    fn sub(self, other: Vec3) -> Vec3 {
+        Vec3 { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
+    }
+}
+
+impl std::ops::Mul<f32> for Vec3 {
+    type Output = Vec3;
+    fn mul(self, scalar: f32) -> Vec3 {
+        Vec3 { x: self.x * scalar, y: self.y * scalar, z: self.z * scalar }
+    }
+}
+
+impl From<[f32; 3]> for Vec3 {
+    fn from(v: [f32; 3]) -> Vec3 {
+        Vec3 { x: v[0], y: v[1], z: v[2] }
+    }
+}
+
+impl From<Vec3> for [f32; 3] {
+    fn from(v: Vec3) -> [f32; 3] {
+        [v.x, v.y, v.z]
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Plane {
-    normal: [f32; 3],
+    normal: Vec3,
     constant: f32,
+}
+
+impl Plane {
+    fn distance_to(self, point: Vec3) -> f32 {
+        self.normal.dot(point) + self.constant
+    }
 }
 
 #[derive(Clone, Copy)]
 struct DerivedFrustum {
-    position: [f32; 3],
-    forward: [f32; 3],
-    right: [f32; 3],
-    up: [f32; 3],
+    position: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
     near: f32,
     far: f32,
     tan_half_fovy: f32,
@@ -86,49 +158,6 @@ struct DerivedFrustum {
 
 const DEFAULT_LIMIT: usize = 1000;
 
-fn distance(center: [f32; 3], point: [f32; 3]) -> f32 {
-    let dx = point[0] as f64 - center[0] as f64;
-    let dy = point[1] as f64 - center[1] as f64;
-    let dz = point[2] as f64 - center[2] as f64;
-    (dx * dx + dy * dy + dz * dz).sqrt() as f32
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn subtract(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale(v: [f32; 3], amount: f32) -> [f32; 3] {
-    [v[0] * amount, v[1] * amount, v[2] * amount]
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn length(v: [f32; 3]) -> f32 {
-    dot(v, v).sqrt()
-}
-
-fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
-    let len = length(v);
-    if !len.is_finite() || len == 0.0 {
-        return None;
-    }
-    Some(scale(v, 1.0 / len))
-}
-
 fn normalize_quaternion(q: [f32; 4]) -> Option<[f32; 4]> {
     let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     if !len.is_finite() || len == 0.0 {
@@ -137,11 +166,11 @@ fn normalize_quaternion(q: [f32; 4]) -> Option<[f32; 4]> {
     Some([q[0] / len, q[1] / len, q[2] / len, q[3] / len])
 }
 
-fn rotate_vector(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
-    let qv = [q[0], q[1], q[2]];
-    let uv = cross(qv, v);
-    let uuv = cross(qv, uv);
-    add(v, add(scale(uv, 2.0 * q[3]), scale(uuv, 2.0)))
+fn rotate_vector(q: [f32; 4], v: Vec3) -> Vec3 {
+    let qv = Vec3 { x: q[0], y: q[1], z: q[2] };
+    let uv = qv.cross(v);
+    let uuv = qv.cross(uv);
+    v + uv * (2.0 * q[3]) + uuv * 2.0
 }
 
 fn bad_request(message: impl Into<String>) -> (StatusCode, String) {
@@ -189,7 +218,7 @@ fn collect_matches(
     node_index: u32,
     matches: &mut Vec<QueryMatch>,
     bounds_match: &dyn Fn(Bounds3) -> bool,
-    point_match: &dyn Fn([f32; 3]) -> bool,
+    point_match: &dyn Fn(Vec3) -> bool,
 ) -> Result<()> {
     if !bounds_match(bounds) {
         return Ok(());
@@ -202,12 +231,12 @@ fn collect_matches(
 
     if node.child_mask == 0 {
         for point in read_leaf_points(file, index, node)? {
-            let xyz = dequantize_point(bounds, &point);
+            let xyz = Vec3::from(dequantize_point(bounds, &point));
             if point_match(xyz) {
                 matches.push(QueryMatch {
-                    x: xyz[0],
-                    y: xyz[1],
-                    z: xyz[2],
+                    x: xyz.x,
+                    y: xyz.y,
+                    z: xyz.z,
                     source_id: point.source_id,
                 });
             }
@@ -234,58 +263,45 @@ fn collect_matches(
     Ok(())
 }
 
-fn plane_from_point_normal(point: [f32; 3], normal: [f32; 3]) -> Plane {
-    let unit = normalize(normal).expect("plane normal must be non-zero");
+fn plane_from_point_normal(point: Vec3, normal: Vec3) -> Plane {
+    let unit = normal.normalize().expect("plane normal must be non-zero");
     Plane {
         normal: unit,
-        constant: -dot(unit, point),
+        constant: -unit.dot(point),
     }
 }
 
-fn plane_from_points(a: [f32; 3], b: [f32; 3], c: [f32; 3], inside: [f32; 3]) -> Plane {
-    let mut normal = normalize(cross(subtract(b, a), subtract(c, a)))
-        .expect("plane points must not be collinear");
-    if dot(normal, subtract(inside, a)) < 0.0 {
-        normal = scale(normal, -1.0);
+fn plane_from_points(a: Vec3, b: Vec3, c: Vec3, inside: Vec3) -> Plane {
+    let mut normal = (b - a).cross(c - a).normalize().expect("plane points must not be collinear");
+    if normal.dot(inside - a) < 0.0 {
+        normal = normal * -1.0;
     }
     plane_from_point_normal(a, normal)
 }
 
 fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
-    let position = [request.x, request.y, request.z];
+    let position = Vec3 { x: request.x, y: request.y, z: request.z };
     let orientation = normalize_quaternion([request.qx, request.qy, request.qz, request.qw])
         .ok_or_else(|| anyhow::anyhow!("orientation quaternion must be non-zero"))?;
-    let forward = normalize(rotate_vector(orientation, [0.0, 0.0, -1.0]))
+    let forward = rotate_vector(orientation, Vec3 { x: 0.0, y: 0.0, z: -1.0 })
+        .normalize()
         .ok_or_else(|| anyhow::anyhow!("forward vector must be non-zero"))?;
-    let right = normalize(rotate_vector(orientation, [1.0, 0.0, 0.0]))
+    let right = rotate_vector(orientation, Vec3 { x: 1.0, y: 0.0, z: 0.0 })
+        .normalize()
         .ok_or_else(|| anyhow::anyhow!("right vector must be non-zero"))?;
-    let up = normalize(rotate_vector(orientation, [0.0, 1.0, 0.0]))
+    let up = rotate_vector(orientation, Vec3 { x: 0.0, y: 1.0, z: 0.0 })
+        .normalize()
         .ok_or_else(|| anyhow::anyhow!("up vector must be non-zero"))?;
-    let near_center = add(position, scale(forward, request.near));
-    let far_center = add(position, scale(forward, request.far));
+    let near_center = position + forward * request.near;
+    let far_center = position + forward * request.far;
     let near_half_height = request.near * (request.fovy * 0.5).tan();
     let near_half_width = near_half_height * request.aspect;
-    let inside = add(
-        position,
-        scale(forward, request.near + (request.far - request.near) * 0.5),
-    );
+    let inside = position + forward * (request.near + (request.far - request.near) * 0.5);
 
-    let near_top_left = add(
-        add(near_center, scale(up, near_half_height)),
-        scale(right, -near_half_width),
-    );
-    let near_top_right = add(
-        add(near_center, scale(up, near_half_height)),
-        scale(right, near_half_width),
-    );
-    let near_bottom_left = add(
-        add(near_center, scale(up, -near_half_height)),
-        scale(right, -near_half_width),
-    );
-    let near_bottom_right = add(
-        add(near_center, scale(up, -near_half_height)),
-        scale(right, near_half_width),
-    );
+    let near_top_left = near_center + up * near_half_height + right * (-near_half_width);
+    let near_top_right = near_center + up * near_half_height + right * near_half_width;
+    let near_bottom_left = near_center + up * (-near_half_height) + right * (-near_half_width);
+    let near_bottom_right = near_center + up * (-near_half_height) + right * near_half_width;
 
     Ok(DerivedFrustum {
         position,
@@ -298,7 +314,7 @@ fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
         aspect: request.aspect,
         planes: [
             plane_from_point_normal(near_center, forward),
-            plane_from_point_normal(far_center, scale(forward, -1.0)),
+            plane_from_point_normal(far_center, forward * -1.0),
             plane_from_points(position, near_bottom_left, near_top_left, inside),
             plane_from_points(position, near_top_right, near_bottom_right, inside),
             plane_from_points(position, near_top_left, near_top_right, inside),
@@ -307,23 +323,19 @@ fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
     })
 }
 
-fn bounds_corners(bounds: Bounds3) -> [[f32; 3]; 8] {
-    let [min_x, min_y, min_z] = bounds.min;
-    let [max_x, max_y, max_z] = bounds.max;
+fn bounds_corners(bounds: Bounds3) -> [Vec3; 8] {
+    let [x0, y0, z0] = bounds.min;
+    let [x1, y1, z1] = bounds.max;
     [
-        [min_x, min_y, min_z],
-        [min_x, min_y, max_z],
-        [min_x, max_y, min_z],
-        [min_x, max_y, max_z],
-        [max_x, min_y, min_z],
-        [max_x, min_y, max_z],
-        [max_x, max_y, min_z],
-        [max_x, max_y, max_z],
+        Vec3 { x: x0, y: y0, z: z0 },
+        Vec3 { x: x0, y: y0, z: z1 },
+        Vec3 { x: x0, y: y1, z: z0 },
+        Vec3 { x: x0, y: y1, z: z1 },
+        Vec3 { x: x1, y: y0, z: z0 },
+        Vec3 { x: x1, y: y0, z: z1 },
+        Vec3 { x: x1, y: y1, z: z0 },
+        Vec3 { x: x1, y: y1, z: z1 },
     ]
-}
-
-fn plane_distance(plane: Plane, point: [f32; 3]) -> f32 {
-    dot(plane.normal, point) + plane.constant
 }
 
 fn bounds_intersect_frustum(bounds: Bounds3, frustum: &DerivedFrustum) -> bool {
@@ -331,20 +343,20 @@ fn bounds_intersect_frustum(bounds: Bounds3, frustum: &DerivedFrustum) -> bool {
     frustum
         .planes
         .iter()
-        .all(|plane| corners.iter().any(|corner| plane_distance(*plane, *corner) >= 0.0))
+        .all(|plane| corners.iter().any(|&corner| plane.distance_to(corner) >= 0.0))
 }
 
-fn point_in_frustum(point: [f32; 3], frustum: &DerivedFrustum) -> bool {
-    let relative = subtract(point, frustum.position);
-    let depth = dot(relative, frustum.forward);
+fn point_in_frustum(point: Vec3, frustum: &DerivedFrustum) -> bool {
+    let relative = point - frustum.position;
+    let depth = relative.dot(frustum.forward);
     if depth < frustum.near || depth > frustum.far {
         return false;
     }
 
     let half_height = depth * frustum.tan_half_fovy;
     let half_width = half_height * frustum.aspect;
-    let horizontal = dot(relative, frustum.right);
-    let vertical = dot(relative, frustum.up);
+    let horizontal = relative.dot(frustum.right);
+    let vertical = relative.dot(frustum.up);
     horizontal.abs() <= half_width && vertical.abs() <= half_height
 }
 
@@ -452,12 +464,12 @@ impl QueryDataset {
             return Ok(Vec::new());
         }
 
-        let center = [request.x, request.y, request.z];
+        let center = Vec3 { x: request.x, y: request.y, z: request.z };
         let mut file = fs::File::open(&self.index_path)
             .with_context(|| format!("failed to open {}", self.index_path.display()))?;
         let mut matches = Vec::new();
-        let bounds_match = |bounds: Bounds3| bounds.intersects_sphere(center, request.radius);
-        let point_match = |point: [f32; 3]| distance(center, point) <= request.radius;
+        let bounds_match = |bounds: Bounds3| bounds.intersects_sphere(center.into(), request.radius);
+        let point_match = |point: Vec3| (point - center).length() <= request.radius;
         collect_matches(
             &mut file,
             &self.index,
@@ -484,7 +496,7 @@ impl QueryDataset {
             .with_context(|| format!("failed to open {}", self.index_path.display()))?;
         let mut matches = Vec::new();
         let bounds_match = |bounds: Bounds3| bounds_intersect_frustum(bounds, &frustum);
-        let point_match = |point: [f32; 3]| point_in_frustum(point, &frustum);
+        let point_match = |point: Vec3| point_in_frustum(point, &frustum);
         collect_matches(
             &mut file,
             &self.index,
