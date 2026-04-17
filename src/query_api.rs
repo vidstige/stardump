@@ -4,7 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::{Path as AxumPath, RawQuery, State};
 use axum::http::{Method, StatusCode};
@@ -22,7 +22,7 @@ use crate::octree::Bounds3;
 use crate::storage::{local_path, validate_packed_index_layout};
 
 #[derive(Clone)]
-pub struct QueryDataset {
+struct QueryDataset {
     index: PackedOctreeIndex,
     index_path: PathBuf,
 }
@@ -32,37 +32,12 @@ pub struct QueryCatalog {
     datasets: RwLock<HashMap<String, Arc<QueryDataset>>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RadiusQueryRequest {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub radius: f32,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct FrustumQueryRequest {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub qx: f32,
-    pub qy: f32,
-    pub qz: f32,
-    pub qw: f32,
-    pub near: f32,
-    pub far: f32,
-    pub fovy: f32,
-    pub aspect: f32,
-    pub limit: Option<usize>,
-}
-
 #[derive(Debug, PartialEq)]
-pub struct QueryMatch {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub source_id: u64,
+struct QueryMatch {
+    x: f32,
+    y: f32,
+    z: f32,
+    source_id: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -279,9 +254,13 @@ fn plane_from_points(a: Vec3, b: Vec3, c: Vec3, inside: Vec3) -> Plane {
     plane_from_point_normal(a, normal)
 }
 
-fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
-    let position = Vec3 { x: request.x, y: request.y, z: request.z };
-    let orientation = normalize_quaternion([request.qx, request.qy, request.qz, request.qw])
+fn derive_frustum(
+    x: f32, y: f32, z: f32,
+    qx: f32, qy: f32, qz: f32, qw: f32,
+    near: f32, far: f32, fovy: f32, aspect: f32,
+) -> Result<DerivedFrustum> {
+    let position = Vec3 { x, y, z };
+    let orientation = normalize_quaternion([qx, qy, qz, qw])
         .ok_or_else(|| anyhow::anyhow!("orientation quaternion must be non-zero"))?;
     let forward = rotate_vector(orientation, Vec3 { x: 0.0, y: 0.0, z: -1.0 })
         .normalize()
@@ -292,11 +271,11 @@ fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
     let up = rotate_vector(orientation, Vec3 { x: 0.0, y: 1.0, z: 0.0 })
         .normalize()
         .ok_or_else(|| anyhow::anyhow!("up vector must be non-zero"))?;
-    let near_center = position + forward * request.near;
-    let far_center = position + forward * request.far;
-    let near_half_height = request.near * (request.fovy * 0.5).tan();
-    let near_half_width = near_half_height * request.aspect;
-    let inside = position + forward * (request.near + (request.far - request.near) * 0.5);
+    let near_center = position + forward * near;
+    let far_center = position + forward * far;
+    let near_half_height = near * (fovy * 0.5).tan();
+    let near_half_width = near_half_height * aspect;
+    let inside = position + forward * (near + (far - near) * 0.5);
 
     let near_top_left = near_center + up * near_half_height + right * (-near_half_width);
     let near_top_right = near_center + up * near_half_height + right * near_half_width;
@@ -308,10 +287,10 @@ fn derive_frustum(request: FrustumQueryRequest) -> Result<DerivedFrustum> {
         forward,
         right,
         up,
-        near: request.near,
-        far: request.far,
-        tan_half_fovy: (request.fovy * 0.5).tan(),
-        aspect: request.aspect,
+        near,
+        far,
+        tan_half_fovy: (fovy * 0.5).tan(),
+        aspect,
         planes: [
             plane_from_point_normal(near_center, forward),
             plane_from_point_normal(far_center, forward * -1.0),
@@ -360,12 +339,20 @@ fn point_in_frustum(point: Vec3, frustum: &DerivedFrustum) -> bool {
     horizontal.abs() <= half_width && vertical.abs() <= half_height
 }
 
-fn query_limit(limit: Option<usize>) -> Result<usize> {
-    let limit = limit.unwrap_or(DEFAULT_LIMIT);
-    if limit == 0 {
-        bail!("limit must be greater than zero");
+fn encode_matches_csv(matches: &[QueryMatch]) -> Result<String, (StatusCode, String)> {
+    let mut writer = Writer::from_writer(Vec::new());
+    writer
+        .write_record(["x", "y", "z", "source_id"])
+        .map_err(|error| internal_error(error.into()))?;
+    for row in matches {
+        writer
+            .serialize((row.x, row.y, row.z, row.source_id))
+            .map_err(|error| internal_error(error.into()))?;
     }
-    Ok(limit)
+    let bytes = writer
+        .into_inner()
+        .map_err(|error| internal_error(error.into_error().into()))?;
+    String::from_utf8(bytes).map_err(|error| internal_error(error.into()))
 }
 
 async fn health() -> StatusCode {
@@ -407,15 +394,29 @@ async fn query_radius(
     let Some(dataset) = catalog.dataset(&name).map_err(internal_error)? else {
         return Err(not_found(format!("unknown dataset {name}")));
     };
-    let request = parse_query_request(query.as_deref())?;
-    let csv = tokio::task::spawn_blocking(move || query_radius_csv(&dataset, request))
-        .await
-        .map_err(|error| internal_error(error.into()))??;
+    let q = query.as_deref().unwrap_or_default();
+    let x: f32 = parse_required(q, "x")?;
+    let y: f32 = parse_required(q, "y")?;
+    let z: f32 = parse_required(q, "z")?;
+    let radius: f32 = parse_required(q, "r")?;
+    let limit: Option<usize> = parse_optional(q, "limit")?;
+    if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+        return Err(bad_request("query center must contain only finite numbers"));
+    }
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(bad_request("radius must be a positive finite number"));
+    }
+    if limit == Some(0) {
+        return Err(bad_request("limit must be greater than zero"));
+    }
+    let csv = tokio::task::spawn_blocking(move || {
+        let matches = dataset.query_radius(x, y, z, radius, limit).map_err(internal_error)?;
+        encode_matches_csv(&matches)
+    })
+    .await
+    .map_err(|error| internal_error(error.into()))??;
     Ok((
-        [(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/csv; charset=utf-8"),
-        )],
+        [(CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"))],
         csv,
     )
         .into_response())
@@ -432,44 +433,74 @@ async fn query_frustum(
     let Some(dataset) = catalog.dataset(&name).map_err(internal_error)? else {
         return Err(not_found(format!("unknown dataset {name}")));
     };
-    let request = parse_frustum_query_request(query.as_deref())?;
-    let csv = tokio::task::spawn_blocking(move || query_frustum_csv(&dataset, request))
-        .await
-        .map_err(|error| internal_error(error.into()))??;
+    let q = query.as_deref().unwrap_or_default();
+    let x: f32 = parse_required(q, "x")?;
+    let y: f32 = parse_required(q, "y")?;
+    let z: f32 = parse_required(q, "z")?;
+    let qx: f32 = parse_required(q, "qx")?;
+    let qy: f32 = parse_required(q, "qy")?;
+    let qz: f32 = parse_required(q, "qz")?;
+    let qw: f32 = parse_required(q, "qw")?;
+    let near: f32 = parse_required(q, "near")?;
+    let far: f32 = parse_required(q, "far")?;
+    let fovy: f32 = parse_required(q, "fovy")?;
+    let aspect: f32 = parse_required(q, "aspect")?;
+    let limit: Option<usize> = parse_optional(q, "limit")?;
+    if ![x, y, z, qx, qy, qz, qw, near, far, fovy, aspect].into_iter().all(f32::is_finite) {
+        return Err(bad_request("frustum parameters must contain only finite numbers"));
+    }
+    if near <= 0.0 {
+        return Err(bad_request("near must be a positive finite number"));
+    }
+    if far <= near {
+        return Err(bad_request("far must be greater than near"));
+    }
+    if fovy <= 0.0 || fovy >= std::f32::consts::PI {
+        return Err(bad_request("fovy must be between 0 and pi"));
+    }
+    if aspect <= 0.0 {
+        return Err(bad_request("aspect must be a positive finite number"));
+    }
+    if normalize_quaternion([qx, qy, qz, qw]).is_none() {
+        return Err(bad_request("orientation quaternion must be non-zero"));
+    }
+    if limit == Some(0) {
+        return Err(bad_request("limit must be greater than zero"));
+    }
+    let csv = tokio::task::spawn_blocking(move || {
+        let matches = dataset
+            .query_frustum(x, y, z, qx, qy, qz, qw, near, far, fovy, aspect, limit)
+            .map_err(internal_error)?;
+        encode_matches_csv(&matches)
+    })
+    .await
+    .map_err(|error| internal_error(error.into()))??;
     Ok((
-        [(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/csv; charset=utf-8"),
-        )],
+        [(CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"))],
         csv,
     )
         .into_response())
 }
 
 impl QueryDataset {
-    pub fn load(data_root: &Path) -> Result<Self> {
+    fn load(data_root: &Path) -> Result<Self> {
         let index_path = data_root.join(OCTREE_INDEX_FILENAME);
         let index = read_packed_octree(&index_path).context("failed to parse packed octree")?;
         validate_packed_index_layout(data_root, &index)?;
         Ok(Self { index, index_path })
     }
 
-    pub fn query_radius(&self, request: RadiusQueryRequest) -> Result<Vec<QueryMatch>> {
-        if !request.radius.is_finite() || request.radius <= 0.0 {
-            bail!("radius must be a positive finite number");
-        }
-        let limit = query_limit(request.limit)?;
-
+    fn query_radius(&self, x: f32, y: f32, z: f32, radius: f32, limit: Option<usize>) -> Result<Vec<QueryMatch>> {
+        let limit = limit.unwrap_or(DEFAULT_LIMIT);
         if self.index.nodes.is_empty() {
             return Ok(Vec::new());
         }
-
-        let center = Vec3 { x: request.x, y: request.y, z: request.z };
+        let center = Vec3 { x, y, z };
         let mut file = fs::File::open(&self.index_path)
             .with_context(|| format!("failed to open {}", self.index_path.display()))?;
         let mut matches = Vec::new();
-        let bounds_match = |bounds: Bounds3| bounds.intersects_sphere(center.into(), request.radius);
-        let point_match = |point: Vec3| (point - center).length() <= request.radius;
+        let bounds_match = |bounds: Bounds3| bounds.intersects_sphere(center.into(), radius);
+        let point_match = |point: Vec3| (point - center).length() <= radius;
         collect_matches(
             &mut file,
             &self.index,
@@ -484,14 +515,18 @@ impl QueryDataset {
         Ok(matches)
     }
 
-    pub fn query_frustum(&self, request: FrustumQueryRequest) -> Result<Vec<QueryMatch>> {
-        let frustum = derive_frustum(request)?;
-        let limit = query_limit(request.limit)?;
-
+    fn query_frustum(
+        &self,
+        x: f32, y: f32, z: f32,
+        qx: f32, qy: f32, qz: f32, qw: f32,
+        near: f32, far: f32, fovy: f32, aspect: f32,
+        limit: Option<usize>,
+    ) -> Result<Vec<QueryMatch>> {
+        let frustum = derive_frustum(x, y, z, qx, qy, qz, qw, near, far, fovy, aspect)?;
+        let limit = limit.unwrap_or(DEFAULT_LIMIT);
         if self.index.nodes.is_empty() {
             return Ok(Vec::new());
         }
-
         let mut file = fs::File::open(&self.index_path)
             .with_context(|| format!("failed to open {}", self.index_path.display()))?;
         let mut matches = Vec::new();
@@ -550,7 +585,7 @@ impl QueryCatalog {
         Ok(names)
     }
 
-    pub fn dataset(&self, name: &str) -> Result<Option<Arc<QueryDataset>>> {
+    fn dataset(&self, name: &str) -> Result<Option<Arc<QueryDataset>>> {
         if let Some(dataset) = self.datasets.read().unwrap().get(name) {
             return Ok(Some(dataset.clone()));
         }
@@ -616,250 +651,4 @@ fn parse_optional<T: std::str::FromStr>(query: &str, name: &str) -> Result<Optio
         .parse()
         .map(Some)
         .map_err(|_| bad_request(format!("query parameter {name} must be a number")))
-}
-
-fn parse_query_request(query: Option<&str>) -> Result<RadiusQueryRequest, (StatusCode, String)> {
-    let query = query.unwrap_or_default();
-    Ok(RadiusQueryRequest {
-        x: parse_required(query, "x")?,
-        y: parse_required(query, "y")?,
-        z: parse_required(query, "z")?,
-        radius: parse_required(query, "r")?,
-        limit: parse_optional(query, "limit")?,
-    })
-}
-
-fn parse_frustum_query_request(query: Option<&str>) -> Result<FrustumQueryRequest, (StatusCode, String)> {
-    let query = query.unwrap_or_default();
-    Ok(FrustumQueryRequest {
-        x: parse_required(query, "x")?,
-        y: parse_required(query, "y")?,
-        z: parse_required(query, "z")?,
-        qx: parse_required(query, "qx")?,
-        qy: parse_required(query, "qy")?,
-        qz: parse_required(query, "qz")?,
-        qw: parse_required(query, "qw")?,
-        near: parse_required(query, "near")?,
-        far: parse_required(query, "far")?,
-        fovy: parse_required(query, "fovy")?,
-        aspect: parse_required(query, "aspect")?,
-        limit: parse_optional(query, "limit")?,
-    })
-}
-
-pub fn validate_radius_request(request: &RadiusQueryRequest) -> Result<(), (StatusCode, String)> {
-    if !request.x.is_finite() || !request.y.is_finite() || !request.z.is_finite() {
-        return Err(bad_request("query center must contain only finite numbers"));
-    }
-    if !request.radius.is_finite() || request.radius <= 0.0 {
-        return Err(bad_request("radius must be a positive finite number"));
-    }
-    if request.limit == Some(0) {
-        return Err(bad_request("limit must be greater than zero"));
-    }
-    Ok(())
-}
-
-pub fn validate_frustum_request(request: &FrustumQueryRequest) -> Result<(), (StatusCode, String)> {
-    let finite = [
-        request.x,
-        request.y,
-        request.z,
-        request.qx,
-        request.qy,
-        request.qz,
-        request.qw,
-        request.near,
-        request.far,
-        request.fovy,
-        request.aspect,
-    ]
-    .into_iter()
-    .all(f32::is_finite);
-    if !finite {
-        return Err(bad_request("frustum parameters must contain only finite numbers"));
-    }
-    if request.near <= 0.0 {
-        return Err(bad_request("near must be a positive finite number"));
-    }
-    if request.far <= request.near {
-        return Err(bad_request("far must be greater than near"));
-    }
-    if request.fovy <= 0.0 || request.fovy >= std::f32::consts::PI {
-        return Err(bad_request("fovy must be between 0 and pi"));
-    }
-    if request.aspect <= 0.0 {
-        return Err(bad_request("aspect must be a positive finite number"));
-    }
-    if normalize_quaternion([request.qx, request.qy, request.qz, request.qw]).is_none() {
-        return Err(bad_request("orientation quaternion must be non-zero"));
-    }
-    if request.limit == Some(0) {
-        return Err(bad_request("limit must be greater than zero"));
-    }
-    Ok(())
-}
-
-fn encode_matches_csv(matches: &[QueryMatch]) -> Result<String, (StatusCode, String)> {
-    let mut writer = Writer::from_writer(Vec::new());
-    writer
-        .write_record(["x", "y", "z", "source_id"])
-        .map_err(|error| internal_error(error.into()))?;
-    for row in matches {
-        writer
-            .serialize((row.x, row.y, row.z, row.source_id))
-            .map_err(|error| internal_error(error.into()))?;
-    }
-    let bytes = writer
-        .into_inner()
-        .map_err(|error| internal_error(error.into_error().into()))?;
-    String::from_utf8(bytes).map_err(|error| internal_error(error.into()))
-}
-
-pub fn query_radius_csv(
-    dataset: &QueryDataset,
-    request: RadiusQueryRequest,
-) -> Result<String, (StatusCode, String)> {
-    validate_radius_request(&request)?;
-    let matches = dataset.query_radius(request).map_err(internal_error)?;
-    encode_matches_csv(&matches)
-}
-
-pub fn query_frustum_csv(
-    dataset: &QueryDataset,
-    request: FrustumQueryRequest,
-) -> Result<String, (StatusCode, String)> {
-    validate_frustum_request(&request)?;
-    let matches = dataset.query_frustum(request).map_err(internal_error)?;
-    encode_matches_csv(&matches)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::f32::consts::FRAC_PI_6;
-    use std::f32::consts::FRAC_1_SQRT_2;
-    use std::io::Write;
-
-    use tempfile::tempdir;
-
-    use crate::formats::{
-        PackedOctreeNode, PackedPoint, encode_packed_octree, encode_packed_points,
-    };
-
-    use super::*;
-
-    #[test]
-    fn query_radius_reads_leaf_payloads_from_packed_index() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(OCTREE_INDEX_FILENAME);
-        let index = PackedOctreeIndex {
-            depth: 1,
-            half_extent_pc: 1.0,
-            point_count: 2,
-            nodes: vec![
-                PackedOctreeNode {
-                    child_mask: 0b0000_0001,
-                    first: 1,
-                    count: 0,
-                },
-                PackedOctreeNode {
-                    child_mask: 0,
-                    first: 0,
-                    count: 2,
-                },
-            ],
-        };
-        let mut file = fs::File::create(&path).unwrap();
-        file.write_all(&encode_packed_octree(&index)).unwrap();
-        file.write_all(&encode_packed_points(&[
-            PackedPoint {
-                source_id: 1,
-                x_local: 0,
-                y_local: 0,
-                z_local: 0,
-            },
-            PackedPoint {
-                source_id: 2,
-                x_local: u16::MAX,
-                y_local: u16::MAX,
-                z_local: u16::MAX,
-            },
-        ]))
-        .unwrap();
-
-        let dataset = QueryDataset::load(dir.path()).unwrap();
-        let matches = dataset
-            .query_radius(RadiusQueryRequest {
-                x: -0.99,
-                y: -0.99,
-                z: -0.99,
-                radius: 0.1,
-                limit: Some(10),
-            })
-            .unwrap();
-
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].source_id, 1);
-    }
-
-    #[test]
-    fn query_frustum_reads_leaf_payloads_from_packed_index() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(OCTREE_INDEX_FILENAME);
-        let index = PackedOctreeIndex {
-            depth: 0,
-            half_extent_pc: 1.0,
-            point_count: 3,
-            nodes: vec![PackedOctreeNode {
-                child_mask: 0,
-                first: 0,
-                count: 3,
-            }],
-        };
-        let mut file = fs::File::create(&path).unwrap();
-        file.write_all(&encode_packed_octree(&index)).unwrap();
-        file.write_all(&encode_packed_points(&[
-            PackedPoint {
-                source_id: 1,
-                x_local: 0,
-                y_local: 32_768,
-                z_local: 32_768,
-            },
-            PackedPoint {
-                source_id: 2,
-                x_local: u16::MAX,
-                y_local: 32_768,
-                z_local: 32_768,
-            },
-            PackedPoint {
-                source_id: 3,
-                x_local: 32_768,
-                y_local: u16::MAX,
-                z_local: 32_768,
-            },
-        ]))
-        .unwrap();
-
-        let dataset = QueryDataset::load(dir.path()).unwrap();
-        let matches = dataset
-            .query_frustum(FrustumQueryRequest {
-                x: -2.0,
-                y: 0.0,
-                z: 0.0,
-                qx: 0.0,
-                qy: -FRAC_1_SQRT_2,
-                qz: 0.0,
-                qw: FRAC_1_SQRT_2,
-                near: 0.5,
-                far: 4.0,
-                fovy: FRAC_PI_6,
-                aspect: 1.0,
-                limit: Some(10),
-            })
-            .unwrap();
-
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].source_id, 1);
-        assert_eq!(matches[1].source_id, 2);
-    }
 }

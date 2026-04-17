@@ -13,9 +13,7 @@ use tower::ServiceExt;
 use crate::build_index::{BuildIndexConfig, DEFAULT_BOUNDS, DEFAULT_DEPTH, run_build_index};
 use crate::formats::{OCTREE_INDEX_FILENAME, read_packed_octree};
 use crate::ingest::{IngestConfig, run_ingestion};
-use crate::query_api::{
-    FrustumQueryRequest, QueryCatalog, QueryDataset, RadiusQueryRequest, build_app,
-};
+use crate::query_api::{QueryCatalog, build_app};
 
 fn write_gzip_file(path: &Path, body: &str) {
     let file = std::fs::File::create(path).unwrap();
@@ -192,8 +190,8 @@ async fn serves_frustum_queries_with_a_limit() {
 async fn returns_stable_results_for_repeated_ingestion_runs() {
     let dir = tempdir().unwrap();
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
-    let output_a = dir.path().join("run-a");
-    let output_b = dir.path().join("run-b");
+    let datasets_a = dir.path().join("datasets-a");
+    let datasets_b = dir.path().join("datasets-b");
 
     write_gzip_file(
         &input_path,
@@ -204,9 +202,10 @@ async fn returns_stable_results_for_repeated_ingestion_runs() {
          2,0,90,40,1,15.0,0.8\n",
     );
 
-    for output_root in [&output_a, &output_b] {
+    for datasets_root in [&datasets_a, &datasets_b] {
+        let output_root = datasets_root.join("run");
         run_ingestion(ingest_config(
-            output_root,
+            &output_root,
             vec![input_path.display().to_string()],
         ))
         .await
@@ -220,36 +219,40 @@ async fn returns_stable_results_for_repeated_ingestion_runs() {
         .unwrap();
     }
 
-    let dataset_a = QueryDataset::load(&output_a).unwrap();
-    let dataset_b = QueryDataset::load(&output_b).unwrap();
-    let request = RadiusQueryRequest {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-        radius: 50.0,
-        limit: Some(10),
-    };
+    let catalog_a = Arc::new(QueryCatalog::load(&datasets_a.display().to_string()).unwrap());
+    let catalog_b = Arc::new(QueryCatalog::load(&datasets_b.display().to_string()).unwrap());
+    let uri = "/query/run/radius?x=0.0&y=0.0&z=0.0&r=50.0&limit=10";
 
-    let response_a = dataset_a.query_radius(request).unwrap();
-    let response_b = dataset_b
-        .query_radius(RadiusQueryRequest {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            radius: 50.0,
-            limit: Some(10),
-        })
-        .unwrap();
+    let body_a = body::to_bytes(
+        build_app(catalog_a)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let body_b = body::to_bytes(
+        build_app(catalog_b)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(response_a, response_b);
+    assert_eq!(body_a, body_b);
 }
 
 #[tokio::test]
 async fn frustum_queries_match_for_repeated_ingestion_runs() {
     let dir = tempdir().unwrap();
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
-    let output_a = dir.path().join("run-a");
-    let output_b = dir.path().join("run-b");
+    let datasets_a = dir.path().join("datasets-a");
+    let datasets_b = dir.path().join("datasets-b");
 
     write_gzip_file(
         &input_path,
@@ -259,9 +262,10 @@ async fn frustum_queries_match_for_repeated_ingestion_runs() {
          9,180,0,100,1,14.0,0.6\n",
     );
 
-    for output_root in [&output_a, &output_b] {
+    for datasets_root in [&datasets_a, &datasets_b] {
+        let output_root = datasets_root.join("run");
         run_ingestion(ingest_config(
-            output_root,
+            &output_root,
             vec![input_path.display().to_string()],
         ))
         .await
@@ -275,42 +279,35 @@ async fn frustum_queries_match_for_repeated_ingestion_runs() {
         .unwrap();
     }
 
-    let dataset_a = QueryDataset::load(&output_a).unwrap();
-    let dataset_b = QueryDataset::load(&output_b).unwrap();
-    let request = FrustumQueryRequest {
-        x: -20.0,
-        y: 0.0,
-        z: 0.0,
-        qx: 0.0,
-        qy: -FRAC_1_SQRT_2,
-        qz: 0.0,
-        qw: FRAC_1_SQRT_2,
-        near: 1.0,
-        far: 40.0,
-        fovy: FRAC_PI_2,
-        aspect: 1.0,
-        limit: Some(10),
-    };
+    let catalog_a = Arc::new(QueryCatalog::load(&datasets_a.display().to_string()).unwrap());
+    let catalog_b = Arc::new(QueryCatalog::load(&datasets_b.display().to_string()).unwrap());
+    let uri = format!(
+        "/query/run/frustum?x={}&y={}&z={}&qx={}&qy={}&qz={}&qw={}&near={}&far={}&fovy={}&aspect={}&limit=10",
+        -20.0, 0.0, 0.0, 0.0, -FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2, 1.0, 40.0, FRAC_PI_2, 1.0
+    );
 
-    let response_a = dataset_a.query_frustum(request).unwrap();
-    let response_b = dataset_b
-        .query_frustum(FrustumQueryRequest {
-            x: -20.0,
-            y: 0.0,
-            z: 0.0,
-            qx: 0.0,
-            qy: -FRAC_1_SQRT_2,
-            qz: 0.0,
-            qw: FRAC_1_SQRT_2,
-            near: 1.0,
-            far: 40.0,
-            fovy: FRAC_PI_2,
-            aspect: 1.0,
-            limit: Some(10),
-        })
-        .unwrap();
+    let body_a = body::to_bytes(
+        build_app(catalog_a)
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let body_b = body::to_bytes(
+        build_app(catalog_b)
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(response_a, response_b);
+    assert_eq!(body_a, body_b);
 }
 
 #[tokio::test]
