@@ -4,12 +4,6 @@ type Mat4 = Float32Array;
 type Vec3 = [number, number, number];
 type Quaternion = [number, number, number, number];
 
-type Star = {
-  position: Vec3;
-  color: Vec3;
-  size: number;
-};
-
 type Camera = {
   position: Vec3;
   yaw: number;
@@ -43,6 +37,24 @@ declare global {
     };
   }
 }
+
+type CsvStar = {
+  x: number;
+  y: number;
+  z: number;
+  sourceId: string;
+};
+
+type SceneState = {
+  count: number;
+};
+
+const searchParams = new URLSearchParams(window.location.search);
+const API_ROOT = searchParams.get("api")
+  ?? "https://star-dump-query-api-494247280614.europe-west1.run.app";
+const DATASET_OVERRIDE = searchParams.get("dataset");
+const QUERY_LIMIT = 2000;
+const QUERY_INTERVAL_MS = 250;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -107,10 +119,6 @@ function lookAt(
     -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]),
     1,
   ]);
-}
-
-function randomBetween(min: number, max: number): number {
-  return min + Math.random() * (max - min);
 }
 
 function cameraForward(camera: Camera): Vec3 {
@@ -214,36 +222,117 @@ function viewMatrix(frustum: QueryFrustum): Mat4 {
   return lookAt(position, add(position, forward), up);
 }
 
-function createStars(count: number): Star[] {
-  const stars: Star[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const radius = Math.pow(Math.random(), 0.45) * 90;
-    const theta = randomBetween(0, Math.PI * 2);
-    const phi = Math.acos(randomBetween(-1, 1));
-    const twinkle = Math.random();
-    const hue = randomBetween(0.72, 1.0);
+function hashString(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
 
+function starColor(sourceId: string): Vec3 {
+  const hash = hashString(sourceId);
+  const r = hash & 0xff;
+  const g = (hash >>> 8) & 0xff;
+  const b = (hash >>> 16) & 0xff;
+  return [
+    0.72 + r / 255 * 0.2,
+    0.78 + g / 255 * 0.16,
+    0.82 + b / 255 * 0.14,
+  ];
+}
+
+function starSize(sourceId: string): number {
+  const hash = hashString(sourceId);
+  return 0.7 + ((hash >>> 16) & 0xff) / 255 * 0.9;
+}
+
+function parseStars(csvText: string): CsvStar[] {
+  const lines = csvText.trim().split("\n");
+  if (lines.length <= 1) {
+    return [];
+  }
+
+  const stars: CsvStar[] = [];
+  for (const line of lines.slice(1)) {
+    if (!line) {
+      continue;
+    }
+    const [x, y, z, sourceId] = line.split(",");
+    if (!x || !y || !z || !sourceId) {
+      continue;
+    }
     stars.push({
-      position: [
-        radius * Math.sin(phi) * Math.cos(theta),
-        radius * Math.cos(phi) * 0.7,
-        radius * Math.sin(phi) * Math.sin(theta),
-      ],
-      color: [
-        hue,
-        randomBetween(0.78, 0.94),
-        twinkle > 0.9 ? 0.9 : randomBetween(0.72, 0.98),
-      ],
-      size: twinkle > 0.97 ? randomBetween(2.2, 3.2) : randomBetween(0.8, 1.8),
+      x: Number(x),
+      y: Number(y),
+      z: Number(z),
+      sourceId,
     });
   }
   return stars;
+}
+
+function frustumKey(frustum: QueryFrustum): string {
+  return [
+    frustum.x.toFixed(2),
+    frustum.y.toFixed(2),
+    frustum.z.toFixed(2),
+    frustum.qx.toFixed(3),
+    frustum.qy.toFixed(3),
+    frustum.qz.toFixed(3),
+    frustum.qw.toFixed(3),
+  ].join(":");
+}
+
+function frustumUrl(datasetName: string, frustum: QueryFrustum): string {
+  const params = new URLSearchParams({
+    x: frustum.x.toString(),
+    y: frustum.y.toString(),
+    z: frustum.z.toString(),
+    qx: frustum.qx.toString(),
+    qy: frustum.qy.toString(),
+    qz: frustum.qz.toString(),
+    qw: frustum.qw.toString(),
+    near: frustum.near.toString(),
+    far: frustum.far.toString(),
+    fovy: frustum.fovy.toString(),
+    aspect: frustum.aspect.toString(),
+    limit: QUERY_LIMIT.toString(),
+  });
+  return `${API_ROOT}/query/${datasetName}/frustum?${params.toString()}`;
+}
+
+async function fetchDatasetNames(): Promise<string[]> {
+  const response = await fetch(`${API_ROOT}/indices`);
+  if (!response.ok) {
+    throw new Error(`failed to list datasets: ${response.status}`);
+  }
+  const names = (await response.text())
+    .split("\n")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (names.length === 0) {
+    throw new Error("no datasets found");
+  }
+  return names;
 }
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("missing #app");
 }
+const statusElement = document.querySelector<HTMLParagraphElement>("#status");
+const detailsElement = document.querySelector<HTMLParagraphElement>("#details");
+const apiRootElement = document.querySelector<HTMLElement>("#api-root");
+const datasetSelectElement = document.querySelector<HTMLSelectElement>("#dataset-select");
+if (!statusElement || !detailsElement || !apiRootElement || !datasetSelectElement) {
+  throw new Error("missing hud elements");
+}
+const hudStatus = statusElement;
+const hudDetails = detailsElement;
+const hudApiRoot = apiRootElement;
+const datasetSelect = datasetSelectElement;
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
@@ -256,27 +345,134 @@ const regl = createRegl({
   },
 });
 
-const stars = createStars(1000);
-const positions = stars.map((star) => star.position);
-const colors = stars.map((star) => star.color);
-const sizes = stars.map((star) => star.size);
+const positionBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const colorBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const sizeBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const scene: SceneState = { count: 0 };
 
 const camera: Camera = {
-  position: [0, 0, 120],
+  position: [0, 0, 0],
   yaw: 0,
   pitch: 0,
   fovY: Math.PI / 3,
-  near: 0.1,
-  far: 300,
+  near: 0.25,
+  far: 50,
 };
 
 const keyState = new Set<string>();
 let currentFrustum = createFrustum(camera, 1);
 let previousTime = 0;
+let datasetName: string | null = null;
+let datasetNames: string[] | null = null;
+let lastQueryAt = -QUERY_INTERVAL_MS;
+let lastQueryKey = "";
+let activeRequest = 0;
 
 window.gaiaViewer = {
   getFrustum: () => currentFrustum,
 };
+
+hudStatus.textContent = `Connecting to ${API_ROOT}...`;
+hudDetails.textContent = "Click to capture the mouse, move with WASD, look with the mouse.";
+hudApiRoot.textContent = API_ROOT;
+
+function updateHudDetails(): void {
+  if (!datasetName) {
+    hudDetails.textContent = `Dataset pending, far ${camera.far.toFixed(0)} pc, limit ${QUERY_LIMIT}.`;
+    return;
+  }
+  hudDetails.textContent = `Dataset ${datasetName}, far ${camera.far.toFixed(0)} pc, limit ${QUERY_LIMIT}.`;
+}
+
+function populateDatasetSelect(names: string[], selectedName: string): void {
+  datasetSelect.replaceChildren();
+  for (const name of names) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    option.selected = name === selectedName;
+    datasetSelect.append(option);
+  }
+  datasetSelect.disabled = names.length <= 1;
+}
+
+function updateBuffers(stars: CsvStar[]): void {
+  const positions = new Float32Array(stars.length * 3);
+  const colors = new Float32Array(stars.length * 3);
+  const sizes = new Float32Array(stars.length);
+
+  stars.forEach((star, index) => {
+    const color = starColor(star.sourceId);
+    positions[index * 3] = star.x;
+    positions[index * 3 + 1] = star.y;
+    positions[index * 3 + 2] = star.z;
+    colors[index * 3] = color[0];
+    colors[index * 3 + 1] = color[1];
+    colors[index * 3 + 2] = color[2];
+    sizes[index] = starSize(star.sourceId);
+  });
+
+  positionBuffer(positions);
+  colorBuffer(colors);
+  sizeBuffer(sizes);
+  scene.count = stars.length;
+}
+
+async function ensureDatasetName(): Promise<string> {
+  if (datasetName) {
+    return datasetName;
+  }
+
+  datasetNames = await fetchDatasetNames();
+  datasetName = DATASET_OVERRIDE && datasetNames.includes(DATASET_OVERRIDE)
+    ? DATASET_OVERRIDE
+    : datasetNames[0];
+  populateDatasetSelect(datasetNames, datasetName);
+  updateHudDetails();
+  return datasetName;
+}
+
+datasetSelect.addEventListener("change", () => {
+  if (!datasetSelect.value || datasetSelect.value === datasetName) {
+    return;
+  }
+
+  datasetName = datasetSelect.value;
+  updateHudDetails();
+  const url = new URL(window.location.href);
+  url.searchParams.set("dataset", datasetName);
+  window.history.replaceState({}, "", url);
+  lastQueryKey = "";
+  lastQueryAt = -QUERY_INTERVAL_MS;
+  void queryStars(currentFrustum);
+});
+
+async function queryStars(frustum: QueryFrustum): Promise<void> {
+  const requestId = activeRequest + 1;
+  activeRequest = requestId;
+
+  try {
+    const name = await ensureDatasetName();
+    hudStatus.textContent = `Querying ${name}...`;
+    const response = await fetch(frustumUrl(name, frustum));
+    if (!response.ok) {
+      throw new Error(`query failed: ${response.status}`);
+    }
+    const stars = parseStars(await response.text());
+    if (activeRequest !== requestId) {
+      return;
+    }
+    updateBuffers(stars);
+    hudStatus.textContent = `${stars.length} stars in view`;
+  } catch (error) {
+    if (activeRequest !== requestId) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    hudStatus.textContent = `Query failed: ${message}`;
+    updateBuffers([]);
+  }
+}
 
 function updateCamera(deltaTime: number): void {
   const { forward, right } = cameraBasis(camera);
@@ -366,9 +562,9 @@ const drawStars = regl({
     }
   `,
   attributes: {
-    position: positions,
-    color: colors,
-    size: sizes,
+    position: { buffer: positionBuffer, size: 3 },
+    color: { buffer: colorBuffer, size: 3 },
+    size: { buffer: sizeBuffer, size: 1 },
   },
   uniforms: {
     projection: ({ viewportWidth, viewportHeight }) =>
@@ -385,7 +581,7 @@ const drawStars = regl({
     pixelRatio: () => window.devicePixelRatio || 1,
   },
   primitive: "points",
-  count: stars.length,
+  count: () => scene.count,
   blend: {
     enable: true,
     func: {
@@ -404,6 +600,15 @@ regl.frame(({ time }) => {
   const deltaTime = previousTime === 0 ? 0 : time - previousTime;
   previousTime = time;
   updateCamera(deltaTime);
+
+  currentFrustum = createFrustum(camera, canvas.width / Math.max(canvas.height, 1));
+  const key = frustumKey(currentFrustum);
+  const now = performance.now();
+  if (key !== lastQueryKey && now - lastQueryAt >= QUERY_INTERVAL_MS) {
+    lastQueryAt = now;
+    lastQueryKey = key;
+    void queryStars(currentFrustum);
+  }
 
   regl.clear({
     color: [0.015, 0.025, 0.06, 1],

@@ -64,13 +64,67 @@
         line-height: 1.45;
         color: rgba(235, 243, 255, 0.78);
       }
+
+      .hud .meta {
+        margin-top: 10px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .hud .field {
+        display: grid;
+        gap: 4px;
+      }
+
+      .hud label,
+      .hud .label {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgba(235, 243, 255, 0.56);
+      }
+
+      .hud code,
+      .hud select {
+        width: 100%;
+        font: inherit;
+        font-size: 13px;
+        color: #ebf3ff;
+      }
+
+      .hud code {
+        display: block;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        overflow-wrap: anywhere;
+      }
+
+      .hud select {
+        padding: 8px 10px;
+        border: 1px solid rgba(159, 184, 222, 0.2);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06);
+      }
     </style>
   </head>
   <body>
     <div id="app">
       <div class="hud">
         <h1>Gaia Viewer</h1>
-        <p>1000 random stars, rendered with regl. Click to capture the mouse, move with WASD, look with the mouse.</p>
+        <p id="status">Loading dataset...</p>
+        <p id="details">Click to capture the mouse, move with WASD, look with the mouse.</p>
+        <div class="meta">
+          <div class="field">
+            <div class="label">API Base URL</div>
+            <code id="api-root"></code>
+          </div>
+          <div class="field">
+            <label for="dataset-select">Dataset</label>
+            <select id="dataset-select"></select>
+          </div>
+        </div>
       </div>
     </div>
     <script src="./dist/main.js"></script>
