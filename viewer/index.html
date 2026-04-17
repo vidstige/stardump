@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Gaia Viewer</title>
+    <title>star-dump</title>
     <style>
       :root {
         color-scheme: dark;
@@ -58,15 +58,15 @@
         text-transform: uppercase;
       }
 
-      .hud p {
-        margin: 0;
-        font-size: 14px;
-        line-height: 1.45;
-        color: rgba(235, 243, 255, 0.78);
+      .hud .status {
+        margin: 0 0 8px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: rgba(235, 243, 255, 0.5);
+        min-height: 1em;
       }
 
       .hud .meta {
-        margin-top: 10px;
         display: grid;
         gap: 8px;
       }
@@ -101,28 +101,77 @@
         overflow-wrap: anywhere;
       }
 
+      .hud code#api-root {
+        font-size: 10px;
+        padding: 5px 8px;
+        color: rgba(235, 243, 255, 0.55);
+      }
+
       .hud select {
         padding: 8px 10px;
         border: 1px solid rgba(159, 184, 222, 0.2);
         border-radius: 8px;
         background: rgba(255, 255, 255, 0.06);
       }
+
+      .hud .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .hud .slider-row code {
+        width: auto;
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
+
+      .hud input[type="range"] {
+        flex: 1;
+        accent-color: #9fb8de;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <div id="app">
       <div class="hud">
-        <h1>Gaia Viewer</h1>
-        <p id="status">Loading dataset...</p>
-        <p id="details">Click to capture the mouse, move with WASD, look with the mouse.</p>
+        <h1>star-dump</h1>
+        <p id="status" class="status"></p>
         <div class="meta">
           <div class="field">
-            <div class="label">API Base URL</div>
+            <div class="label">Base URL</div>
             <code id="api-root"></code>
           </div>
           <div class="field">
             <label for="dataset-select">Dataset</label>
             <select id="dataset-select"></select>
+          </div>
+          <div class="field">
+            <div class="label">Stars in pool</div>
+            <code id="stars-count">0</code>
+          </div>
+          <div class="field">
+            <div class="label">Outstanding queries</div>
+            <code id="query-count">0</code>
+          </div>
+          <div class="field">
+            <div class="label">Coordinates (pc)</div>
+            <code id="coordinates">0.00, 0.00, 0.00</code>
+          </div>
+          <div class="field">
+            <label for="far-slider">Far limit</label>
+            <div class="slider-row">
+              <input type="range" id="far-slider" min="5" max="500" step="5" value="50">
+              <code id="far-value">50 pc</code>
+            </div>
+          </div>
+          <div class="field">
+            <label for="pool-slider">Pool size</label>
+            <div class="slider-row">
+              <input type="range" id="pool-slider" min="1000" max="100000" step="1000" value="20000">
+              <code id="pool-value">20k</code>
+            </div>
           </div>
         </div>
       </div>

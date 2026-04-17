@@ -32,7 +32,7 @@ type QueryFrustum = FrustumParams & {
 
 declare global {
   interface Window {
-    gaiaViewer?: {
+    starDump?: {
       getFrustum: () => QueryFrustum;
     };
   }
@@ -55,7 +55,7 @@ const API_ROOT = searchParams.get("api")
 const DATASET_OVERRIDE = searchParams.get("dataset");
 const QUERY_LIMIT = 2000;
 const QUERY_INTERVAL_MS = 250;
-const STAR_POOL_MAX_SIZE = 20000;
+let starPoolMaxSize = 20000;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -324,16 +324,30 @@ if (!app) {
   throw new Error("missing #app");
 }
 const statusElement = document.querySelector<HTMLParagraphElement>("#status");
-const detailsElement = document.querySelector<HTMLParagraphElement>("#details");
 const apiRootElement = document.querySelector<HTMLElement>("#api-root");
 const datasetSelectElement = document.querySelector<HTMLSelectElement>("#dataset-select");
-if (!statusElement || !detailsElement || !apiRootElement || !datasetSelectElement) {
+const starsCountElement = document.querySelector<HTMLElement>("#stars-count");
+const queryCountElement = document.querySelector<HTMLElement>("#query-count");
+const coordinatesElement = document.querySelector<HTMLElement>("#coordinates");
+const farSliderElement = document.querySelector<HTMLInputElement>("#far-slider");
+const farValueElement = document.querySelector<HTMLElement>("#far-value");
+const poolSliderElement = document.querySelector<HTMLInputElement>("#pool-slider");
+const poolValueElement = document.querySelector<HTMLElement>("#pool-value");
+if (!statusElement || !apiRootElement || !datasetSelectElement ||
+    !starsCountElement || !queryCountElement || !coordinatesElement ||
+    !farSliderElement || !farValueElement || !poolSliderElement || !poolValueElement) {
   throw new Error("missing hud elements");
 }
 const hudStatus = statusElement;
-const hudDetails = detailsElement;
 const hudApiRoot = apiRootElement;
 const datasetSelect = datasetSelectElement;
+const hudStarsCount = starsCountElement;
+const hudQueryCount = queryCountElement;
+const hudCoordinates = coordinatesElement;
+const hudFarSlider = farSliderElement;
+const hudFarValue = farValueElement;
+const hudPoolSlider = poolSliderElement;
+const hudPoolValue = poolValueElement;
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
@@ -368,23 +382,32 @@ let datasetNames: string[] | null = null;
 let lastQueryAt = -QUERY_INTERVAL_MS;
 let lastQueryKey = "";
 let queryEpoch = 0;
+let outstandingQueries = 0;
 const starPool = new Map<string, CsvStar>();
 
-window.gaiaViewer = {
+window.starDump = {
   getFrustum: () => currentFrustum,
 };
 
 hudStatus.textContent = `Connecting to ${API_ROOT}...`;
-hudDetails.textContent = "Click to capture the mouse, move with WASD, look with the mouse.";
 hudApiRoot.textContent = API_ROOT;
 
-function updateHudDetails(): void {
-  if (!datasetName) {
-    hudDetails.textContent = `Dataset pending, far ${camera.far.toFixed(0)} pc, limit ${QUERY_LIMIT}.`;
-    return;
-  }
-  hudDetails.textContent = `Dataset ${datasetName}, far ${camera.far.toFixed(0)} pc, limit ${QUERY_LIMIT}.`;
-}
+hudFarSlider.value = String(camera.far);
+hudFarValue.textContent = `${camera.far.toFixed(0)} pc`;
+
+hudFarSlider.addEventListener("input", () => {
+  camera.far = Number(hudFarSlider.value);
+  hudFarValue.textContent = `${camera.far.toFixed(0)} pc`;
+  lastQueryKey = "";
+});
+
+hudPoolSlider.value = String(starPoolMaxSize);
+hudPoolValue.textContent = `${(starPoolMaxSize / 1000).toFixed(0)}k`;
+
+hudPoolSlider.addEventListener("input", () => {
+  starPoolMaxSize = Number(hudPoolSlider.value);
+  hudPoolValue.textContent = `${(starPoolMaxSize / 1000).toFixed(0)}k`;
+});
 
 function populateDatasetSelect(names: string[], selectedName: string): void {
   datasetSelect.replaceChildren();
@@ -428,7 +451,7 @@ function mergeIntoPool(incoming: CsvStar[]): void {
     starPool.set(star.sourceId, star);
   }
   // Evict oldest entries from the front of the Map until under the cap
-  while (starPool.size > STAR_POOL_MAX_SIZE) {
+  while (starPool.size > starPoolMaxSize) {
     starPool.delete(starPool.keys().next().value!);
   }
   rebuildBuffers();
@@ -444,7 +467,6 @@ async function ensureDatasetName(): Promise<string> {
     ? DATASET_OVERRIDE
     : datasetNames[0];
   populateDatasetSelect(datasetNames, datasetName);
-  updateHudDetails();
   return datasetName;
 }
 
@@ -454,7 +476,6 @@ datasetSelect.addEventListener("change", () => {
   }
 
   datasetName = datasetSelect.value;
-  updateHudDetails();
   const url = new URL(window.location.href);
   url.searchParams.set("dataset", datasetName);
   window.history.replaceState({}, "", url);
@@ -468,10 +489,10 @@ datasetSelect.addEventListener("change", () => {
 
 async function queryStars(frustum: QueryFrustum): Promise<void> {
   const epoch = queryEpoch;
+  outstandingQueries++;
 
   try {
     const name = await ensureDatasetName();
-    hudStatus.textContent = `Querying ${name}...`;
     const response = await fetch(frustumUrl(name, frustum));
     if (!response.ok) {
       throw new Error(`query failed: ${response.status}`);
@@ -481,13 +502,15 @@ async function queryStars(frustum: QueryFrustum): Promise<void> {
       return;
     }
     mergeIntoPool(stars);
-    hudStatus.textContent = `${starPool.size} stars loaded`;
+    hudStatus.textContent = "";
   } catch (error) {
     if (epoch !== queryEpoch) {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    hudStatus.textContent = `Query failed: ${message}`;
+    hudStatus.textContent = message;
+  } finally {
+    outstandingQueries--;
   }
 }
 
@@ -618,6 +641,11 @@ regl.frame(({ time }) => {
     lastQueryKey = key;
     void queryStars(currentFrustum);
   }
+
+  const [cx, cy, cz] = camera.position;
+  hudCoordinates.textContent = `${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}`;
+  hudStarsCount.textContent = String(starPool.size);
+  hudQueryCount.textContent = String(outstandingQueries);
 
   regl.clear({
     color: [0.015, 0.025, 0.06, 1],
