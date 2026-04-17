@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -176,20 +176,6 @@ fn collect_inputs(inputs: Vec<String>, input_manifest: Option<String>) -> Result
     sharded_inputs(all_inputs)
 }
 
-fn open_input(input: &str) -> Result<Box<dyn Read>> {
-    if input.starts_with("http://") || input.starts_with("https://") {
-        let response = reqwest::blocking::get(input)
-            .with_context(|| format!("failed to GET {input}"))?
-            .error_for_status()
-            .with_context(|| format!("unsuccessful response for {input}"))?;
-        return Ok(Box::new(response));
-    }
-
-    let path = input.strip_prefix("file://").unwrap_or(input);
-    let file = fs::File::open(path).with_context(|| format!("failed to open {path}"))?;
-    Ok(Box::new(file))
-}
-
 fn md5_hex<R: Read>(reader: &mut R) -> Result<String> {
     let mut context = Md5Context::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -202,37 +188,24 @@ fn md5_hex<R: Read>(reader: &mut R) -> Result<String> {
     }
 }
 
-fn copy_with_md5<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> Result<String> {
-    let mut context = Md5Context::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).context("failed to read input")?;
-        if read == 0 {
-            return Ok(format!("{:x}", context.compute()));
-        }
-        context.consume(&buffer[..read]);
-        writer
-            .write_all(&buffer[..read])
-            .context("failed to stage input")?;
-    }
-}
-
-fn stage_input(input: &str, trusted_md5: Option<&str>) -> Result<StagedInput> {
+async fn stage_input(input: &str, trusted_md5: Option<&str>) -> Result<StagedInput> {
     let input_name = input_name(input);
     if input.starts_with("http://") || input.starts_with("https://") {
         let tempdir = tempdir().context("failed to create temporary input directory")?;
         let path = tempdir.path().join(&input_name);
-        let mut response = reqwest::blocking::get(input)
+        let bytes = reqwest::get(input)
+            .await
             .with_context(|| format!("failed to GET {input}"))?
             .error_for_status()
-            .with_context(|| format!("unsuccessful response for {input}"))?;
-        let file = fs::File::create(&path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
-        let mut writer = BufWriter::new(file);
-        let source_bulk_md5 = copy_with_md5(&mut response, &mut writer)?;
-        writer
-            .flush()
-            .with_context(|| format!("failed to flush {}", path.display()))?;
+            .with_context(|| format!("unsuccessful response for {input}"))?
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read response body for {input}"))?;
+        let mut context = Md5Context::new();
+        context.consume(&bytes);
+        let source_bulk_md5 = format!("{:x}", context.compute());
+        fs::write(&path, &bytes)
+            .with_context(|| format!("failed to write {}", path.display()))?;
         if let Some(trusted_md5) = trusted_md5 {
             if source_bulk_md5 != trusted_md5 {
                 bail!("trusted md5 mismatch for {input}");
@@ -267,8 +240,9 @@ fn stage_input(input: &str, trusted_md5: Option<&str>) -> Result<StagedInput> {
 }
 
 fn read_canonical_rows(input_path: &Path) -> Result<(Vec<CanonicalRow>, SourceCounts)> {
-    let reader = open_input(&input_path.display().to_string())?;
-    let decoder = MultiGzDecoder::new(BufReader::new(reader));
+    let file = fs::File::open(input_path)
+        .with_context(|| format!("failed to open {}", input_path.display()))?;
+    let decoder = MultiGzDecoder::new(BufReader::new(file));
     let mut csv_reader = ReaderBuilder::new()
         .comment(Some(b'#'))
         .from_reader(decoder);
@@ -386,7 +360,7 @@ fn write_source_output(
     Ok(metadata)
 }
 
-fn ingest_one(
+async fn ingest_one(
     output_root: &Path,
     input: &str,
     trusted_md5: Option<&str>,
@@ -399,7 +373,7 @@ fn ingest_one(
         }
     }
 
-    let staged_input = stage_input(input, trusted_md5)?;
+    let staged_input = stage_input(input, trusted_md5).await?;
     if let Some(metadata) = load_existing_source(
         output_root,
         &staged_input.source_bulk_url,
@@ -425,7 +399,7 @@ fn ingest_one(
     )
 }
 
-pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
+pub async fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
     let input_specs = collect_inputs(config.inputs, config.input_manifest)?;
     if input_specs.is_empty() {
         return Ok(IngestResult {
@@ -445,11 +419,14 @@ pub fn run_ingestion(config: IngestConfig) -> Result<IngestResult> {
         .collect::<Vec<_>>();
     let mut metadata = Vec::with_capacity(inputs.len());
     for input in &inputs {
-        metadata.push(ingest_one(
-            &output_root,
-            input,
-            trusted_md5_by_input.get(input).map(String::as_str),
-        )?);
+        metadata.push(
+            ingest_one(
+                &output_root,
+                input,
+                trusted_md5_by_input.get(input).map(String::as_str),
+            )
+            .await?,
+        );
     }
     Ok(IngestResult { metadata })
 }
@@ -477,8 +454,8 @@ mod tests {
         encoder.finish().unwrap();
     }
 
-    #[test]
-    fn ingests_positive_parallax_rows_and_writes_canonical_layout() {
+    #[tokio::test]
+    async fn ingests_positive_parallax_rows_and_writes_canonical_layout() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -496,6 +473,7 @@ mod tests {
             vec![input_path.display().to_string()],
             &output_path,
         ))
+        .await
         .unwrap();
 
         let metadata = read_source_metadata(
@@ -522,8 +500,8 @@ mod tests {
         assert!(canonical_rows[1].bp_rp.is_nan());
     }
 
-    #[test]
-    fn ingests_ecsv_with_comment_preamble() {
+    #[tokio::test]
+    async fn ingests_ecsv_with_comment_preamble() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -550,6 +528,7 @@ mod tests {
             vec![input_path.display().to_string()],
             &output_path,
         ))
+        .await
         .unwrap();
 
         assert_eq!(result.metadata[0].counts.rows_seen, 2);
@@ -557,8 +536,8 @@ mod tests {
         assert_eq!(result.metadata[0].counts.rows_written, 1);
     }
 
-    #[test]
-    fn skips_reingesting_unchanged_input() {
+    #[tokio::test]
+    async fn skips_reingesting_unchanged_input() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -574,6 +553,7 @@ mod tests {
             vec![input_path.display().to_string()],
             &output_path,
         ))
+        .await
         .unwrap();
         let metadata_path =
             output_path.join(metadata_path_for_source(&first.metadata[0].input_name));
@@ -583,6 +563,7 @@ mod tests {
             vec![input_path.display().to_string()],
             &output_path,
         ))
+        .await
         .unwrap();
         let metadata_after = fs::read(metadata_path).unwrap();
 
@@ -590,8 +571,8 @@ mod tests {
         assert_eq!(metadata_after, metadata_before);
     }
 
-    #[test]
-    fn reingests_when_input_md5_changes() {
+    #[tokio::test]
+    async fn reingests_when_input_md5_changes() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
         let output_path = dir.path().join("run");
@@ -605,6 +586,7 @@ mod tests {
             vec![input_path.display().to_string()],
             &output_path,
         ))
+        .await
         .unwrap();
 
         write_gzip_file(
@@ -616,6 +598,7 @@ mod tests {
             vec![input_path.display().to_string()],
             &output_path,
         ))
+        .await
         .unwrap();
         let metadata = read_source_metadata(
             &output_path.join(metadata_path_for_source(&second.metadata[0].input_name)),
@@ -636,8 +619,8 @@ mod tests {
         assert_eq!(canonical_rows[0].source_id, 7);
     }
 
-    #[test]
-    fn skips_remote_input_before_download_when_trusted_md5_matches() {
+    #[tokio::test]
+    async fn skips_remote_input_before_download_when_trusted_md5_matches() {
         let dir = tempdir().unwrap();
         let output_path = dir.path().join("run");
         let input = "https://example.invalid/GaiaSource_786097-786431.csv.gz".to_string();
@@ -680,6 +663,7 @@ mod tests {
             IngestConfig::new(output_path.display().to_string())
                 .with_input_manifest(Some(manifest_path.display().to_string())),
         )
+        .await
         .unwrap();
 
         assert_eq!(result.metadata.len(), 1);

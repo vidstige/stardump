@@ -13,12 +13,14 @@ struct Args {
     output_root: String,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     run_ingestion(
         IngestConfig::new(args.output_root)
             .with_inputs(args.input)
             .with_input_manifest(args.input_manifest),
-    )?;
+    )
+    .await?;
     Ok(())
 }

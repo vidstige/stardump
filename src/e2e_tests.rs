@@ -28,8 +28,8 @@ fn ingest_config(output_root: &Path, inputs: Vec<String>) -> IngestConfig {
     IngestConfig::new(output_root.display().to_string()).with_inputs(inputs)
 }
 
-#[test]
-fn builds_packed_index_from_multiple_canonical_sources() {
+#[tokio::test]
+async fn builds_packed_index_from_multiple_canonical_sources() {
     let dir = tempdir().unwrap();
     let input_a = dir.path().join("GaiaSource_000000-000001.csv.gz");
     let input_b = dir.path().join("GaiaSource_000002-000003.csv.gz");
@@ -52,6 +52,7 @@ fn builds_packed_index_from_multiple_canonical_sources() {
         &output_root,
         vec![input_a.display().to_string(), input_b.display().to_string()],
     ))
+    .await
     .unwrap();
 
     let result = run_build_index(BuildIndexConfig {
@@ -70,8 +71,8 @@ fn builds_packed_index_from_multiple_canonical_sources() {
     assert!(!index.nodes.is_empty());
 }
 
-#[test]
-fn serves_exact_radius_queries_over_packed_index() {
+#[tokio::test]
+async fn serves_exact_radius_queries_over_packed_index() {
     let dir = tempdir().unwrap();
     let data_root = dir.path().join("datasets");
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
@@ -88,6 +89,7 @@ fn serves_exact_radius_queries_over_packed_index() {
         &output_path,
         vec![input_path.display().to_string()],
     ))
+    .await
     .unwrap();
     run_build_index(BuildIndexConfig {
         data_root: output_path.display().to_string(),
@@ -98,40 +100,34 @@ fn serves_exact_radius_queries_over_packed_index() {
     .unwrap();
 
     let catalog = Arc::new(QueryCatalog::load(&data_root.display().to_string()).unwrap());
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async {
-        let request = Request::builder()
-            .method("GET")
-            .uri("/query/run/radius?x=0.0&y=0.0&z=0.0&r=11.0&limit=10")
-            .body(Body::empty())
-            .unwrap();
+    let request = Request::builder()
+        .method("GET")
+        .uri("/query/run/radius?x=0.0&y=0.0&z=0.0&r=11.0&limit=10")
+        .body(Body::empty())
+        .unwrap();
 
-        let response = {
-            let app = build_app(catalog.clone());
-            app.oneshot(request).await.unwrap()
-        };
-        assert_eq!(response.status(), StatusCode::OK);
+    let response = build_app(catalog.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 
-        let bytes = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let mut rows = csv::Reader::from_reader(bytes.as_ref());
-        let headers = rows.headers().unwrap().clone();
-        let records = rows.records().collect::<Result<Vec<_>, _>>().unwrap();
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut rows = csv::Reader::from_reader(bytes.as_ref());
+    let headers = rows.headers().unwrap().clone();
+    let records = rows.records().collect::<Result<Vec<_>, _>>().unwrap();
 
-        assert_eq!(
-            headers,
-            csv::StringRecord::from(vec!["x", "y", "z", "source_id"])
-        );
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].get(3), Some("1"));
-        assert_eq!(records[1].get(3), Some("2"));
-        assert_eq!(records[2].get(3), Some("3"));
-    });
+    assert_eq!(
+        headers,
+        csv::StringRecord::from(vec!["x", "y", "z", "source_id"])
+    );
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].get(3), Some("1"));
+    assert_eq!(records[1].get(3), Some("2"));
+    assert_eq!(records[2].get(3), Some("3"));
 }
 
-#[test]
-fn serves_frustum_queries_with_a_limit() {
+#[tokio::test]
+async fn serves_frustum_queries_with_a_limit() {
     let dir = tempdir().unwrap();
     let data_root = dir.path().join("datasets");
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
@@ -148,6 +144,7 @@ fn serves_frustum_queries_with_a_limit() {
         &output_path,
         vec![input_path.display().to_string()],
     ))
+    .await
     .unwrap();
     run_build_index(BuildIndexConfig {
         data_root: output_path.display().to_string(),
@@ -158,47 +155,41 @@ fn serves_frustum_queries_with_a_limit() {
     .unwrap();
 
     let catalog = Arc::new(QueryCatalog::load(&data_root.display().to_string()).unwrap());
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async {
-        let request = Request::builder()
-            .method("GET")
-            .uri(format!(
-                "/query/run/frustum?x={}&y={}&z={}&qx={}&qy={}&qz={}&qw={}&near={}&far={}&fovy={}&aspect={}&limit=2",
-                -20.0,
-                0.0,
-                0.0,
-                0.0,
-                -FRAC_1_SQRT_2,
-                0.0,
-                FRAC_1_SQRT_2,
-                1.0,
-                40.0,
-                FRAC_PI_2,
-                1.0
-            ))
-            .body(Body::empty())
-            .unwrap();
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/query/run/frustum?x={}&y={}&z={}&qx={}&qy={}&qz={}&qw={}&near={}&far={}&fovy={}&aspect={}&limit=2",
+            -20.0,
+            0.0,
+            0.0,
+            0.0,
+            -FRAC_1_SQRT_2,
+            0.0,
+            FRAC_1_SQRT_2,
+            1.0,
+            40.0,
+            FRAC_PI_2,
+            1.0
+        ))
+        .body(Body::empty())
+        .unwrap();
 
-        let response = {
-            let app = build_app(catalog.clone());
-            app.oneshot(request).await.unwrap()
-        };
-        assert_eq!(response.status(), StatusCode::OK);
+    let response = build_app(catalog.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 
-        let bytes = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let mut rows = csv::Reader::from_reader(bytes.as_ref());
-        let records = rows.records().collect::<Result<Vec<_>, _>>().unwrap();
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut rows = csv::Reader::from_reader(bytes.as_ref());
+    let records = rows.records().collect::<Result<Vec<_>, _>>().unwrap();
 
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].get(3), Some("1"));
-        assert_eq!(records[1].get(3), Some("2"));
-    });
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].get(3), Some("1"));
+    assert_eq!(records[1].get(3), Some("2"));
 }
 
-#[test]
-fn returns_stable_results_for_repeated_ingestion_runs() {
+#[tokio::test]
+async fn returns_stable_results_for_repeated_ingestion_runs() {
     let dir = tempdir().unwrap();
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
     let output_a = dir.path().join("run-a");
@@ -218,6 +209,7 @@ fn returns_stable_results_for_repeated_ingestion_runs() {
             output_root,
             vec![input_path.display().to_string()],
         ))
+        .await
         .unwrap();
         run_build_index(BuildIndexConfig {
             data_root: output_root.display().to_string(),
@@ -252,8 +244,8 @@ fn returns_stable_results_for_repeated_ingestion_runs() {
     assert_eq!(response_a, response_b);
 }
 
-#[test]
-fn frustum_queries_match_for_repeated_ingestion_runs() {
+#[tokio::test]
+async fn frustum_queries_match_for_repeated_ingestion_runs() {
     let dir = tempdir().unwrap();
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
     let output_a = dir.path().join("run-a");
@@ -272,6 +264,7 @@ fn frustum_queries_match_for_repeated_ingestion_runs() {
             output_root,
             vec![input_path.display().to_string()],
         ))
+        .await
         .unwrap();
         run_build_index(BuildIndexConfig {
             data_root: output_root.display().to_string(),
@@ -320,8 +313,8 @@ fn frustum_queries_match_for_repeated_ingestion_runs() {
     assert_eq!(response_a, response_b);
 }
 
-#[test]
-fn lists_available_indices() {
+#[tokio::test]
+async fn lists_available_indices() {
     let dir = tempdir().unwrap();
     let data_root = dir.path().join("datasets");
     let input_path = dir.path().join("GaiaSource_786097-786431.csv.gz");
@@ -338,6 +331,7 @@ fn lists_available_indices() {
             &output_root,
             vec![input_path.display().to_string()],
         ))
+        .await
         .unwrap();
         run_build_index(BuildIndexConfig {
             data_root: output_root.display().to_string(),
@@ -349,23 +343,18 @@ fn lists_available_indices() {
     }
 
     let catalog = Arc::new(QueryCatalog::load(&data_root.display().to_string()).unwrap());
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async {
-        let response = {
-            let app = build_app(catalog);
-            app.oneshot(
-                Request::builder()
-                    .uri("/indices")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-        };
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(std::str::from_utf8(&body).unwrap(), "alpha\nbeta\n");
-    });
+    let response = build_app(catalog)
+        .oneshot(
+            Request::builder()
+                .uri("/indices")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(std::str::from_utf8(&body).unwrap(), "alpha\nbeta\n");
 }
