@@ -470,7 +470,12 @@ impl QueryDataset {
             &bounds_match,
             &point_match,
         )?;
-        matches.sort_by_key(|row| row.source_id);
+        let cam = frustum.position;
+        matches.sort_by(|a, b| {
+            let da = (a.position - cam).dot(a.position - cam);
+            let db = (b.position - cam).dot(b.position - cam);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches.truncate(limit);
         Ok(matches)
     }
