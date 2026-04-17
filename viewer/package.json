@@ -4,7 +4,7 @@
   "scripts": {
     "build": "esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js",
     "check": "tsc --noEmit",
-    "start": "python3 -m http.server 8000"
+    "dev": "esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js --watch --serve=8000 --servedir=."
   },
   "dependencies": {
     "regl": "^2.1.1"
