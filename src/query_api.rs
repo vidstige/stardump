@@ -34,13 +34,11 @@ pub struct QueryCatalog {
 
 #[derive(Debug, PartialEq)]
 struct QueryMatch {
-    x: f32,
-    y: f32,
-    z: f32,
+    position: Vec3,
     source_id: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Vec3 {
     x: f32,
     y: f32,
@@ -208,12 +206,7 @@ fn collect_matches(
         for point in read_leaf_points(file, index, node)? {
             let xyz = Vec3::from(dequantize_point(bounds, &point));
             if point_match(xyz) {
-                matches.push(QueryMatch {
-                    x: xyz.x,
-                    y: xyz.y,
-                    z: xyz.z,
-                    source_id: point.source_id,
-                });
+                matches.push(QueryMatch { position: xyz, source_id: point.source_id });
             }
         }
         return Ok(());
@@ -346,7 +339,7 @@ fn encode_matches_csv(matches: &[QueryMatch]) -> Result<String, (StatusCode, Str
         .map_err(|error| internal_error(error.into()))?;
     for row in matches {
         writer
-            .serialize((row.x, row.y, row.z, row.source_id))
+            .serialize((row.position.x, row.position.y, row.position.z, row.source_id))
             .map_err(|error| internal_error(error.into()))?;
     }
     let bytes = writer
