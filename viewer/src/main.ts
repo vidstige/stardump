@@ -55,6 +55,10 @@ const API_ROOT = searchParams.get("api")
 const DATASET_OVERRIDE = searchParams.get("dataset");
 const QUERY_LIMIT = 2000;
 const QUERY_INTERVAL_MS = 250;
+const LOAD_TIME_BUFFER_SIZE = 8;
+const DEFAULT_LOAD_TIME_MS = 300;
+const QUERY_FOV_EXPANSION = 1.3;
+const STAR_POOL_MAX_SIZE = 20000;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -367,6 +371,11 @@ let datasetNames: string[] | null = null;
 let lastQueryAt = -QUERY_INTERVAL_MS;
 let lastQueryKey = "";
 let activeRequest = 0;
+const starPool = new Map<string, CsvStar>();
+const loadTimeBuffer: number[] = [];
+let prevYaw = 0;
+let prevPitch = 0;
+let angularVelocity = { yaw: 0, pitch: 0 };
 
 window.gaiaViewer = {
   getFrustum: () => currentFrustum,
@@ -396,7 +405,8 @@ function populateDatasetSelect(names: string[], selectedName: string): void {
   datasetSelect.disabled = names.length <= 1;
 }
 
-function updateBuffers(stars: CsvStar[]): void {
+function rebuildBuffers(): void {
+  const stars = [...starPool.values()];
   const positions = new Float32Array(stars.length * 3);
   const colors = new Float32Array(stars.length * 3);
   const sizes = new Float32Array(stars.length);
@@ -416,6 +426,19 @@ function updateBuffers(stars: CsvStar[]): void {
   colorBuffer(colors);
   sizeBuffer(sizes);
   scene.count = stars.length;
+}
+
+function mergeIntoPool(incoming: CsvStar[]): void {
+  for (const star of incoming) {
+    // Delete then re-insert to move to end of Map (most recently seen = LRU tail)
+    starPool.delete(star.sourceId);
+    starPool.set(star.sourceId, star);
+  }
+  // Evict oldest entries from the front of the Map until under the cap
+  while (starPool.size > STAR_POOL_MAX_SIZE) {
+    starPool.delete(starPool.keys().next().value!);
+  }
+  rebuildBuffers();
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -442,6 +465,8 @@ datasetSelect.addEventListener("change", () => {
   const url = new URL(window.location.href);
   url.searchParams.set("dataset", datasetName);
   window.history.replaceState({}, "", url);
+  starPool.clear();
+  rebuildBuffers();
   lastQueryKey = "";
   lastQueryAt = -QUERY_INTERVAL_MS;
   void queryStars(currentFrustum);
@@ -454,23 +479,24 @@ async function queryStars(frustum: QueryFrustum): Promise<void> {
   try {
     const name = await ensureDatasetName();
     hudStatus.textContent = `Querying ${name}...`;
+    const queryStart = performance.now();
     const response = await fetch(frustumUrl(name, frustum));
     if (!response.ok) {
       throw new Error(`query failed: ${response.status}`);
     }
     const stars = parseStars(await response.text());
+    recordLoadTime(performance.now() - queryStart);
     if (activeRequest !== requestId) {
       return;
     }
-    updateBuffers(stars);
-    hudStatus.textContent = `${stars.length} stars in view`;
+    mergeIntoPool(stars);
+    hudStatus.textContent = `${starPool.size} stars loaded`;
   } catch (error) {
     if (activeRequest !== requestId) {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
     hudStatus.textContent = `Query failed: ${message}`;
-    updateBuffers([]);
   }
 }
 
@@ -495,6 +521,41 @@ function updateCamera(deltaTime: number): void {
   if (movement[0] || movement[1] || movement[2]) {
     camera.position = add(camera.position, scale(normalize(movement), speed));
   }
+}
+
+function estimatedLoadTime(): number {
+  if (loadTimeBuffer.length === 0) return DEFAULT_LOAD_TIME_MS;
+  return loadTimeBuffer.reduce((a, b) => a + b, 0) / loadTimeBuffer.length;
+}
+
+function recordLoadTime(ms: number): void {
+  loadTimeBuffer.push(ms);
+  if (loadTimeBuffer.length > LOAD_TIME_BUFFER_SIZE) {
+    loadTimeBuffer.shift();
+  }
+}
+
+function cameraVelocity(): Vec3 {
+  const { forward, right } = cameraBasis(camera);
+  let movement: Vec3 = [0, 0, 0];
+  if (keyState.has("KeyW")) movement = add(movement, forward);
+  if (keyState.has("KeyS")) movement = subtract(movement, forward);
+  if (keyState.has("KeyA")) movement = subtract(movement, right);
+  if (keyState.has("KeyD")) movement = add(movement, right);
+  const len = Math.hypot(movement[0], movement[1], movement[2]);
+  return len > 0 ? scale(movement, 30 / len) : [0, 0, 0];
+}
+
+function createAnticipatedFrustum(aspect: number): QueryFrustum {
+  const loadSecs = estimatedLoadTime() / 1000;
+  const predictedCamera: Camera = {
+    ...camera,
+    position: add(camera.position, scale(cameraVelocity(), loadSecs)),
+    yaw: camera.yaw + angularVelocity.yaw * loadSecs,
+    pitch: clamp(camera.pitch + angularVelocity.pitch * loadSecs, -1.45, 1.45),
+    fovY: camera.fovY * QUERY_FOV_EXPANSION,
+  };
+  return createFrustum(predictedCamera, aspect);
 }
 
 canvas.addEventListener("click", () => {
@@ -599,15 +660,26 @@ const drawStars = regl({
 regl.frame(({ time }) => {
   const deltaTime = previousTime === 0 ? 0 : time - previousTime;
   previousTime = time;
+
+  if (deltaTime > 0) {
+    angularVelocity = {
+      yaw: (camera.yaw - prevYaw) / deltaTime,
+      pitch: (camera.pitch - prevPitch) / deltaTime,
+    };
+  }
+  prevYaw = camera.yaw;
+  prevPitch = camera.pitch;
+
   updateCamera(deltaTime);
 
-  currentFrustum = createFrustum(camera, canvas.width / Math.max(canvas.height, 1));
+  const aspect = canvas.width / Math.max(canvas.height, 1);
+  currentFrustum = createFrustum(camera, aspect);
   const key = frustumKey(currentFrustum);
   const now = performance.now();
   if (key !== lastQueryKey && now - lastQueryAt >= QUERY_INTERVAL_MS) {
     lastQueryAt = now;
     lastQueryKey = key;
-    void queryStars(currentFrustum);
+    void queryStars(createAnticipatedFrustum(aspect));
   }
 
   regl.clear({
