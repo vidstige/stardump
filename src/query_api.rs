@@ -20,6 +20,7 @@ use crate::formats::{
 };
 use crate::octree::Bounds3;
 use crate::storage::{local_path, validate_packed_index_layout};
+use crate::vec3::Vec3;
 
 #[derive(Clone)]
 struct QueryDataset {
@@ -38,71 +39,6 @@ struct QueryMatch {
     source_id: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Vec3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-impl Vec3 {
-    fn dot(self, other: Vec3) -> f32 {
-        self.x * other.x + self.y * other.y + self.z * other.z
-    }
-
-    fn cross(self, other: Vec3) -> Vec3 {
-        Vec3 {
-            x: self.y * other.z - self.z * other.y,
-            y: self.z * other.x - self.x * other.z,
-            z: self.x * other.y - self.y * other.x,
-        }
-    }
-
-    fn length(self) -> f32 {
-        self.dot(self).sqrt()
-    }
-
-    fn normalize(self) -> Option<Vec3> {
-        let len = self.length();
-        if !len.is_finite() || len == 0.0 {
-            return None;
-        }
-        Some(self * (1.0 / len))
-    }
-}
-
-impl std::ops::Add for Vec3 {
-    type Output = Vec3;
-    fn add(self, other: Vec3) -> Vec3 {
-        Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }
-    }
-}
-
-impl std::ops::Sub for Vec3 {
-    type Output = Vec3;
-    fn sub(self, other: Vec3) -> Vec3 {
-        Vec3 { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
-    }
-}
-
-impl std::ops::Mul<f32> for Vec3 {
-    type Output = Vec3;
-    fn mul(self, scalar: f32) -> Vec3 {
-        Vec3 { x: self.x * scalar, y: self.y * scalar, z: self.z * scalar }
-    }
-}
-
-impl From<[f32; 3]> for Vec3 {
-    fn from(v: [f32; 3]) -> Vec3 {
-        Vec3 { x: v[0], y: v[1], z: v[2] }
-    }
-}
-
-impl From<Vec3> for [f32; 3] {
-    fn from(v: Vec3) -> [f32; 3] {
-        [v.x, v.y, v.z]
-    }
-}
 
 #[derive(Clone, Copy)]
 struct Plane {
@@ -204,7 +140,7 @@ fn collect_matches(
 
     if node.child_mask == 0 {
         for point in read_leaf_points(file, index, node)? {
-            let xyz = Vec3::from(dequantize_point(bounds, &point));
+            let xyz = dequantize_point(bounds, &point);
             if point_match(xyz) {
                 matches.push(QueryMatch { position: xyz, source_id: point.source_id });
             }
@@ -296,8 +232,8 @@ fn derive_frustum(
 }
 
 fn bounds_corners(bounds: Bounds3) -> [Vec3; 8] {
-    let [x0, y0, z0] = bounds.min;
-    let [x1, y1, z1] = bounds.max;
+    let Vec3 { x: x0, y: y0, z: z0 } = bounds.min;
+    let Vec3 { x: x1, y: y1, z: z1 } = bounds.max;
     [
         Vec3 { x: x0, y: y0, z: z0 },
         Vec3 { x: x0, y: y0, z: z1 },
@@ -492,7 +428,7 @@ impl QueryDataset {
         let mut file = fs::File::open(&self.index_path)
             .with_context(|| format!("failed to open {}", self.index_path.display()))?;
         let mut matches = Vec::new();
-        let bounds_match = |bounds: Bounds3| bounds.intersects_sphere(center.into(), radius);
+        let bounds_match = |bounds: Bounds3| bounds.intersects_sphere(center, radius);
         let point_match = |point: Vec3| (point - center).length() <= radius;
         collect_matches(
             &mut file,

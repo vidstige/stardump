@@ -12,6 +12,7 @@ use crate::formats::{
     encode_packed_octree, encode_packed_points, quantize_point,
 };
 use crate::octree::{Bounds3, OctreeConfig};
+use crate::vec3::Vec3;
 use crate::quality::{DEFAULT_PARALLAX_QUALITY_THRESHOLD, maximum_distance_pc_for_quality};
 use crate::storage::{
     list_relative_files_recursive, local_path, validate_canonical_layout,
@@ -24,8 +25,8 @@ const TEMP_LEAF_ROOT: &str = ".tmp-leaves";
 pub const DEFAULT_DEPTH: u8 = 7;
 pub const DEFAULT_BOUND_PC: f32 = 1_000.0 / (DEFAULT_PARALLAX_QUALITY_THRESHOLD * 0.025);
 pub const DEFAULT_BOUNDS: Bounds3 = Bounds3 {
-    min: [-DEFAULT_BOUND_PC, -DEFAULT_BOUND_PC, -DEFAULT_BOUND_PC],
-    max: [DEFAULT_BOUND_PC, DEFAULT_BOUND_PC, DEFAULT_BOUND_PC],
+    min: Vec3 { x: -DEFAULT_BOUND_PC, y: -DEFAULT_BOUND_PC, z: -DEFAULT_BOUND_PC },
+    max: Vec3 { x: DEFAULT_BOUND_PC, y: DEFAULT_BOUND_PC, z: DEFAULT_BOUND_PC },
 };
 
 #[derive(Clone, Debug)]
@@ -46,9 +47,7 @@ pub struct BuildIndexResult {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TempPoint {
     source_id: u64,
-    x: f32,
-    y: f32,
-    z: f32,
+    position: Vec3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,44 +67,46 @@ struct TreeNode {
 fn temp_point_bytes(point: &TempPoint) -> [u8; TEMP_POINT_SIZE as usize] {
     let mut bytes = [0_u8; TEMP_POINT_SIZE as usize];
     bytes[0..8].copy_from_slice(&point.source_id.to_le_bytes());
-    bytes[8..12].copy_from_slice(&point.x.to_le_bytes());
-    bytes[12..16].copy_from_slice(&point.y.to_le_bytes());
-    bytes[16..20].copy_from_slice(&point.z.to_le_bytes());
+    bytes[8..12].copy_from_slice(&point.position.x.to_le_bytes());
+    bytes[12..16].copy_from_slice(&point.position.y.to_le_bytes());
+    bytes[16..20].copy_from_slice(&point.position.z.to_le_bytes());
     bytes
 }
 
 fn decode_temp_point(chunk: &[u8]) -> TempPoint {
     TempPoint {
         source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-        x: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-        y: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-        z: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        position: Vec3 {
+            x: f32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+            y: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+            z: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        },
     }
 }
 
 fn centered_half_extent(bounds: Bounds3) -> Result<f32> {
-    let half_extent = bounds.max[0];
+    let half_extent = bounds.max.x;
     if half_extent <= 0.0
-        || bounds.min[0] != -half_extent
-        || bounds.min[1] != -half_extent
-        || bounds.min[2] != -half_extent
-        || bounds.max[1] != half_extent
-        || bounds.max[2] != half_extent
+        || bounds.min.x != -half_extent
+        || bounds.min.y != -half_extent
+        || bounds.min.z != -half_extent
+        || bounds.max.y != half_extent
+        || bounds.max.z != half_extent
     {
         bail!("bounds must be a root-centered cube");
     }
     Ok(half_extent)
 }
 
-fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> [f32; 3] {
+fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> Vec3 {
     let distance_pc = 1_000.0_f64 / parallax_mas as f64;
     let ra = (ra_deg as f64).to_radians();
     let dec = (dec_deg as f64).to_radians();
-    [
-        (distance_pc * dec.cos() * ra.cos()) as f32,
-        (distance_pc * dec.cos() * ra.sin()) as f32,
-        (distance_pc * dec.sin()) as f32,
-    ]
+    Vec3 {
+        x: (distance_pc * dec.cos() * ra.cos()) as f32,
+        y: (distance_pc * dec.cos() * ra.sin()) as f32,
+        z: (distance_pc * dec.sin()) as f32,
+    }
 }
 
 fn temp_leaf_root(output_root: &Path) -> PathBuf {
@@ -253,16 +254,14 @@ fn points_for_canonical_part(
     let mut rows_in_bounds = 0_u64;
 
     for row in rows {
-        let [x, y, z] = cartesian_coordinates(row.ra, row.dec, row.parallax);
-        let Some(morton) = octree.morton_for_point([x, y, z]) else {
+        let position = cartesian_coordinates(row.ra, row.dec, row.parallax);
+        let Some(morton) = octree.morton_for_point(position) else {
             continue;
         };
         rows_in_bounds += 1;
         points_by_leaf.entry(morton).or_default().push(TempPoint {
             source_id: row.source_id,
-            x,
-            y,
-            z,
+            position,
         });
     }
 
@@ -321,7 +320,7 @@ fn write_packed_index(
         let leaf_bounds = octree.bounds.leaf_bounds(octree.depth, leaf.morton);
         let packed = points
             .iter()
-            .map(|point| quantize_point(leaf_bounds, [point.x, point.y, point.z], point.source_id))
+            .map(|point| quantize_point(leaf_bounds, point.position, point.source_id))
             .collect::<Vec<PackedPoint>>();
         writer
             .write_all(&encode_packed_points(&packed))
@@ -339,8 +338,8 @@ fn write_packed_index(
 pub fn bounds_for_quality_threshold(minimum_quality: f32) -> Bounds3 {
     let bound = maximum_distance_pc_for_quality(minimum_quality);
     Bounds3 {
-        min: [-bound, -bound, -bound],
-        max: [bound, bound, bound],
+        min: Vec3 { x: -bound, y: -bound, z: -bound },
+        max: Vec3 { x: bound, y: bound, z: bound },
     }
 }
 

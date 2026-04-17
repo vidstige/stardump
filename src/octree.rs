@@ -1,7 +1,9 @@
+use crate::vec3::Vec3;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds3 {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
+    pub min: Vec3,
+    pub max: Vec3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,7 +91,7 @@ pub fn morton_decode(code: u32) -> [u32; 3] {
 
 impl Bounds3 {
     pub fn cube_size(&self) -> f32 {
-        self.max[0] - self.min[0]
+        self.max.x - self.min.x
     }
 
     pub fn cell_size(&self, depth: u8) -> f32 {
@@ -97,46 +99,34 @@ impl Bounds3 {
     }
 
     pub fn leaf_bounds(&self, depth: u8, morton: u32) -> Bounds3 {
-        let [x, y, z] = morton_decode(morton);
+        let [xi, yi, zi] = morton_decode(morton);
         let cell = self.cell_size(depth);
         Bounds3 {
-            min: [
-                self.min[0] + x as f32 * cell,
-                self.min[1] + y as f32 * cell,
-                self.min[2] + z as f32 * cell,
-            ],
-            max: [
-                self.min[0] + (x + 1) as f32 * cell,
-                self.min[1] + (y + 1) as f32 * cell,
-                self.min[2] + (z + 1) as f32 * cell,
-            ],
+            min: self.min + Vec3 { x: xi as f32, y: yi as f32, z: zi as f32 } * cell,
+            max: self.min + Vec3 { x: (xi + 1) as f32, y: (yi + 1) as f32, z: (zi + 1) as f32 } * cell,
         }
     }
 
-    pub fn intersects_sphere(&self, center: [f32; 3], radius: f32) -> bool {
-        let dx = clamp_distance(center[0], self.min[0], self.max[0]);
-        let dy = clamp_distance(center[1], self.min[1], self.max[1]);
-        let dz = clamp_distance(center[2], self.min[2], self.max[2]);
+    pub fn intersects_sphere(&self, center: Vec3, radius: f32) -> bool {
+        let dx = clamp_distance(center.x, self.min.x, self.max.x);
+        let dy = clamp_distance(center.y, self.min.y, self.max.y);
+        let dz = clamp_distance(center.z, self.min.z, self.max.z);
         dx * dx + dy * dy + dz * dz <= radius * radius
     }
 
     pub fn child_bounds(&self, child: u8) -> Bounds3 {
-        let mid = [
-            (self.min[0] + self.max[0]) * 0.5,
-            (self.min[1] + self.max[1]) * 0.5,
-            (self.min[2] + self.max[2]) * 0.5,
-        ];
+        let mid = (self.min + self.max) * 0.5;
         Bounds3 {
-            min: [
-                if child & 1 == 0 { self.min[0] } else { mid[0] },
-                if child & 2 == 0 { self.min[1] } else { mid[1] },
-                if child & 4 == 0 { self.min[2] } else { mid[2] },
-            ],
-            max: [
-                if child & 1 == 0 { mid[0] } else { self.max[0] },
-                if child & 2 == 0 { mid[1] } else { self.max[1] },
-                if child & 4 == 0 { mid[2] } else { self.max[2] },
-            ],
+            min: Vec3 {
+                x: if child & 1 == 0 { self.min.x } else { mid.x },
+                y: if child & 2 == 0 { self.min.y } else { mid.y },
+                z: if child & 4 == 0 { self.min.z } else { mid.z },
+            },
+            max: Vec3 {
+                x: if child & 1 == 0 { mid.x } else { self.max.x },
+                y: if child & 2 == 0 { mid.y } else { self.max.y },
+                z: if child & 4 == 0 { mid.z } else { self.max.z },
+            },
         }
     }
 }
@@ -146,39 +136,21 @@ impl OctreeConfig {
         1_u32 << self.depth
     }
 
-    pub fn morton_for_point(&self, point: [f32; 3]) -> Option<u32> {
+    pub fn morton_for_point(&self, point: Vec3) -> Option<u32> {
         let scale = self.axis_scale();
         Some(morton_encode(
-            axis_index(point[0], self.bounds.min[0], self.bounds.max[0], scale)?,
-            axis_index(point[1], self.bounds.min[1], self.bounds.max[1], scale)?,
-            axis_index(point[2], self.bounds.min[2], self.bounds.max[2], scale)?,
+            axis_index(point.x, self.bounds.min.x, self.bounds.max.x, scale)?,
+            axis_index(point.y, self.bounds.min.y, self.bounds.max.y, scale)?,
+            axis_index(point.z, self.bounds.min.z, self.bounds.max.z, scale)?,
         ))
     }
 
-    pub fn leaf_ranges_for_bounds(&self, min: [f32; 3], max: [f32; 3]) -> Option<[(u32, u32); 3]> {
+    pub fn leaf_ranges_for_bounds(&self, min: Vec3, max: Vec3) -> Option<[(u32, u32); 3]> {
         let scale = self.axis_scale();
         Some([
-            axis_range(
-                min[0],
-                max[0],
-                self.bounds.min[0],
-                self.bounds.max[0],
-                scale,
-            )?,
-            axis_range(
-                min[1],
-                max[1],
-                self.bounds.min[1],
-                self.bounds.max[1],
-                scale,
-            )?,
-            axis_range(
-                min[2],
-                max[2],
-                self.bounds.min[2],
-                self.bounds.max[2],
-                scale,
-            )?,
+            axis_range(min.x, max.x, self.bounds.min.x, self.bounds.max.x, scale)?,
+            axis_range(min.y, max.y, self.bounds.min.y, self.bounds.max.y, scale)?,
+            axis_range(min.z, max.z, self.bounds.min.z, self.bounds.max.z, scale)?,
         ])
     }
 
@@ -208,18 +180,18 @@ mod tests {
         let config = OctreeConfig {
             depth: 6,
             bounds: Bounds3 {
-                min: [-100_000.0, -100_000.0, -100_000.0],
-                max: [100_000.0, 100_000.0, 100_000.0],
+                min: Vec3 { x: -100_000.0, y: -100_000.0, z: -100_000.0 },
+                max: Vec3 { x: 100_000.0, y: 100_000.0, z: 100_000.0 },
             },
         };
 
-        let morton = config.morton_for_point([0.0, 0.0, 0.0]).unwrap();
+        let morton = config.morton_for_point(Vec3 { x: 0.0, y: 0.0, z: 0.0 }).unwrap();
         let bounds = config.leaf_bounds(morton);
 
-        assert!(bounds.min[0] <= 0.0);
-        assert!(bounds.max[0] >= 0.0);
-        assert!(bounds.intersects_sphere([0.0, 0.0, 0.0], 1.0));
-        assert!(!bounds.intersects_sphere([200_000.0, 0.0, 0.0], 1.0));
+        assert!(bounds.min.x <= 0.0);
+        assert!(bounds.max.x >= 0.0);
+        assert!(bounds.intersects_sphere(Vec3 { x: 0.0, y: 0.0, z: 0.0 }, 1.0));
+        assert!(!bounds.intersects_sphere(Vec3 { x: 200_000.0, y: 0.0, z: 0.0 }, 1.0));
     }
 
     #[test]
@@ -227,13 +199,13 @@ mod tests {
         let config = OctreeConfig {
             depth: 1,
             bounds: Bounds3 {
-                min: [0.0, 0.0, 0.0],
-                max: [2.0, 2.0, 2.0],
+                min: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+                max: Vec3 { x: 2.0, y: 2.0, z: 2.0 },
             },
         };
 
         let ranges = config
-            .leaf_ranges_for_bounds([1.0, 1.0, 1.0], [1.0, 1.0, 1.0])
+            .leaf_ranges_for_bounds(Vec3 { x: 1.0, y: 1.0, z: 1.0 }, Vec3 { x: 1.0, y: 1.0, z: 1.0 })
             .unwrap();
 
         assert_eq!(ranges, [(0, 1), (0, 1), (0, 1)]);

@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::octree::Bounds3;
+use crate::vec3::Vec3;
 
 pub const CANONICAL_ROOT: &str = "canonical";
 pub const CANONICAL_ROW_SIZE: u64 = 32;
@@ -292,17 +293,10 @@ pub fn metadata_path_for_source(input_name: &str) -> String {
 
 impl PackedOctreeIndex {
     pub fn bounds(&self) -> Bounds3 {
+        let e = self.half_extent_pc;
         Bounds3 {
-            min: [
-                -self.half_extent_pc,
-                -self.half_extent_pc,
-                -self.half_extent_pc,
-            ],
-            max: [
-                self.half_extent_pc,
-                self.half_extent_pc,
-                self.half_extent_pc,
-            ],
+            min: Vec3 { x: -e, y: -e, z: -e },
+            max: Vec3 { x: e, y: e, z: e },
         }
     }
 
@@ -315,23 +309,23 @@ impl PackedOctreeIndex {
     }
 }
 
-pub fn quantize_point(bounds: Bounds3, point: [f32; 3], source_id: u64) -> PackedPoint {
-    let size = bounds.max[0] - bounds.min[0];
+pub fn quantize_point(bounds: Bounds3, point: Vec3, source_id: u64) -> PackedPoint {
+    let size = bounds.max.x - bounds.min.x;
     PackedPoint {
         source_id,
-        x_local: quantize_axis(point[0], bounds.min[0], size),
-        y_local: quantize_axis(point[1], bounds.min[1], size),
-        z_local: quantize_axis(point[2], bounds.min[2], size),
+        x_local: quantize_axis(point.x, bounds.min.x, size),
+        y_local: quantize_axis(point.y, bounds.min.y, size),
+        z_local: quantize_axis(point.z, bounds.min.z, size),
     }
 }
 
-pub fn dequantize_point(bounds: Bounds3, point: &PackedPoint) -> [f32; 3] {
-    let size = bounds.max[0] - bounds.min[0];
-    [
-        dequantize_axis(point.x_local, bounds.min[0], size),
-        dequantize_axis(point.y_local, bounds.min[1], size),
-        dequantize_axis(point.z_local, bounds.min[2], size),
-    ]
+pub fn dequantize_point(bounds: Bounds3, point: &PackedPoint) -> Vec3 {
+    let size = bounds.max.x - bounds.min.x;
+    Vec3 {
+        x: dequantize_axis(point.x_local, bounds.min.x, size),
+        y: dequantize_axis(point.y_local, bounds.min.y, size),
+        z: dequantize_axis(point.z_local, bounds.min.z, size),
+    }
 }
 
 pub fn read_canonical_rows(path: &Path) -> Result<Vec<CanonicalRow>> {
@@ -642,17 +636,20 @@ mod tests {
     #[test]
     fn packed_point_quantization_round_trip_stays_within_one_step() {
         let bounds = Bounds3 {
-            min: [0.0, 0.0, 0.0],
-            max: [62.5, 62.5, 62.5],
+            min: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+            max: Vec3 { x: 62.5, y: 62.5, z: 62.5 },
         };
-        let original = [12.345, 23.456, 34.567];
+        let original = Vec3 { x: 12.345, y: 23.456, z: 34.567 };
         let quantized = quantize_point(bounds, original, 7);
         let round_trip = dequantize_point(bounds, &quantized);
-        let step = (bounds.max[0] - bounds.min[0]) / QUANTIZATION_SCALE;
+        let step = (bounds.max.x - bounds.min.x) / QUANTIZATION_SCALE;
 
         assert_eq!(quantized.source_id, 7);
-        for axis in 0..3 {
-            assert!((round_trip[axis] - original[axis]).abs() <= step);
+        for (orig, rt) in [original.x, original.y, original.z]
+            .iter()
+            .zip([round_trip.x, round_trip.y, round_trip.z].iter())
+        {
+            assert!((rt - orig).abs() <= step);
         }
     }
 }
