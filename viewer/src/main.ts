@@ -370,7 +370,7 @@ let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
 let lastQueryAt = -QUERY_INTERVAL_MS;
 let lastQueryKey = "";
-let activeRequest = 0;
+let queryEpoch = 0;
 const starPool = new Map<string, CsvStar>();
 const loadTimeBuffer: number[] = [];
 let prevYaw = 0;
@@ -465,6 +465,7 @@ datasetSelect.addEventListener("change", () => {
   const url = new URL(window.location.href);
   url.searchParams.set("dataset", datasetName);
   window.history.replaceState({}, "", url);
+  queryEpoch++;
   starPool.clear();
   rebuildBuffers();
   lastQueryKey = "";
@@ -473,8 +474,7 @@ datasetSelect.addEventListener("change", () => {
 });
 
 async function queryStars(frustum: QueryFrustum): Promise<void> {
-  const requestId = activeRequest + 1;
-  activeRequest = requestId;
+  const epoch = queryEpoch;
 
   try {
     const name = await ensureDatasetName();
@@ -486,13 +486,13 @@ async function queryStars(frustum: QueryFrustum): Promise<void> {
     }
     const stars = parseStars(await response.text());
     recordLoadTime(performance.now() - queryStart);
-    if (activeRequest !== requestId) {
+    if (epoch !== queryEpoch) {
       return;
     }
     mergeIntoPool(stars);
     hudStatus.textContent = `${starPool.size} stars loaded`;
   } catch (error) {
-    if (activeRequest !== requestId) {
+    if (epoch !== queryEpoch) {
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
