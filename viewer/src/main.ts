@@ -345,7 +345,7 @@ const camera: Camera = {
   yaw: 0,
   pitch: 0,
   fovY: Math.PI / 3,
-  near: 0.25,
+  near: 0.1,
   far: 50,
 };
 
@@ -536,21 +536,27 @@ const drawStars = regl({
 
     uniform mat4 projection;
     uniform mat4 view;
-    uniform float pointSize;
+    uniform float worldRadius;
+    uniform float screenHeight;
+    uniform float pixelRatio;
+
+    varying float vPointSize;
 
     void main() {
       gl_Position = projection * view * vec4(position, 1.0);
-      gl_PointSize = pointSize;
+      float screenRadiusPx = worldRadius * projection[1][1] * screenHeight * pixelRatio * 0.5 / gl_Position.w;
+      gl_PointSize = max(1.0, screenRadiusPx * 2.0);
+      vPointSize = gl_PointSize;
     }
   `,
   frag: `
     precision highp float;
 
-    uniform float pointSize;
+    varying float vPointSize;
 
     void main() {
       float dist = length(gl_PointCoord - 0.5);
-      float alpha = clamp((0.5 - dist) * pointSize, 0.0, 1.0);
+      float alpha = clamp((0.5 - dist) * vPointSize, 0.0, 1.0);
       if (alpha < 0.01) discard;
       gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
     }
@@ -561,7 +567,9 @@ const drawStars = regl({
   uniforms: {
     projection: () => projectionMatrix(currentFrustum),
     view: () => viewMatrix(currentFrustum),
-    pointSize: () => (window.devicePixelRatio || 1) * 1,
+    worldRadius: 0.02,
+    screenHeight: () => canvas.height,
+    pixelRatio: () => window.devicePixelRatio || 1,
   },
   primitive: "points",
   count: () => scene.count,
