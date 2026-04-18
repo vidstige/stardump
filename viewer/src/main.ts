@@ -6,8 +6,7 @@ type Quaternion = [number, number, number, number];
 
 type Camera = {
   position: Vec3;
-  yaw: number;
-  pitch: number;
+  orientation: Quaternion;
   fovY: number;
   near: number;
   far: number;
@@ -87,8 +86,18 @@ function normalizeQuaternion(q: Quaternion): Quaternion {
   return [q[0] / length, q[1] / length, q[2] / length, q[3] / length];
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+function multiplyQuaternion(a: Quaternion, b: Quaternion): Quaternion {
+  return [
+    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+  ];
+}
+
+function quaternionFromAxisAngle(axis: Vec3, angle: number): Quaternion {
+  const s = Math.sin(angle / 2);
+  return [axis[0]*s, axis[1]*s, axis[2]*s, Math.cos(angle / 2)];
 }
 
 function projectionMatrix(frustum: FrustumParams): Mat4 {
@@ -122,70 +131,6 @@ function lookAt(
   ]);
 }
 
-function cameraForward(camera: Camera): Vec3 {
-  return normalize([
-    Math.cos(camera.pitch) * Math.sin(camera.yaw),
-    Math.sin(camera.pitch),
-    -Math.cos(camera.pitch) * Math.cos(camera.yaw),
-  ]);
-}
-
-function cameraBasis(camera: Camera): { forward: Vec3; right: Vec3; up: Vec3 } {
-  const forward = cameraForward(camera);
-  const right = normalize(cross(forward, [0, 1, 0]));
-  const up = normalize(cross(right, forward));
-  return { forward, right, up };
-}
-
-function quaternionFromBasis(right: Vec3, up: Vec3, back: Vec3): Quaternion {
-  const m00 = right[0];
-  const m01 = up[0];
-  const m02 = back[0];
-  const m10 = right[1];
-  const m11 = up[1];
-  const m12 = back[1];
-  const m20 = right[2];
-  const m21 = up[2];
-  const m22 = back[2];
-  const trace = m00 + m11 + m22;
-
-  if (trace > 0) {
-    const s = Math.sqrt(trace + 1) * 2;
-    return normalizeQuaternion([
-      (m21 - m12) / s,
-      (m02 - m20) / s,
-      (m10 - m01) / s,
-      0.25 * s,
-    ]);
-  }
-  if (m00 > m11 && m00 > m22) {
-    const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
-    return normalizeQuaternion([
-      0.25 * s,
-      (m01 + m10) / s,
-      (m02 + m20) / s,
-      (m21 - m12) / s,
-    ]);
-  }
-  if (m11 > m22) {
-    const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
-    return normalizeQuaternion([
-      (m01 + m10) / s,
-      0.25 * s,
-      (m12 + m21) / s,
-      (m02 - m20) / s,
-    ]);
-  }
-
-  const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
-  return normalizeQuaternion([
-    (m02 + m20) / s,
-    (m12 + m21) / s,
-    0.25 * s,
-    (m10 - m01) / s,
-  ]);
-}
-
 function rotateVector(q: Quaternion, v: Vec3): Vec3 {
   const qv: Vec3 = [q[0], q[1], q[2]];
   const uv = cross(qv, v);
@@ -193,13 +138,16 @@ function rotateVector(q: Quaternion, v: Vec3): Vec3 {
   return add(v, add(scale(uv, 2 * q[3]), scale(uuv, 2)));
 }
 
-function cameraQuaternion(camera: Camera): Quaternion {
-  const { right, up, forward } = cameraBasis(camera);
-  return quaternionFromBasis(right, up, scale(forward, -1));
+function cameraBasis(camera: Camera): { forward: Vec3; right: Vec3; up: Vec3 } {
+  return {
+    forward: rotateVector(camera.orientation, [0, 0, -1]),
+    right:   rotateVector(camera.orientation, [1, 0, 0]),
+    up:      rotateVector(camera.orientation, [0, 1, 0]),
+  };
 }
 
 function createFrustum(camera: Camera, aspect: number): QueryFrustum {
-  const orientation = cameraQuaternion(camera);
+  const orientation = camera.orientation;
   return {
     x: camera.position[0],
     y: camera.position[1],
@@ -342,8 +290,7 @@ const scene: SceneState = { count: 0 };
 
 const camera: Camera = {
   position: [0, 0, 0],
-  yaw: 0,
-  pitch: 0,
+  orientation: [0, 0, 0, 1],
   fovY: Math.PI / 3,
   near: 0.1,
   far: 50,
@@ -500,26 +447,54 @@ function updateCamera(deltaTime: number): void {
   if (movement[0] || movement[1] || movement[2]) {
     camera.position = add(camera.position, scale(normalize(movement), speed));
   }
+
+  const rollSpeed = 1.5 * deltaTime;
+  if (keyState.has("KeyQ")) {
+    camera.orientation = normalizeQuaternion(multiplyQuaternion(
+      camera.orientation, quaternionFromAxisAngle([0, 0, 1], -rollSpeed)
+    ));
+  }
+  if (keyState.has("KeyE")) {
+    camera.orientation = normalizeQuaternion(multiplyQuaternion(
+      camera.orientation, quaternionFromAxisAngle([0, 0, 1], rollSpeed)
+    ));
+  }
 }
 
+let cameraActive = false;
+
 canvas.addEventListener("click", () => {
-  void canvas.requestPointerLock();
+  if (cameraActive) {
+    document.exitPointerLock();
+  } else {
+    void canvas.requestPointerLock();
+  }
+});
+
+document.addEventListener("pointerlockchange", () => {
+  cameraActive = document.pointerLockElement === canvas;
 });
 
 document.addEventListener("mousemove", (event) => {
-  if (document.pointerLockElement !== canvas) {
-    return;
+  if (!cameraActive) return;
+  const s = 0.0025;
+  if (event.movementX !== 0) {
+    camera.orientation = normalizeQuaternion(multiplyQuaternion(
+      camera.orientation, quaternionFromAxisAngle([0, 1, 0], -event.movementX * s)
+    ));
   }
-
-  camera.yaw += event.movementX * 0.0025;
-  camera.pitch = clamp(camera.pitch - event.movementY * 0.0025, -1.45, 1.45);
+  if (event.movementY !== 0) {
+    camera.orientation = normalizeQuaternion(multiplyQuaternion(
+      camera.orientation, quaternionFromAxisAngle([1, 0, 0], -event.movementY * s)
+    ));
+  }
 });
 
 window.addEventListener("keydown", (event) => {
   if (event.code.startsWith("Key")) {
     keyState.add(event.code);
   }
-  if (["KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
+  if (["KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE"].includes(event.code)) {
     event.preventDefault();
   }
 });
