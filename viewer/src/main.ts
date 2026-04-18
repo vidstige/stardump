@@ -223,31 +223,8 @@ function viewMatrix(frustum: QueryFrustum): Mat4 {
   return lookAt(position, add(position, forward), up);
 }
 
-function hashString(value: string): number {
-  let hash = 2166136261;
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
-}
 
-function starColor(sourceId: string): Vec3 {
-  const hash = hashString(sourceId);
-  const r = hash & 0xff;
-  const g = (hash >>> 8) & 0xff;
-  const b = (hash >>> 16) & 0xff;
-  return [
-    0.72 + r / 255 * 0.2,
-    0.78 + g / 255 * 0.16,
-    0.82 + b / 255 * 0.14,
-  ];
-}
 
-function starSize(sourceId: string): number {
-  const hash = hashString(sourceId);
-  return 0.7 + ((hash >>> 16) & 0xff) / 255 * 0.9;
-}
 
 function parseStars(csvText: string): CsvStar[] {
   const lines = csvText.trim().split("\n");
@@ -361,8 +338,6 @@ const regl = createRegl({
 });
 
 const positionBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
-const colorBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
-const sizeBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
 
 const camera: Camera = {
@@ -424,23 +399,13 @@ function populateDatasetSelect(names: string[], selectedName: string): void {
 function rebuildBuffers(): void {
   const stars = [...starPool.values()];
   const positions = new Float32Array(stars.length * 3);
-  const colors = new Float32Array(stars.length * 3);
-  const sizes = new Float32Array(stars.length);
-
   stars.forEach((star, index) => {
-    const color = starColor(star.sourceId);
     positions[index * 3] = star.x;
     positions[index * 3 + 1] = star.y;
     positions[index * 3 + 2] = star.z;
-    colors[index * 3] = color[0];
-    colors[index * 3 + 1] = color[1];
-    colors[index * 3 + 2] = color[2];
-    sizes[index] = starSize(star.sourceId);
   });
 
   positionBuffer(positions);
-  colorBuffer(colors);
-  sizeBuffer(sizes);
   scene.count = stars.length;
 }
 
@@ -565,66 +530,46 @@ window.addEventListener("keyup", (event) => {
 
 const drawStars = regl({
   vert: `
-    precision mediump float;
+    precision highp float;
 
     attribute vec3 position;
-    attribute vec3 color;
-    attribute float size;
 
     uniform mat4 projection;
     uniform mat4 view;
-    uniform float pixelRatio;
-
-    varying vec3 vColor;
+    uniform float pointSize;
 
     void main() {
-      vec4 viewPosition = view * vec4(position, 1.0);
-      float depthScale = clamp(40.0 / -viewPosition.z, 0.6, 1.8);
-      gl_Position = projection * viewPosition;
-      gl_PointSize = size * pixelRatio * depthScale;
-      vColor = color;
+      gl_Position = projection * view * vec4(position, 1.0);
+      gl_PointSize = pointSize;
     }
   `,
   frag: `
-    precision mediump float;
+    precision highp float;
 
-    varying vec3 vColor;
+    uniform float pointSize;
 
     void main() {
-      vec2 centered = gl_PointCoord - 0.5;
-      float radius = dot(centered, centered);
-      if (radius > 0.25) {
-        discard;
-      }
-
-      float glow = smoothstep(0.25, 0.0, radius);
-      gl_FragColor = vec4(vColor * (0.45 + glow * 0.9), glow);
+      float dist = length(gl_PointCoord - 0.5);
+      float alpha = clamp((0.5 - dist) * pointSize, 0.0, 1.0);
+      if (alpha < 0.01) discard;
+      gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
     }
   `,
   attributes: {
     position: { buffer: positionBuffer, size: 3 },
-    color: { buffer: colorBuffer, size: 3 },
-    size: { buffer: sizeBuffer, size: 1 },
   },
   uniforms: {
     projection: () => projectionMatrix(currentFrustum),
     view: () => viewMatrix(currentFrustum),
-    pixelRatio: () => window.devicePixelRatio || 1,
+    pointSize: () => (window.devicePixelRatio || 1) * 1,
   },
   primitive: "points",
   count: () => scene.count,
   blend: {
     enable: true,
-    func: {
-      srcRGB: "src alpha",
-      srcAlpha: "one",
-      dstRGB: "one",
-      dstAlpha: "one minus src alpha",
-    },
+    func: { src: "src alpha", dst: "one minus src alpha" },
   },
-  depth: {
-    enable: false,
-  },
+  depth: { enable: false },
 });
 
 regl.frame(({ time }) => {
