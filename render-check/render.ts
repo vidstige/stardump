@@ -43,15 +43,27 @@ const fovy    = (FOV_DEG * Math.PI) / 180;
 const aspect  = WIDTH / HEIGHT;
 const tanH    = Math.tan(fovy * 0.5);
 
-// Build quaternion from rotation matrix
+// Build quaternion from rotation matrix (Shepperd's method, all branches).
 function matToQuat(r: Vec3, u: Vec3, f: Vec3): [number,number,number,number] {
-  const m = [r[0],u[0],-f[0], r[1],u[1],-f[1], r[2],u[2],-f[2]];
-  const trace = m[0]+m[4]+m[8];
+  // Column-major basis: col0=right, col1=up, col2=-forward (OpenGL convention).
+  const m00 = r[0], m10 = r[1], m20 = r[2];
+  const m01 = u[0], m11 = u[1], m21 = u[2];
+  const m02 = -f[0], m12 = -f[1], m22 = -f[2];
+  const trace = m00 + m11 + m22;
   if (trace > 0) {
-    const s = 0.5 / Math.sqrt(trace+1);
-    return [(m[7]-m[5])*s, (m[2]-m[6])*s, (m[3]-m[1])*s, 0.25/s];
+    const s = 0.5 / Math.sqrt(trace + 1);
+    return [(m21 - m12) * s, (m02 - m20) * s, (m10 - m01) * s, 0.25 / s];
   }
-  return [0,0,0,1];
+  if (m00 > m11 && m00 > m22) {
+    const s = 2 * Math.sqrt(1 + m00 - m11 - m22);
+    return [0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s];
+  }
+  if (m11 > m22) {
+    const s = 2 * Math.sqrt(1 + m11 - m00 - m22);
+    return [(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s];
+  }
+  const s = 2 * Math.sqrt(1 + m22 - m00 - m11);
+  return [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s];
 }
 const [qx, qy, qz, qw] = matToQuat(right, up, forward);
 

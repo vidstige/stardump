@@ -42,8 +42,10 @@ type SceneState = {
 };
 
 const searchParams = new URLSearchParams(window.location.search);
-const API_ROOT = searchParams.get("api")
-  ?? "https://star-dump-query-api-494247280614.europe-west1.run.app";
+const REMOTE_API = "https://star-dump-query-api-494247280614.europe-west1.run.app";
+const LOCAL_API  = "http://127.0.0.1:3000";
+const API_URLS   = [REMOTE_API, LOCAL_API];
+let API_ROOT = searchParams.get("api") ?? REMOTE_API;
 const DATASET_OVERRIDE = searchParams.get("dataset");
 const QUERY_LIMIT = 20000;
 const QUERY_INTERVAL_MS = 250;
@@ -211,7 +213,7 @@ if (!app) {
   throw new Error("missing #app");
 }
 const statusElement = document.querySelector<HTMLParagraphElement>("#status");
-const apiRootElement = document.querySelector<HTMLElement>("#api-root");
+const apiSelectElement = document.querySelector<HTMLSelectElement>("#api-select");
 const datasetSelectElement = document.querySelector<HTMLSelectElement>("#dataset-select");
 const unitsCountElement = document.querySelector<HTMLElement>("#units-count");
 const queryCountElement = document.querySelector<HTMLElement>("#query-count");
@@ -220,13 +222,13 @@ const farSliderElement = document.querySelector<HTMLInputElement>("#far-slider")
 const farValueElement = document.querySelector<HTMLElement>("#far-value");
 const exposureSliderElement = document.querySelector<HTMLInputElement>("#exposure-slider");
 const exposureValueElement = document.querySelector<HTMLElement>("#exposure-value");
-if (!statusElement || !apiRootElement || !datasetSelectElement ||
+if (!statusElement || !apiSelectElement || !datasetSelectElement ||
     !unitsCountElement || !queryCountElement || !coordinatesElement ||
     !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement) {
   throw new Error("missing hud elements");
 }
 const hudStatus = statusElement;
-const hudApiRoot = apiRootElement;
+const apiSelect = apiSelectElement;
 const datasetSelect = datasetSelectElement;
 const hudUnitsCount = unitsCountElement;
 const hudQueryCount = queryCountElement;
@@ -250,6 +252,7 @@ const regl = createRegl({
 const positionBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const luminosityBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const bpRpBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const radiusBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
 
 const camera: Camera = {
@@ -269,14 +272,34 @@ let lastQueryAt = -QUERY_INTERVAL_MS;
 let lastQueryKey = "";
 let queryEpoch = 0;
 let outstandingQueries = 0;
-let exposure = 0.001;
+let exposure = 30.0;
 
 window.starDump = {
   getFrustum: () => currentFrustum,
 };
 
+for (const url of API_URLS) {
+  const option = document.createElement("option");
+  option.value = url;
+  option.textContent = url.startsWith("http://127") ? "Local (127.0.0.1:3000)" : "Remote (Cloud Run)";
+  option.selected = url === API_ROOT;
+  apiSelect.append(option);
+}
+
+apiSelect.addEventListener("change", () => {
+  if (!apiSelect.value || apiSelect.value === API_ROOT) return;
+  API_ROOT = apiSelect.value;
+  datasetName = null;
+  datasetNames = null;
+  queryEpoch++;
+  updateBuffers(new Float32Array(0), new Float32Array(0), new Float32Array(0), new Float32Array(0), 0);
+  lastQueryKey = "";
+  lastQueryAt = -QUERY_INTERVAL_MS;
+  hudStatus.textContent = `Connecting to ${API_ROOT}...`;
+  void queryStars(currentFrustum);
+});
+
 hudStatus.textContent = `Connecting to ${API_ROOT}...`;
-hudApiRoot.textContent = API_ROOT;
 
 hudFarSlider.value = String(camera.far);
 hudFarValue.textContent = `${camera.far.toFixed(0)} pc`;
@@ -287,8 +310,8 @@ hudFarSlider.addEventListener("input", () => {
   lastQueryKey = "";
 });
 
-const exposureMin = Math.log10(1e-5);
-const exposureMax = Math.log10(1e-1);
+const exposureMin = Math.log10(1e-3);
+const exposureMax = Math.log10(1e3);
 hudExposureSlider.value = String(
   ((Math.log10(exposure) - exposureMin) / (exposureMax - exposureMin)) * 100
 );
@@ -312,10 +335,17 @@ function populateDatasetSelect(names: string[], selectedName: string): void {
   datasetSelect.disabled = names.length <= 1;
 }
 
-function updateBuffers(positions: Float32Array, luminosities: Float32Array, bpRps: Float32Array, count: number): void {
+function updateBuffers(
+  positions: Float32Array,
+  luminosities: Float32Array,
+  bpRps: Float32Array,
+  radii: Float32Array,
+  count: number,
+): void {
   positionBuffer(positions);
   luminosityBuffer(luminosities);
   bpRpBuffer(bpRps);
+  radiusBuffer(radii);
   scene.count = count;
 }
 
@@ -342,7 +372,7 @@ datasetSelect.addEventListener("change", () => {
   url.searchParams.set("dataset", datasetName);
   window.history.replaceState({}, "", url);
   queryEpoch++;
-  updateBuffers(new Float32Array(0), new Float32Array(0), new Float32Array(0), 0);
+  updateBuffers(new Float32Array(0), new Float32Array(0), new Float32Array(0), new Float32Array(0), 0);
   lastQueryKey = "";
   lastQueryAt = -QUERY_INTERVAL_MS;
   void queryStars(currentFrustum);
@@ -369,19 +399,21 @@ async function queryStars(frustum: QueryFrustum): Promise<void> {
     const positions = new Float32Array(count * 3);
     const luminosities = new Float32Array(count);
     const bpRps = new Float32Array(count);
+    const radii = new Float32Array(count);
     for (let i = 0; i < count; i++) {
-      const base = 4 + i * 20;
+      const base = 4 + i * 24;
       positions[i * 3]     = dv.getFloat32(base,      true);
       positions[i * 3 + 1] = dv.getFloat32(base + 4,  true);
       positions[i * 3 + 2] = dv.getFloat32(base + 8,  true);
       luminosities[i]      = dv.getFloat32(base + 12, true);
       bpRps[i]             = dv.getFloat32(base + 16, true);
+      radii[i]             = dv.getFloat32(base + 20, true);
     }
 
     if (epoch !== queryEpoch) {
       return;
     }
-    updateBuffers(positions, luminosities, bpRps, count);
+    updateBuffers(positions, luminosities, bpRps, radii, count);
     hudUnitsCount.textContent = String(count);
     hudStatus.textContent = "";
   } catch (error) {
@@ -479,14 +511,17 @@ const drawStars = regl({
     attribute vec3 position;
     attribute float luminosity;
     attribute float bpRp;
+    attribute float radius;
 
     uniform mat4 projection;
     uniform mat4 view;
     uniform vec3 cameraPosition;
     uniform float exposure;
+    uniform float pixelsPerRadian;
 
     varying vec3 vColor;
-    varying float vBrightness;
+    varying float vPeak;
+    varying float vSigmaUv;
 
     vec3 bpRpToColor(float t) {
       vec3 blue   = vec3(0.6, 0.7, 1.0);
@@ -502,36 +537,63 @@ const drawStars = regl({
       gl_Position = projection * view * vec4(position, 1.0);
       float dist = length(position - cameraPosition);
       float flux = luminosity / max(dist * dist, 0.01);
-      vBrightness = flux * exposure;
+      float brightness = flux * exposure;
       float t = clamp((bpRp + 0.5) / 3.5, 0.0, 1.0);
       vColor = (bpRp != bpRp) ? vec3(1.0) : bpRpToColor(t);
-      gl_PointSize = clamp(sqrt(vBrightness) * 8.0, 1.0, 64.0);
+
+      float sizePx;
+      if (radius > 0.0) {
+        // Aggregate: flux-conserving Gaussian matching render.ts.
+        float footprintPx = max((radius / dist) * pixelsPerRadian, 1.0);
+        float sigmaPx = footprintPx * 0.5;
+        sizePx = max(footprintPx * 3.0, 3.0);
+        // Peak = brightness / (PI * 2*sigma^2), same as render.ts norm.
+        vPeak = brightness / (3.14159265 * 2.0 * sigmaPx * sigmaPx);
+        // Sigma in sprite UV coords — use clamped size so kernel matches sprite.
+        float actualSizePx = clamp(sizePx, 1.0, 128.0);
+        vSigmaUv = sigmaPx / actualSizePx;
+      } else {
+        // Individual: matches render.ts kernel exp(-4*(r/rPx)^2).
+        float rPx = clamp(sqrt(brightness) * 4.0, 1.0, 8.0);
+        sizePx = 2.0 * rPx + 1.0;
+        vPeak = brightness;
+        float actualSizePx = clamp(sizePx, 1.0, 128.0);
+        // Gaussian equivalent: exp(-r^2/(2*sigma^2)) = exp(-4*(r/rPx)^2)
+        // => sigma_uv = rPx / (actualSizePx * sqrt(8))
+        vSigmaUv = rPx / (actualSizePx * sqrt(8.0));
+      }
+      gl_PointSize = clamp(sizePx, 1.0, 128.0);
     }
   `,
   frag: `
     precision highp float;
 
     varying vec3 vColor;
-    varying float vBrightness;
+    varying float vPeak;
+    varying float vSigmaUv;
 
     void main() {
-      float r = length(gl_PointCoord - 0.5);
-      float glow = exp(-r * r / 0.025);
-      float alpha = glow * min(vBrightness, 1.0);
-      if (alpha < 0.002) discard;
-      gl_FragColor = vec4(vColor * vBrightness * glow, alpha);
+      vec2 d = gl_PointCoord - 0.5;
+      float r2 = dot(d, d);
+      float val = vPeak * exp(-r2 / (2.0 * vSigmaUv * vSigmaUv));
+      if (val < 1e-7) discard;
+      // Reinhard tone-map + gamma, matching render.ts: pow(v/(1+v), 1/2.2)
+      vec3 linear = vColor * val;
+      gl_FragColor = vec4(pow(linear / (1.0 + linear), vec3(1.0 / 2.2)), 1.0);
     }
   `,
   attributes: {
     position:   { buffer: positionBuffer,   size: 3 },
     luminosity: { buffer: luminosityBuffer, size: 1 },
     bpRp:       { buffer: bpRpBuffer,       size: 1 },
+    radius:     { buffer: radiusBuffer,     size: 1 },
   },
   uniforms: {
-    projection:     () => projectionMatrix(currentFrustum),
-    view:           () => viewMatrix(currentFrustum),
-    cameraPosition: () => camera.position,
-    exposure:       () => exposure,
+    projection:      () => projectionMatrix(currentFrustum),
+    view:            () => viewMatrix(currentFrustum),
+    cameraPosition:  () => camera.position,
+    exposure:        () => exposure,
+    pixelsPerRadian: () => canvas.height / Math.max(currentFrustum.fovy, 1e-6),
   },
   primitive: "points",
   count: () => scene.count,
