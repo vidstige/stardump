@@ -1,0 +1,184 @@
+"use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var https = __toESM(require("https"));
+var http = __toESM(require("http"));
+var fs = __toESM(require("fs"));
+const args = process.argv.slice(2);
+function getArg(name, def) {
+  const i = args.indexOf("--" + name);
+  if (i !== -1) return args[i + 1];
+  if (def !== void 0) return def;
+  throw new Error(`missing --${name}`);
+}
+function getArgNum(name, def) {
+  const i = args.indexOf("--" + name);
+  if (i !== -1) return parseFloat(args[i + 1]);
+  if (def !== void 0) return def;
+  throw new Error(`missing --${name}`);
+}
+const API_ROOT = getArg("url");
+const DATASET = getArg("dataset");
+const eyeStr = getArg("eye", "0,0,0").split(",").map(Number);
+const dirStr = getArg("dir", "0,0,-1").split(",").map(Number);
+const upStr = getArg("up", "0,1,0").split(",").map(Number);
+const FOV_DEG = getArgNum("fov", 60);
+const FAR = getArgNum("far", 5e3);
+const NEAR = getArgNum("near", 0.1);
+const WIDTH = getArgNum("width", 1920);
+const HEIGHT = getArgNum("height", 1080);
+const EXPOSURE = getArgNum("exposure", 1e-3);
+const OUT = getArg("output", "stars.ppm");
+function normalize(v) {
+  const l = Math.hypot(...v) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+function cross(a, b) {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function dot(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+const forward = normalize(dirStr);
+const right = normalize(cross(forward, upStr));
+const up = cross(right, forward);
+const fovy = FOV_DEG * Math.PI / 180;
+const aspect = WIDTH / HEIGHT;
+const tanH = Math.tan(fovy * 0.5);
+function matToQuat(r, u, f) {
+  const m = [r[0], u[0], -f[0], r[1], u[1], -f[1], r[2], u[2], -f[2]];
+  const trace = m[0] + m[4] + m[8];
+  if (trace > 0) {
+    const s = 0.5 / Math.sqrt(trace + 1);
+    return [(m[7] - m[5]) * s, (m[2] - m[6]) * s, (m[3] - m[1]) * s, 0.25 / s];
+  }
+  return [0, 0, 0, 1];
+}
+const [qx, qy, qz, qw] = matToQuat(right, up, forward);
+function fetchBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith("https") ? https : http;
+    lib.get(url, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+async function fetchLodUnits() {
+  const params = new URLSearchParams({
+    x: String(eyeStr[0]),
+    y: String(eyeStr[1]),
+    z: String(eyeStr[2]),
+    qx: String(qx),
+    qy: String(qy),
+    qz: String(qz),
+    qw: String(qw),
+    near: String(NEAR),
+    far: String(FAR),
+    fovy: String(fovy),
+    aspect: String(aspect),
+    width: String(WIDTH),
+    height: String(HEIGHT),
+    limit: "20000"
+  });
+  const url = `${API_ROOT}/query/${DATASET}/lod-frustum?${params}`;
+  console.log("Querying:", url);
+  const buf = await fetchBuffer(url);
+  const count = buf.readUInt32LE(0);
+  const units = [];
+  for (let i = 0; i < count; i++) {
+    const base = 4 + i * 20;
+    units.push({ x: buf.readFloatLE(base), y: buf.readFloatLE(base + 4), z: buf.readFloatLE(base + 8), lum: buf.readFloatLE(base + 12), bprp: buf.readFloatLE(base + 16) });
+  }
+  return units;
+}
+function project(px, py, pz) {
+  const rx = px - eyeStr[0], ry = py - eyeStr[1], rz = pz - eyeStr[2];
+  const depth = dot([rx, ry, rz], forward);
+  if (depth <= 0) return null;
+  const h = dot([rx, ry, rz], right);
+  const v = dot([rx, ry, rz], up);
+  const sx = (h / (depth * tanH * aspect) * 0.5 + 0.5) * WIDTH;
+  const sy = (1 - (v / (depth * tanH) * 0.5 + 0.5)) * HEIGHT;
+  return [sx, sy, depth];
+}
+function bprpToColor(bprp) {
+  if (!isFinite(bprp)) return [1, 1, 1];
+  const t = Math.max(0, Math.min(1, (bprp + 0.5) / 3.5));
+  const lerp = (a, b, t2) => [a[0] + (b[0] - a[0]) * t2, a[1] + (b[1] - a[1]) * t2, a[2] + (b[2] - a[2]) * t2];
+  if (t < 0.33) return lerp([0.6, 0.7, 1], [1, 0.95, 0.9], t / 0.33);
+  if (t < 0.66) return lerp([1, 0.95, 0.9], [1, 0.85, 0.4], (t - 0.33) / 0.33);
+  return lerp([1, 0.85, 0.4], [1, 0.3, 0.1], (t - 0.66) / 0.34);
+}
+async function main() {
+  const units = await fetchLodUnits();
+  console.log(`Got ${units.length} LOD units`);
+  if (units.length > 0) {
+    const lums = units.map((u) => u.lum);
+    console.log(`Lum range: ${Math.min(...lums).toExponential(2)} \u2013 ${Math.max(...lums).toExponential(2)}`);
+  }
+  const hdr = new Float32Array(WIDTH * HEIGHT * 3);
+  for (const u of units) {
+    const proj = project(u.x, u.y, u.z);
+    if (!proj) continue;
+    const [sx, sy, dist] = proj;
+    const flux = u.lum / Math.max(dist * dist, 0.01);
+    const brightness = flux * EXPOSURE;
+    if (brightness < 1e-7) continue;
+    const [cr, cg, cb] = bprpToColor(u.bprp);
+    const rPx = Math.min(Math.max(Math.sqrt(brightness) * 8, 1), 64);
+    const ir = Math.ceil(rPx);
+    for (let dy = -ir; dy <= ir; dy++) {
+      for (let dx = -ir; dx <= ir; dx++) {
+        const xi = Math.round(sx) + dx, yi = Math.round(sy) + dy;
+        if (xi < 0 || xi >= WIDTH || yi < 0 || yi >= HEIGHT) continue;
+        const nr = Math.sqrt(dx * dx + dy * dy) / rPx;
+        const glow = Math.exp(-nr * nr * 4);
+        const val = brightness * glow;
+        const idx = (yi * WIDTH + xi) * 3;
+        hdr[idx] += cr * val;
+        hdr[idx + 1] += cg * val;
+        hdr[idx + 2] += cb * val;
+      }
+    }
+  }
+  const header = `P6
+${WIDTH} ${HEIGHT}
+255
+`;
+  const pixels = Buffer.allocUnsafe(WIDTH * HEIGHT * 3);
+  const tm = (v) => Math.min(255, Math.round(255 * Math.pow(v / (1 + v), 1 / 2.2)));
+  for (let i = 0; i < WIDTH * HEIGHT; i++) {
+    pixels[i * 3] = tm(hdr[i * 3]);
+    pixels[i * 3 + 1] = tm(hdr[i * 3 + 1]);
+    pixels[i * 3 + 2] = tm(hdr[i * 3 + 2]);
+  }
+  fs.writeFileSync(OUT, Buffer.concat([Buffer.from(header), pixels]));
+  console.log(`Saved ${OUT}  (open with: open ${OUT})`);
+}
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
