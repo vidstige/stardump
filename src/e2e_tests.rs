@@ -399,11 +399,11 @@ async fn lod_frustum_returns_binary_units() {
     assert!(bytes.len() >= 4);
     let unit_count = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
     assert!(unit_count > 0);
-    assert_eq!(bytes.len() as u32, 4 + unit_count * 20);
+    assert_eq!(bytes.len() as u32, 4 + unit_count * 24);
 
     // All units must have positive luminosity
     for i in 0..unit_count as usize {
-        let lum = f32::from_le_bytes(bytes[4 + i * 20 + 12..4 + i * 20 + 16].try_into().unwrap());
+        let lum = f32::from_le_bytes(bytes[4 + i * 24 + 12..4 + i * 24 + 16].try_into().unwrap());
         assert!(lum > 0.0, "unit {i} has non-positive luminosity: {lum}");
     }
 }
@@ -506,7 +506,7 @@ async fn lod_frustum_covers_wide_frustum_without_clustering() {
     let mut pos_z = 0;
     let mut neg_z = 0;
     for i in 0..unit_count {
-        let off = 4 + i * 20;
+        let off = 4 + i * 24;
         let z = f32::from_le_bytes(bytes[off + 8..off + 12].try_into().unwrap());
         if z > 0.0 {
             pos_z += 1;

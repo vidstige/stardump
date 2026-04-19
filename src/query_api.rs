@@ -280,6 +280,9 @@ struct LodUnit {
     position: Vec3,
     luminosity: f32,
     bp_rp: f32,
+    // Physical half-extent (parsecs) over which to spread this unit's flux.
+    // 0.0 for individual stars; bounds half-extent for aggregates.
+    radius: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -307,7 +310,7 @@ impl PartialOrd for Candidate {
 }
 
 enum CutEntry {
-    Aggregate { node_index: u32 },
+    Aggregate { node_index: u32, bounds: Bounds3 },
     ExpandLeaf { node_index: u32, bounds: Bounds3, max_points: usize },
 }
 
@@ -367,7 +370,7 @@ fn build_lod_cut(
                 });
             } else if centroid_in {
                 // Full expansion too expensive but centroid on-screen — emit aggregate.
-                output.push(CutEntry::Aggregate { node_index: cand.node_index });
+                output.push(CutEntry::Aggregate { node_index: cand.node_index, bounds: cand.bounds });
             } else {
                 // Off-screen centroid: partial expansion up to remaining budget.
                 let max_points = budget_remaining;
@@ -409,7 +412,7 @@ fn build_lod_cut(
                 heap.push(c);
             }
         } else if centroid_in {
-            output.push(CutEntry::Aggregate { node_index: cand.node_index });
+            output.push(CutEntry::Aggregate { node_index: cand.node_index, bounds: cand.bounds });
         } else {
             // Off-screen aggregate with no affordable refinement — drop.
             unit_count -= 1;
@@ -428,12 +431,13 @@ fn materialize_cut(
     let mut units = Vec::with_capacity(cut.len());
     for entry in cut {
         match *entry {
-            CutEntry::Aggregate { node_index } => {
+            CutEntry::Aggregate { node_index, bounds } => {
                 let node = index.nodes[node_index as usize];
                 units.push(LodUnit {
                     position: node.centroid,
                     luminosity: node.total_luminosity,
                     bp_rp: node.mean_bp_rp,
+                    radius: bounds.cube_size() * 0.5,
                 });
             }
             CutEntry::ExpandLeaf { node_index, bounds, max_points } => {
@@ -449,6 +453,7 @@ fn materialize_cut(
                             position: pos,
                             luminosity: point.luminosity,
                             bp_rp: point.bp_rp,
+                            radius: 0.0,
                         });
                         emitted += 1;
                     }
@@ -460,7 +465,7 @@ fn materialize_cut(
 }
 
 fn encode_lod_binary(units: &[LodUnit]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(4 + units.len() * 20);
+    let mut buf = Vec::with_capacity(4 + units.len() * 24);
     buf.extend_from_slice(&(units.len() as u32).to_le_bytes());
     for unit in units {
         buf.extend_from_slice(&unit.position.x.to_le_bytes());
@@ -468,6 +473,7 @@ fn encode_lod_binary(units: &[LodUnit]) -> Vec<u8> {
         buf.extend_from_slice(&unit.position.z.to_le_bytes());
         buf.extend_from_slice(&unit.luminosity.to_le_bytes());
         buf.extend_from_slice(&unit.bp_rp.to_le_bytes());
+        buf.extend_from_slice(&unit.radius.to_le_bytes());
     }
     buf
 }
