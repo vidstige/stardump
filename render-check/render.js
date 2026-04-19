@@ -21,10 +21,12 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+
+// render.ts
 var https = __toESM(require("https"));
 var http = __toESM(require("http"));
 var fs = __toESM(require("fs"));
-const args = process.argv.slice(2);
+var args = process.argv.slice(2);
 function getArg(name, def) {
   const i = args.indexOf("--" + name);
   if (i !== -1) return args[i + 1];
@@ -37,18 +39,18 @@ function getArgNum(name, def) {
   if (def !== void 0) return def;
   throw new Error(`missing --${name}`);
 }
-const API_ROOT = getArg("url");
-const DATASET = getArg("dataset");
-const eyeStr = getArg("eye", "0,0,0").split(",").map(Number);
-const dirStr = getArg("dir", "0,0,-1").split(",").map(Number);
-const upStr = getArg("up", "0,1,0").split(",").map(Number);
-const FOV_DEG = getArgNum("fov", 60);
-const FAR = getArgNum("far", 5e3);
-const NEAR = getArgNum("near", 0.1);
-const WIDTH = getArgNum("width", 1920);
-const HEIGHT = getArgNum("height", 1080);
-const EXPOSURE = getArgNum("exposure", 1e-3);
-const OUT = getArg("output", "stars.ppm");
+var API_ROOT = getArg("url");
+var DATASET = getArg("dataset");
+var eyeStr = getArg("eye", "0,0,0").split(",").map(Number);
+var dirStr = getArg("dir", "0,0,-1").split(",").map(Number);
+var upStr = getArg("up", "0,1,0").split(",").map(Number);
+var FOV_DEG = getArgNum("fov", 60);
+var FAR = getArgNum("far", 5e3);
+var NEAR = getArgNum("near", 0.1);
+var WIDTH = getArgNum("width", 1920);
+var HEIGHT = getArgNum("height", 1080);
+var EXPOSURE = getArgNum("exposure", 1e-3);
+var OUT = getArg("output", "stars.ppm");
 function normalize(v) {
   const l = Math.hypot(...v) || 1;
   return [v[0] / l, v[1] / l, v[2] / l];
@@ -59,12 +61,12 @@ function cross(a, b) {
 function dot(a, b) {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
-const forward = normalize(dirStr);
-const right = normalize(cross(forward, upStr));
-const up = cross(right, forward);
-const fovy = FOV_DEG * Math.PI / 180;
-const aspect = WIDTH / HEIGHT;
-const tanH = Math.tan(fovy * 0.5);
+var forward = normalize(dirStr);
+var right = normalize(cross(forward, upStr));
+var up = cross(right, forward);
+var fovy = FOV_DEG * Math.PI / 180;
+var aspect = WIDTH / HEIGHT;
+var tanH = Math.tan(fovy * 0.5);
 function matToQuat(r, u, f) {
   const m = [r[0], u[0], -f[0], r[1], u[1], -f[1], r[2], u[2], -f[2]];
   const trace = m[0] + m[4] + m[8];
@@ -74,7 +76,7 @@ function matToQuat(r, u, f) {
   }
   return [0, 0, 0, 1];
 }
-const [qx, qy, qz, qw] = matToQuat(right, up, forward);
+var [qx, qy, qz, qw] = matToQuat(right, up, forward);
 function fetchBuffer(url) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? https : http;
@@ -109,8 +111,15 @@ async function fetchLodUnits() {
   const count = buf.readUInt32LE(0);
   const units = [];
   for (let i = 0; i < count; i++) {
-    const base = 4 + i * 20;
-    units.push({ x: buf.readFloatLE(base), y: buf.readFloatLE(base + 4), z: buf.readFloatLE(base + 8), lum: buf.readFloatLE(base + 12), bprp: buf.readFloatLE(base + 16) });
+    const base = 4 + i * 24;
+    units.push({
+      x: buf.readFloatLE(base),
+      y: buf.readFloatLE(base + 4),
+      z: buf.readFloatLE(base + 8),
+      lum: buf.readFloatLE(base + 12),
+      bprp: buf.readFloatLE(base + 16),
+      radius: buf.readFloatLE(base + 20)
+    });
   }
   return units;
 }
@@ -140,6 +149,7 @@ async function main() {
     console.log(`Lum range: ${Math.min(...lums).toExponential(2)} \u2013 ${Math.max(...lums).toExponential(2)}`);
   }
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
+  const pixelsPerRadian = HEIGHT / fovy;
   for (const u of units) {
     const proj = project(u.x, u.y, u.z);
     if (!proj) continue;
@@ -148,19 +158,37 @@ async function main() {
     const brightness = flux * EXPOSURE;
     if (brightness < 1e-7) continue;
     const [cr, cg, cb] = bprpToColor(u.bprp);
-    const rPx = Math.min(Math.max(Math.sqrt(brightness) * 8, 1), 64);
-    const ir = Math.ceil(rPx);
-    for (let dy = -ir; dy <= ir; dy++) {
-      for (let dx = -ir; dx <= ir; dx++) {
-        const xi = Math.round(sx) + dx, yi = Math.round(sy) + dy;
-        if (xi < 0 || xi >= WIDTH || yi < 0 || yi >= HEIGHT) continue;
-        const nr = Math.sqrt(dx * dx + dy * dy) / rPx;
-        const glow = Math.exp(-nr * nr * 4);
-        const val = brightness * glow;
-        const idx = (yi * WIDTH + xi) * 3;
-        hdr[idx] += cr * val;
-        hdr[idx + 1] += cg * val;
-        hdr[idx + 2] += cb * val;
+    if (u.radius > 0) {
+      const footprintPx = Math.max(u.radius / dist * pixelsPerRadian, 1);
+      const sigma = footprintPx * 0.5;
+      const twoSigmaSq = 2 * sigma * sigma;
+      const norm = brightness / (Math.PI * twoSigmaSq);
+      const ir = Math.ceil(footprintPx * 1.5);
+      for (let dy = -ir; dy <= ir; dy++) {
+        for (let dx = -ir; dx <= ir; dx++) {
+          const xi = Math.round(sx) + dx, yi = Math.round(sy) + dy;
+          if (xi < 0 || xi >= WIDTH || yi < 0 || yi >= HEIGHT) continue;
+          const val = norm * Math.exp(-(dx * dx + dy * dy) / twoSigmaSq);
+          const idx = (yi * WIDTH + xi) * 3;
+          hdr[idx] += cr * val;
+          hdr[idx + 1] += cg * val;
+          hdr[idx + 2] += cb * val;
+        }
+      }
+    } else {
+      const rPx = Math.min(Math.max(Math.sqrt(brightness) * 4, 1), 8);
+      const ir = Math.ceil(rPx);
+      for (let dy = -ir; dy <= ir; dy++) {
+        for (let dx = -ir; dx <= ir; dx++) {
+          const xi = Math.round(sx) + dx, yi = Math.round(sy) + dy;
+          if (xi < 0 || xi >= WIDTH || yi < 0 || yi >= HEIGHT) continue;
+          const nr = Math.sqrt(dx * dx + dy * dy) / rPx;
+          const val = brightness * Math.exp(-nr * nr * 4);
+          const idx = (yi * WIDTH + xi) * 3;
+          hdr[idx] += cr * val;
+          hdr[idx + 1] += cg * val;
+          hdr[idx + 2] += cb * val;
+        }
       }
     }
   }

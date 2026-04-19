@@ -68,7 +68,7 @@ function fetchBuffer(url: string): Promise<Buffer> {
   });
 }
 
-type LodUnit = { x: number; y: number; z: number; lum: number; bprp: number };
+type LodUnit = { x: number; y: number; z: number; lum: number; bprp: number; radius: number };
 
 async function fetchLodUnits(): Promise<LodUnit[]> {
   const params = new URLSearchParams({
@@ -85,8 +85,15 @@ async function fetchLodUnits(): Promise<LodUnit[]> {
   const count = buf.readUInt32LE(0);
   const units: LodUnit[] = [];
   for (let i = 0; i < count; i++) {
-    const base = 4 + i * 20;
-    units.push({ x: buf.readFloatLE(base), y: buf.readFloatLE(base+4), z: buf.readFloatLE(base+8), lum: buf.readFloatLE(base+12), bprp: buf.readFloatLE(base+16) });
+    const base = 4 + i * 24;
+    units.push({
+      x: buf.readFloatLE(base),
+      y: buf.readFloatLE(base+4),
+      z: buf.readFloatLE(base+8),
+      lum: buf.readFloatLE(base+12),
+      bprp: buf.readFloatLE(base+16),
+      radius: buf.readFloatLE(base+20),
+    });
   }
   return units;
 }
@@ -121,6 +128,7 @@ async function main() {
   }
 
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
+  const pixelsPerRadian = HEIGHT / fovy;
 
   for (const u of units) {
     const proj = project(u.x, u.y, u.z);
@@ -130,17 +138,37 @@ async function main() {
     const brightness = flux * EXPOSURE;
     if (brightness < 1e-7) continue;
     const [cr,cg,cb] = bprpToColor(u.bprp);
-    const rPx = Math.min(Math.max(Math.sqrt(brightness)*8, 1), 64);
-    const ir = Math.ceil(rPx);
-    for (let dy=-ir; dy<=ir; dy++) {
-      for (let dx=-ir; dx<=ir; dx++) {
-        const xi=Math.round(sx)+dx, yi=Math.round(sy)+dy;
-        if (xi<0||xi>=WIDTH||yi<0||yi>=HEIGHT) continue;
-        const nr = Math.sqrt(dx*dx+dy*dy)/rPx;
-        const glow = Math.exp(-nr*nr*4);
-        const val = brightness*glow;
-        const idx = (yi*WIDTH+xi)*3;
-        hdr[idx]+=cr*val; hdr[idx+1]+=cg*val; hdr[idx+2]+=cb*val;
+
+    if (u.radius > 0) {
+      // Aggregate: spread total flux over the angular footprint (flux-conserving).
+      // Per-pixel brightness is small, producing a faint diffuse glow instead of a point.
+      const footprintPx = Math.max((u.radius / dist) * pixelsPerRadian, 1);
+      const sigma = footprintPx * 0.5;
+      const twoSigmaSq = 2 * sigma * sigma;
+      const norm = brightness / (Math.PI * twoSigmaSq);
+      const ir = Math.ceil(footprintPx * 1.5);
+      for (let dy=-ir; dy<=ir; dy++) {
+        for (let dx=-ir; dx<=ir; dx++) {
+          const xi=Math.round(sx)+dx, yi=Math.round(sy)+dy;
+          if (xi<0||xi>=WIDTH||yi<0||yi>=HEIGHT) continue;
+          const val = norm * Math.exp(-(dx*dx+dy*dy)/twoSigmaSq);
+          const idx = (yi*WIDTH+xi)*3;
+          hdr[idx]+=cr*val; hdr[idx+1]+=cg*val; hdr[idx+2]+=cb*val;
+        }
+      }
+    } else {
+      // Individual star: small Gaussian whose peak scales with brightness.
+      const rPx = Math.min(Math.max(Math.sqrt(brightness)*4, 1), 8);
+      const ir = Math.ceil(rPx);
+      for (let dy=-ir; dy<=ir; dy++) {
+        for (let dx=-ir; dx<=ir; dx++) {
+          const xi=Math.round(sx)+dx, yi=Math.round(sy)+dy;
+          if (xi<0||xi>=WIDTH||yi<0||yi>=HEIGHT) continue;
+          const nr = Math.sqrt(dx*dx+dy*dy)/rPx;
+          const val = brightness * Math.exp(-nr*nr*4);
+          const idx = (yi*WIDTH+xi)*3;
+          hdr[idx]+=cr*val; hdr[idx+1]+=cg*val; hdr[idx+2]+=cb*val;
+        }
       }
     }
   }
