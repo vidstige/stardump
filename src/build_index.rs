@@ -1,15 +1,16 @@
 use std::array;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use crate::formats::{
-    CANONICAL_ROOT, CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME, PackedOctreeIndex,
-    PackedOctreeNode, PackedPoint, SourceMetadata, decode_canonical_rows, decode_source_metadata,
-    encode_packed_octree, encode_packed_points, quantize_point,
+    CANONICAL_ROOT, CanonicalRow, METADATA_FILENAME, OCTREE_INDEX_FILENAME,
+    PACKED_OCTREE_HEADER_SIZE, PackedOctreeIndex, PackedOctreeNode, PackedPoint, SourceMetadata,
+    compute_luminosity, decode_canonical_rows, decode_source_metadata, encode_packed_octree,
+    encode_packed_octree_node_table, encode_packed_points, quantize_point,
 };
 use crate::octree::{Bounds3, OctreeConfig};
 use crate::vec3::Vec3;
@@ -19,7 +20,7 @@ use crate::storage::{
     validate_packed_index_layout,
 };
 
-const TEMP_POINT_SIZE: u64 = 20;
+const TEMP_POINT_SIZE: u64 = 28;
 const TEMP_LEAF_ROOT: &str = ".tmp-leaves";
 
 pub const DEFAULT_DEPTH: u8 = 7;
@@ -48,6 +49,15 @@ pub struct BuildIndexResult {
 struct TempPoint {
     source_id: u64,
     position: Vec3,
+    bp_rp: f32,
+    luminosity: f32,
+}
+
+struct AggregateData {
+    total_luminosity: f32,
+    weighted_bp_rp_sum: f32,
+    weighted_pos: Vec3,
+    star_count: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +80,8 @@ fn temp_point_bytes(point: &TempPoint) -> [u8; TEMP_POINT_SIZE as usize] {
     bytes[8..12].copy_from_slice(&point.position.x.to_le_bytes());
     bytes[12..16].copy_from_slice(&point.position.y.to_le_bytes());
     bytes[16..20].copy_from_slice(&point.position.z.to_le_bytes());
+    bytes[20..24].copy_from_slice(&point.bp_rp.to_le_bytes());
+    bytes[24..28].copy_from_slice(&point.luminosity.to_le_bytes());
     bytes
 }
 
@@ -81,6 +93,80 @@ fn decode_temp_point(chunk: &[u8]) -> TempPoint {
             y: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
             z: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
         },
+        bp_rp: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+        luminosity: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+    }
+}
+
+fn compute_leaf_aggregate(points: &[TempPoint]) -> AggregateData {
+    let mut total_luminosity = 0_f32;
+    let mut weighted_bp_rp_sum = 0_f32;
+    let mut weighted_pos = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    for p in points {
+        total_luminosity += p.luminosity;
+        if !p.bp_rp.is_nan() {
+            weighted_bp_rp_sum += p.bp_rp * p.luminosity;
+        }
+        weighted_pos = weighted_pos + p.position * p.luminosity;
+    }
+    AggregateData {
+        total_luminosity,
+        weighted_bp_rp_sum,
+        weighted_pos,
+        star_count: points.len() as u32,
+    }
+}
+
+fn apply_aggregates_to_node(node: &mut PackedOctreeNode, agg: &AggregateData) {
+    node.total_luminosity = agg.total_luminosity;
+    node.mean_bp_rp = if agg.total_luminosity > 0.0 {
+        agg.weighted_bp_rp_sum / agg.total_luminosity
+    } else {
+        f32::NAN
+    };
+    node.centroid = if agg.total_luminosity > 0.0 {
+        agg.weighted_pos * (1.0 / agg.total_luminosity)
+    } else {
+        Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+    };
+    node.star_count = agg.star_count;
+}
+
+// Process nodes in reverse index order so children (higher indices) are
+// computed before their parents (lower indices).
+fn apply_aggregates_bottom_up(
+    nodes: &mut Vec<PackedOctreeNode>,
+    leaf_aggregates: &HashMap<u32, AggregateData>,
+) {
+    for i in (0..nodes.len()).rev() {
+        if nodes[i].child_mask == 0 {
+            if let Some(agg) = leaf_aggregates.get(&nodes[i].first) {
+                apply_aggregates_to_node(&mut nodes[i], agg);
+            }
+        } else {
+            let mut total_luminosity = 0_f32;
+            let mut weighted_bp_rp_sum = 0_f32;
+            let mut weighted_pos = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+            let mut star_count = 0_u32;
+            let mut child_flat_idx = nodes[i].first as usize;
+            for bit in 0..8_u8 {
+                if nodes[i].child_mask & (1 << bit) == 0 {
+                    continue;
+                }
+                let child = &nodes[child_flat_idx];
+                total_luminosity += child.total_luminosity;
+                if !child.mean_bp_rp.is_nan() {
+                    weighted_bp_rp_sum += child.mean_bp_rp * child.total_luminosity;
+                }
+                weighted_pos = weighted_pos + child.centroid * child.total_luminosity;
+                star_count += child.star_count;
+                child_flat_idx += 1;
+            }
+            apply_aggregates_to_node(
+                &mut nodes[i],
+                &AggregateData { total_luminosity, weighted_bp_rp_sum, weighted_pos, star_count },
+            );
+        }
     }
 }
 
@@ -165,12 +251,23 @@ fn insert_leaf(node: &mut TreeNode, depth: u8, morton: u32, point_start: u32, po
     current.point_count = point_count;
 }
 
+const ZERO_NODE: PackedOctreeNode = PackedOctreeNode {
+    child_mask: 0,
+    first: 0,
+    count: 0,
+    total_luminosity: 0.0,
+    mean_bp_rp: f32::NAN,
+    centroid: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+    star_count: 0,
+};
+
 fn flatten_tree_at(node: &TreeNode, index: usize, nodes: &mut Vec<PackedOctreeNode>) {
     if is_leaf(node) {
         nodes[index] = PackedOctreeNode {
             child_mask: 0,
             first: node.point_start,
             count: node.point_count,
+            ..ZERO_NODE
         };
         return;
     }
@@ -184,18 +281,10 @@ fn flatten_tree_at(node: &TreeNode, index: usize, nodes: &mut Vec<PackedOctreeNo
         };
         child_mask |= 1 << child;
         child_indices[child] = nodes.len();
-        nodes.push(PackedOctreeNode {
-            child_mask: 0,
-            first: 0,
-            count: 0,
-        });
+        nodes.push(ZERO_NODE);
     }
 
-    nodes[index] = PackedOctreeNode {
-        child_mask,
-        first: first_child,
-        count: 0,
-    };
+    nodes[index] = PackedOctreeNode { child_mask, first: first_child, count: 0, ..ZERO_NODE };
 
     for child in 0..8 {
         let Some(next) = node.children[child].as_ref() else {
@@ -206,11 +295,7 @@ fn flatten_tree_at(node: &TreeNode, index: usize, nodes: &mut Vec<PackedOctreeNo
 }
 
 fn flatten_tree(node: &TreeNode) -> Vec<PackedOctreeNode> {
-    let mut nodes = vec![PackedOctreeNode {
-        child_mask: 0,
-        first: 0,
-        count: 0,
-    }];
+    let mut nodes = vec![ZERO_NODE];
     flatten_tree_at(node, 0, &mut nodes);
     nodes
 }
@@ -259,9 +344,12 @@ fn points_for_canonical_part(
             continue;
         };
         rows_in_bounds += 1;
+        let luminosity = compute_luminosity(row.parallax, row.phot_g_mean_mag).unwrap_or(0.0);
         points_by_leaf.entry(morton).or_default().push(TempPoint {
             source_id: row.source_id,
             position,
+            bp_rp: row.bp_rp,
+            luminosity,
         });
     }
 
@@ -293,46 +381,57 @@ fn write_packed_index(
     half_extent_pc: f32,
     leaf_infos: &[LeafInfo],
 ) -> Result<PackedOctreeIndex> {
-    let nodes = build_octree_nodes(leaf_infos, octree.depth);
-    let point_count = leaf_infos
-        .iter()
-        .map(|leaf| leaf.point_count as u64)
-        .sum::<u64>();
-    let index = PackedOctreeIndex {
+    let mut nodes = build_octree_nodes(leaf_infos, octree.depth);
+    let point_count = leaf_infos.iter().map(|leaf| leaf.point_count as u64).sum::<u64>();
+    let index_header = PackedOctreeIndex {
         depth: octree.depth,
         half_extent_pc,
         point_count,
-        nodes,
+        nodes: nodes.clone(),
     };
 
     let output_path = output_root.join(OCTREE_INDEX_FILENAME);
-    let file = fs::File::create(&output_path)
+    let mut file = fs::File::create(&output_path)
         .with_context(|| format!("failed to create {}", output_path.display()))?;
-    let mut writer = BufWriter::new(file);
-    writer
-        .write_all(&encode_packed_octree(&index))
+
+    // Write header + placeholder node table (aggregate fields are zeroed).
+    file.write_all(&encode_packed_octree(&index_header))
         .with_context(|| format!("failed to write {}", output_path.display()))?;
 
+    // Write point data leaf by leaf; collect aggregate data keyed by point_start.
+    let mut leaf_aggregates: HashMap<u32, AggregateData> = HashMap::new();
     for leaf in leaf_infos {
         let temp_path = temp_leaf_path(output_root, leaf.morton);
         let mut points = read_temp_points(&temp_path)?;
+        // Delete the temp file immediately to free tmpfs space before writing output.
+        fs::remove_file(&temp_path)
+            .with_context(|| format!("failed to remove {}", temp_path.display()))?;
         points.sort_by_key(|point| point.source_id);
         let leaf_bounds = octree.bounds.leaf_bounds(octree.depth, leaf.morton);
+        leaf_aggregates.insert(leaf.point_start, compute_leaf_aggregate(&points));
         let packed = points
             .iter()
-            .map(|point| quantize_point(leaf_bounds, point.position, point.source_id))
+            .map(|p| quantize_point(leaf_bounds, p.position, p.source_id, p.bp_rp, p.luminosity))
             .collect::<Vec<PackedPoint>>();
-        writer
-            .write_all(&encode_packed_points(&packed))
+        file.write_all(&encode_packed_points(&packed))
             .with_context(|| format!("failed to write {}", output_path.display()))?;
     }
 
-    writer
-        .flush()
+    // Propagate aggregates bottom-up through the node tree.
+    apply_aggregates_bottom_up(&mut nodes, &leaf_aggregates);
+
+    // Seek back to the node table and rewrite it with aggregate data.
+    file.seek(SeekFrom::Start(PACKED_OCTREE_HEADER_SIZE as u64))
+        .with_context(|| format!("failed to seek {}", output_path.display()))?;
+    file.write_all(&encode_packed_octree_node_table(&nodes))
+        .with_context(|| format!("failed to rewrite node table in {}", output_path.display()))?;
+    file.flush()
         .with_context(|| format!("failed to flush {}", output_path.display()))?;
+
     fs::remove_dir_all(temp_leaf_root(output_root))
         .with_context(|| format!("failed to remove {}", temp_leaf_root(output_root).display()))?;
-    Ok(index)
+
+    Ok(PackedOctreeIndex { depth: octree.depth, half_extent_pc, point_count, nodes })
 }
 
 pub fn bounds_for_quality_threshold(minimum_quality: f32) -> Bounds3 {

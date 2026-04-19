@@ -12,13 +12,13 @@ pub const CANONICAL_ROOT: &str = "canonical";
 pub const CANONICAL_ROW_SIZE: u64 = 32;
 pub const METADATA_FILENAME: &str = "metadata.txt";
 pub const OCTREE_INDEX_FILENAME: &str = "index.octree";
-pub const PACKED_OCTREE_NODE_SIZE: u64 = 12;
-pub const PACKED_POINT_SIZE: u64 = 14;
+pub const PACKED_OCTREE_NODE_SIZE: u64 = 36;
+pub const PACKED_POINT_SIZE: u64 = 24;
 
 const METADATA_MAGIC: &str = "STARDUMP-METADATA 1";
 const PACKED_OCTREE_MAGIC: [u8; 8] = *b"OCTPACK\0";
-const PACKED_OCTREE_VERSION: u16 = 1;
-const PACKED_OCTREE_HEADER_SIZE: usize = 28;
+const PACKED_OCTREE_VERSION: u16 = 2;
+pub const PACKED_OCTREE_HEADER_SIZE: usize = 28;
 const QUANTIZATION_SCALE: f32 = 65_535.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +57,8 @@ pub struct PackedPoint {
     pub x_local: u16,
     pub y_local: u16,
     pub z_local: u16,
+    pub bp_rp: f32,      // NaN if missing
+    pub luminosity: f32, // 0.0 if no valid photometry
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -64,6 +66,10 @@ pub struct PackedOctreeNode {
     pub child_mask: u8,
     pub first: u32,
     pub count: u32,
+    pub total_luminosity: f32,
+    pub mean_bp_rp: f32, // luminosity-weighted; NaN if no color data
+    pub centroid: Vec3,  // luminosity-weighted position (parsecs)
+    pub star_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,14 +98,24 @@ fn packed_point_bytes(point: &PackedPoint) -> [u8; PACKED_POINT_SIZE as usize] {
     bytes[8..10].copy_from_slice(&point.x_local.to_le_bytes());
     bytes[10..12].copy_from_slice(&point.y_local.to_le_bytes());
     bytes[12..14].copy_from_slice(&point.z_local.to_le_bytes());
+    // bytes 14..16: padding
+    bytes[16..20].copy_from_slice(&point.bp_rp.to_le_bytes());
+    bytes[20..24].copy_from_slice(&point.luminosity.to_le_bytes());
     bytes
 }
 
 fn packed_octree_node_bytes(node: &PackedOctreeNode) -> [u8; PACKED_OCTREE_NODE_SIZE as usize] {
     let mut bytes = [0_u8; PACKED_OCTREE_NODE_SIZE as usize];
     bytes[0] = node.child_mask;
+    // bytes 1..4: padding
     bytes[4..8].copy_from_slice(&node.first.to_le_bytes());
     bytes[8..12].copy_from_slice(&node.count.to_le_bytes());
+    bytes[12..16].copy_from_slice(&node.total_luminosity.to_le_bytes());
+    bytes[16..20].copy_from_slice(&node.mean_bp_rp.to_le_bytes());
+    bytes[20..24].copy_from_slice(&node.centroid.x.to_le_bytes());
+    bytes[24..28].copy_from_slice(&node.centroid.y.to_le_bytes());
+    bytes[28..32].copy_from_slice(&node.centroid.z.to_le_bytes());
+    bytes[32..36].copy_from_slice(&node.star_count.to_le_bytes());
     bytes
 }
 
@@ -225,6 +241,8 @@ fn decode_packed_point(chunk: &[u8]) -> PackedPoint {
         x_local: u16::from_le_bytes(chunk[8..10].try_into().unwrap()),
         y_local: u16::from_le_bytes(chunk[10..12].try_into().unwrap()),
         z_local: u16::from_le_bytes(chunk[12..14].try_into().unwrap()),
+        bp_rp: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        luminosity: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
     }
 }
 
@@ -233,6 +251,14 @@ fn decode_packed_octree_node(chunk: &[u8]) -> PackedOctreeNode {
         child_mask: chunk[0],
         first: u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
         count: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+        total_luminosity: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+        mean_bp_rp: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
+        centroid: Vec3 {
+            x: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+            y: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
+            z: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
+        },
+        star_count: u32::from_le_bytes(chunk[32..36].try_into().unwrap()),
     }
 }
 
@@ -309,13 +335,31 @@ impl PackedOctreeIndex {
     }
 }
 
-pub fn quantize_point(bounds: Bounds3, point: Vec3, source_id: u64) -> PackedPoint {
+pub fn compute_luminosity(parallax_mas: f32, phot_g_mean_mag: f32) -> Option<f32> {
+    if !parallax_mas.is_finite() || parallax_mas <= 0.0 {
+        return None;
+    }
+    let distance_pc = 1000.0 / parallax_mas;
+    let m_g = phot_g_mean_mag - 5.0 * (distance_pc / 10.0).log10();
+    let lum = 10_f32.powf((-m_g + 4.67) / 2.5);
+    if lum.is_finite() && lum > 0.0 { Some(lum) } else { None }
+}
+
+pub fn quantize_point(
+    bounds: Bounds3,
+    point: Vec3,
+    source_id: u64,
+    bp_rp: f32,
+    luminosity: f32,
+) -> PackedPoint {
     let size = bounds.max.x - bounds.min.x;
     PackedPoint {
         source_id,
         x_local: quantize_axis(point.x, bounds.min.x, size),
         y_local: quantize_axis(point.y, bounds.min.y, size),
         z_local: quantize_axis(point.z, bounds.min.z, size),
+        bp_rp,
+        luminosity,
     }
 }
 
@@ -396,6 +440,14 @@ rows_written: {}\n",
         metadata.counts.rows_written,
     )
     .into_bytes()
+}
+
+pub fn encode_packed_octree_node_table(nodes: &[PackedOctreeNode]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(nodes.len() * PACKED_OCTREE_NODE_SIZE as usize);
+    for node in nodes {
+        bytes.extend_from_slice(&packed_octree_node_bytes(node));
+    }
+    bytes
 }
 
 pub fn encode_packed_octree(index: &PackedOctreeIndex) -> Vec<u8> {
@@ -586,6 +638,7 @@ mod tests {
 
     #[test]
     fn packed_octree_round_trip() {
+        let centroid = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
         let index = PackedOctreeIndex {
             depth: 7,
             half_extent_pc: 4_000.0,
@@ -595,42 +648,44 @@ mod tests {
                     child_mask: 0b0000_0011,
                     first: 1,
                     count: 0,
+                    total_luminosity: 10.0,
+                    mean_bp_rp: 1.5,
+                    centroid,
+                    star_count: 3,
                 },
                 PackedOctreeNode {
                     child_mask: 0,
                     first: 0,
                     count: 2,
+                    total_luminosity: 7.0,
+                    mean_bp_rp: 1.2,
+                    centroid,
+                    star_count: 2,
                 },
                 PackedOctreeNode {
                     child_mask: 0,
                     first: 2,
                     count: 1,
+                    total_luminosity: 3.0,
+                    mean_bp_rp: f32::NAN,
+                    centroid,
+                    star_count: 1,
                 },
             ],
         };
         let mut bytes = encode_packed_octree(&index);
         bytes.extend_from_slice(&encode_packed_points(&[
-            PackedPoint {
-                source_id: 1,
-                x_local: 2,
-                y_local: 3,
-                z_local: 4,
-            },
-            PackedPoint {
-                source_id: 5,
-                x_local: 6,
-                y_local: 7,
-                z_local: 8,
-            },
-            PackedPoint {
-                source_id: 9,
-                x_local: 10,
-                y_local: 11,
-                z_local: 12,
-            },
+            PackedPoint { source_id: 1, x_local: 2, y_local: 3, z_local: 4, bp_rp: 1.2, luminosity: 3.0 },
+            PackedPoint { source_id: 5, x_local: 6, y_local: 7, z_local: 8, bp_rp: f32::NAN, luminosity: 4.0 },
+            PackedPoint { source_id: 9, x_local: 10, y_local: 11, z_local: 12, bp_rp: 0.5, luminosity: 1.5 },
         ]));
 
-        assert_eq!(decode_packed_octree(&bytes).unwrap(), index);
+        let decoded = decode_packed_octree(&bytes).unwrap();
+        assert_eq!(decoded.depth, index.depth);
+        assert_eq!(decoded.nodes[0].child_mask, index.nodes[0].child_mask);
+        assert_eq!(decoded.nodes[0].total_luminosity, 10.0);
+        assert_eq!(decoded.nodes[0].star_count, 3);
+        assert!(decoded.nodes[2].mean_bp_rp.is_nan());
     }
 
     #[test]
@@ -640,7 +695,7 @@ mod tests {
             max: Vec3 { x: 62.5, y: 62.5, z: 62.5 },
         };
         let original = Vec3 { x: 12.345, y: 23.456, z: 34.567 };
-        let quantized = quantize_point(bounds, original, 7);
+        let quantized = quantize_point(bounds, original, 7, 1.5, 2.0);
         let round_trip = dequantize_point(bounds, &quantized);
         let step = (bounds.max.x - bounds.min.x) / QUANTIZATION_SCALE;
 

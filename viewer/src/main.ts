@@ -37,13 +37,6 @@ declare global {
   }
 }
 
-type CsvStar = {
-  x: number;
-  y: number;
-  z: number;
-  sourceId: string;
-};
-
 type SceneState = {
   count: number;
 };
@@ -52,9 +45,8 @@ const searchParams = new URLSearchParams(window.location.search);
 const API_ROOT = searchParams.get("api")
   ?? "https://star-dump-query-api-494247280614.europe-west1.run.app";
 const DATASET_OVERRIDE = searchParams.get("dataset");
-const QUERY_LIMIT = 2000;
+const QUERY_LIMIT = 20000;
 const QUERY_INTERVAL_MS = 250;
-let starPoolMaxSize = 20000;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -111,11 +103,7 @@ function projectionMatrix(frustum: FrustumParams): Mat4 {
   ]);
 }
 
-function lookAt(
-  eye: Vec3,
-  center: Vec3,
-  up: Vec3,
-): Mat4 {
+function lookAt(eye: Vec3, center: Vec3, up: Vec3): Mat4 {
   const z = normalize(subtract(eye, center));
   const x = normalize(cross(up, z));
   const y = cross(z, x);
@@ -171,34 +159,6 @@ function viewMatrix(frustum: QueryFrustum): Mat4 {
   return lookAt(position, add(position, forward), up);
 }
 
-
-
-
-function parseStars(csvText: string): CsvStar[] {
-  const lines = csvText.trim().split("\n");
-  if (lines.length <= 1) {
-    return [];
-  }
-
-  const stars: CsvStar[] = [];
-  for (const line of lines.slice(1)) {
-    if (!line) {
-      continue;
-    }
-    const [x, y, z, sourceId] = line.split(",");
-    if (!x || !y || !z || !sourceId) {
-      continue;
-    }
-    stars.push({
-      x: Number(x),
-      y: Number(y),
-      z: Number(z),
-      sourceId,
-    });
-  }
-  return stars;
-}
-
 function frustumKey(frustum: QueryFrustum): string {
   return [
     frustum.x.toFixed(2),
@@ -211,7 +171,7 @@ function frustumKey(frustum: QueryFrustum): string {
   ].join(":");
 }
 
-function frustumUrl(datasetName: string, frustum: QueryFrustum): string {
+function lodFrustumUrl(datasetName: string, frustum: QueryFrustum, width: number, height: number): string {
   const params = new URLSearchParams({
     x: frustum.x.toString(),
     y: frustum.y.toString(),
@@ -224,9 +184,11 @@ function frustumUrl(datasetName: string, frustum: QueryFrustum): string {
     far: frustum.far.toString(),
     fovy: frustum.fovy.toString(),
     aspect: frustum.aspect.toString(),
+    width: width.toString(),
+    height: height.toString(),
     limit: QUERY_LIMIT.toString(),
   });
-  return `${API_ROOT}/query/${datasetName}/frustum?${params.toString()}`;
+  return `${API_ROOT}/query/${datasetName}/lod-frustum?${params.toString()}`;
 }
 
 async function fetchDatasetNames(): Promise<string[]> {
@@ -251,28 +213,28 @@ if (!app) {
 const statusElement = document.querySelector<HTMLParagraphElement>("#status");
 const apiRootElement = document.querySelector<HTMLElement>("#api-root");
 const datasetSelectElement = document.querySelector<HTMLSelectElement>("#dataset-select");
-const starsCountElement = document.querySelector<HTMLElement>("#stars-count");
+const unitsCountElement = document.querySelector<HTMLElement>("#units-count");
 const queryCountElement = document.querySelector<HTMLElement>("#query-count");
 const coordinatesElement = document.querySelector<HTMLElement>("#coordinates");
 const farSliderElement = document.querySelector<HTMLInputElement>("#far-slider");
 const farValueElement = document.querySelector<HTMLElement>("#far-value");
-const poolSliderElement = document.querySelector<HTMLInputElement>("#pool-slider");
-const poolValueElement = document.querySelector<HTMLElement>("#pool-value");
+const exposureSliderElement = document.querySelector<HTMLInputElement>("#exposure-slider");
+const exposureValueElement = document.querySelector<HTMLElement>("#exposure-value");
 if (!statusElement || !apiRootElement || !datasetSelectElement ||
-    !starsCountElement || !queryCountElement || !coordinatesElement ||
-    !farSliderElement || !farValueElement || !poolSliderElement || !poolValueElement) {
+    !unitsCountElement || !queryCountElement || !coordinatesElement ||
+    !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement) {
   throw new Error("missing hud elements");
 }
 const hudStatus = statusElement;
 const hudApiRoot = apiRootElement;
 const datasetSelect = datasetSelectElement;
-const hudStarsCount = starsCountElement;
+const hudUnitsCount = unitsCountElement;
 const hudQueryCount = queryCountElement;
 const hudCoordinates = coordinatesElement;
 const hudFarSlider = farSliderElement;
 const hudFarValue = farValueElement;
-const hudPoolSlider = poolSliderElement;
-const hudPoolValue = poolValueElement;
+const hudExposureSlider = exposureSliderElement;
+const hudExposureValue = exposureValueElement;
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
@@ -280,12 +242,14 @@ app.prepend(canvas);
 const regl = createRegl({
   canvas,
   attributes: {
-    antialias: true,
+    antialias: false,
     alpha: false,
   },
 });
 
 const positionBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const luminosityBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const bpRpBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
 
 const camera: Camera = {
@@ -305,7 +269,7 @@ let lastQueryAt = -QUERY_INTERVAL_MS;
 let lastQueryKey = "";
 let queryEpoch = 0;
 let outstandingQueries = 0;
-const starPool = new Map<string, CsvStar>();
+let exposure = 0.001;
 
 window.starDump = {
   getFrustum: () => currentFrustum,
@@ -323,12 +287,17 @@ hudFarSlider.addEventListener("input", () => {
   lastQueryKey = "";
 });
 
-hudPoolSlider.value = String(starPoolMaxSize);
-hudPoolValue.textContent = `${(starPoolMaxSize / 1000).toFixed(0)}k`;
+const exposureMin = Math.log10(1e-5);
+const exposureMax = Math.log10(1e-1);
+hudExposureSlider.value = String(
+  ((Math.log10(exposure) - exposureMin) / (exposureMax - exposureMin)) * 100
+);
+hudExposureValue.textContent = exposure.toExponential(1);
 
-hudPoolSlider.addEventListener("input", () => {
-  starPoolMaxSize = Number(hudPoolSlider.value);
-  hudPoolValue.textContent = `${(starPoolMaxSize / 1000).toFixed(0)}k`;
+hudExposureSlider.addEventListener("input", () => {
+  const t = Number(hudExposureSlider.value) / 100;
+  exposure = Math.pow(10, exposureMin + t * (exposureMax - exposureMin));
+  hudExposureValue.textContent = exposure.toExponential(1);
 });
 
 function populateDatasetSelect(names: string[], selectedName: string): void {
@@ -343,30 +312,11 @@ function populateDatasetSelect(names: string[], selectedName: string): void {
   datasetSelect.disabled = names.length <= 1;
 }
 
-function rebuildBuffers(): void {
-  const stars = [...starPool.values()];
-  const positions = new Float32Array(stars.length * 3);
-  stars.forEach((star, index) => {
-    positions[index * 3] = star.x;
-    positions[index * 3 + 1] = star.y;
-    positions[index * 3 + 2] = star.z;
-  });
-
+function updateBuffers(positions: Float32Array, luminosities: Float32Array, bpRps: Float32Array, count: number): void {
   positionBuffer(positions);
-  scene.count = stars.length;
-}
-
-function mergeIntoPool(incoming: CsvStar[]): void {
-  for (const star of incoming) {
-    // Delete then re-insert to move to end of Map (most recently seen = LRU tail)
-    starPool.delete(star.sourceId);
-    starPool.set(star.sourceId, star);
-  }
-  // Evict oldest entries from the front of the Map until under the cap
-  while (starPool.size > starPoolMaxSize) {
-    starPool.delete(starPool.keys().next().value!);
-  }
-  rebuildBuffers();
+  luminosityBuffer(luminosities);
+  bpRpBuffer(bpRps);
+  scene.count = count;
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -392,8 +342,7 @@ datasetSelect.addEventListener("change", () => {
   url.searchParams.set("dataset", datasetName);
   window.history.replaceState({}, "", url);
   queryEpoch++;
-  starPool.clear();
-  rebuildBuffers();
+  updateBuffers(new Float32Array(0), new Float32Array(0), new Float32Array(0), 0);
   lastQueryKey = "";
   lastQueryAt = -QUERY_INTERVAL_MS;
   void queryStars(currentFrustum);
@@ -405,15 +354,35 @@ async function queryStars(frustum: QueryFrustum): Promise<void> {
 
   try {
     const name = await ensureDatasetName();
-    const response = await fetch(frustumUrl(name, frustum));
+    const url = lodFrustumUrl(name, frustum, canvas.width, canvas.height);
+    const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`query failed: ${response.status}`);
     }
-    const stars = parseStars(await response.text());
     if (epoch !== queryEpoch) {
       return;
     }
-    mergeIntoPool(stars);
+
+    const buf = await response.arrayBuffer();
+    const dv = new DataView(buf);
+    const count = dv.getUint32(0, true);
+    const positions = new Float32Array(count * 3);
+    const luminosities = new Float32Array(count);
+    const bpRps = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      const base = 4 + i * 20;
+      positions[i * 3]     = dv.getFloat32(base,      true);
+      positions[i * 3 + 1] = dv.getFloat32(base + 4,  true);
+      positions[i * 3 + 2] = dv.getFloat32(base + 8,  true);
+      luminosities[i]      = dv.getFloat32(base + 12, true);
+      bpRps[i]             = dv.getFloat32(base + 16, true);
+    }
+
+    if (epoch !== queryEpoch) {
+      return;
+    }
+    updateBuffers(positions, luminosities, bpRps, count);
+    hudUnitsCount.textContent = String(count);
     hudStatus.textContent = "";
   } catch (error) {
     if (epoch !== queryEpoch) {
@@ -428,7 +397,7 @@ async function queryStars(frustum: QueryFrustum): Promise<void> {
 
 function updateCamera(deltaTime: number): void {
   const { forward, right } = cameraBasis(camera);
-  const speed = 30 * deltaTime;
+  const speed = 2 * deltaTime;
   let movement: Vec3 = [0, 0, 0];
 
   if (keyState.has("KeyW")) {
@@ -508,49 +477,67 @@ const drawStars = regl({
     precision highp float;
 
     attribute vec3 position;
+    attribute float luminosity;
+    attribute float bpRp;
 
     uniform mat4 projection;
     uniform mat4 view;
-    uniform float worldRadius;
-    uniform float screenHeight;
-    uniform float pixelRatio;
+    uniform vec3 cameraPosition;
+    uniform float exposure;
 
-    varying float vPointSize;
+    varying vec3 vColor;
+    varying float vBrightness;
+
+    vec3 bpRpToColor(float t) {
+      vec3 blue   = vec3(0.6, 0.7, 1.0);
+      vec3 white  = vec3(1.0, 0.95, 0.9);
+      vec3 yellow = vec3(1.0, 0.85, 0.4);
+      vec3 red    = vec3(1.0, 0.3,  0.1);
+      if (t < 0.33) return mix(blue,   white,  t / 0.33);
+      if (t < 0.66) return mix(white,  yellow, (t - 0.33) / 0.33);
+                    return mix(yellow, red,    (t - 0.66) / 0.34);
+    }
 
     void main() {
       gl_Position = projection * view * vec4(position, 1.0);
-      float screenRadiusPx = worldRadius * projection[1][1] * screenHeight * pixelRatio * 0.5 / gl_Position.w;
-      gl_PointSize = max(1.0, screenRadiusPx * 2.0);
-      vPointSize = gl_PointSize;
+      float dist = length(position - cameraPosition);
+      float flux = luminosity / max(dist * dist, 0.01);
+      vBrightness = flux * exposure;
+      float t = clamp((bpRp + 0.5) / 3.5, 0.0, 1.0);
+      vColor = (bpRp != bpRp) ? vec3(1.0) : bpRpToColor(t);
+      gl_PointSize = clamp(sqrt(vBrightness) * 8.0, 1.0, 64.0);
     }
   `,
   frag: `
     precision highp float;
 
-    varying float vPointSize;
+    varying vec3 vColor;
+    varying float vBrightness;
 
     void main() {
-      float dist = length(gl_PointCoord - 0.5);
-      float alpha = clamp((0.5 - dist) * vPointSize, 0.0, 1.0);
-      if (alpha < 0.01) discard;
-      gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
+      float r = length(gl_PointCoord - 0.5);
+      float glow = exp(-r * r / 0.025);
+      float alpha = glow * min(vBrightness, 1.0);
+      if (alpha < 0.002) discard;
+      gl_FragColor = vec4(vColor * vBrightness * glow, alpha);
     }
   `,
   attributes: {
-    position: { buffer: positionBuffer, size: 3 },
+    position:   { buffer: positionBuffer,   size: 3 },
+    luminosity: { buffer: luminosityBuffer, size: 1 },
+    bpRp:       { buffer: bpRpBuffer,       size: 1 },
   },
   uniforms: {
-    projection: () => projectionMatrix(currentFrustum),
-    view: () => viewMatrix(currentFrustum),
-    worldRadius: 0.02,
-    screenHeight: () => canvas.height,
-    pixelRatio: () => window.devicePixelRatio || 1,
+    projection:     () => projectionMatrix(currentFrustum),
+    view:           () => viewMatrix(currentFrustum),
+    cameraPosition: () => camera.position,
+    exposure:       () => exposure,
   },
   primitive: "points",
   count: () => scene.count,
   blend: {
     enable: true,
-    func: { src: "src alpha", dst: "one minus src alpha" },
+    func: { src: "one", dst: "one" },
   },
   depth: { enable: false },
 });
@@ -572,11 +559,10 @@ regl.frame(({ time }) => {
 
   const [cx, cy, cz] = camera.position;
   hudCoordinates.textContent = `${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}`;
-  hudStarsCount.textContent = String(starPool.size);
   hudQueryCount.textContent = String(outstandingQueries);
 
   regl.clear({
-    color: [0.015, 0.025, 0.06, 1],
+    color: [0, 0, 0, 1],
     depth: 1,
   });
 

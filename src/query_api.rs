@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,8 @@ pub struct QueryCatalog {
 struct QueryMatch {
     position: Vec3,
     source_id: u64,
+    luminosity: f32,
+    bp_rp: f32,
 }
 
 
@@ -142,7 +145,12 @@ fn collect_matches(
         for point in read_leaf_points(file, index, node)? {
             let xyz = dequantize_point(bounds, &point);
             if point_match(xyz) {
-                matches.push(QueryMatch { position: xyz, source_id: point.source_id });
+                matches.push(QueryMatch {
+                    position: xyz,
+                    source_id: point.source_id,
+                    luminosity: point.luminosity,
+                    bp_rp: point.bp_rp,
+                });
             }
         }
         return Ok(());
@@ -268,14 +276,217 @@ fn point_in_frustum(point: Vec3, frustum: &DerivedFrustum) -> bool {
     horizontal.abs() <= half_width && vertical.abs() <= half_height
 }
 
+struct LodUnit {
+    position: Vec3,
+    luminosity: f32,
+    bp_rp: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Candidate {
+    node_index: u32,
+    bounds: Bounds3,
+    angular_px: f32,
+}
+
+impl Eq for Candidate {}
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.angular_px == other.angular_px && self.node_index == other.node_index
+    }
+}
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.angular_px.total_cmp(&other.angular_px)
+    }
+}
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+enum CutEntry {
+    Aggregate { node_index: u32 },
+    ExpandLeaf { node_index: u32, bounds: Bounds3, max_points: usize },
+}
+
+fn angular_pixels(bounds: Bounds3, centroid: Vec3, frustum: &DerivedFrustum, pixels_per_radian: f32) -> f32 {
+    let dist = (centroid - frustum.position).length();
+    let half_extent = bounds.cube_size() * 0.5;
+    (half_extent / dist.max(half_extent)) * pixels_per_radian
+}
+
+/// Build a max-heap cut of the octree bounded by `limit` units.
+///
+/// Units = aggregates + individual stars from expanded leaves. Each iteration pops
+/// the candidate with the largest on-screen angular footprint and tries to refine
+/// it. Refinement is accepted only if it fits the remaining budget, so the heap
+/// always spends the budget on the most visually significant refinements first.
+fn build_lod_cut(
+    index: &PackedOctreeIndex,
+    frustum: &DerivedFrustum,
+    pixels_per_radian: f32,
+    limit: usize,
+) -> Vec<CutEntry> {
+    let mut output: Vec<CutEntry> = Vec::new();
+    if index.nodes.is_empty() || limit == 0 {
+        return output;
+    }
+
+    let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
+    let mut unit_count: usize = 0;
+
+    let root_bounds = index.bounds();
+    let root = index.nodes[0];
+    if root.star_count > 0 && bounds_intersect_frustum(root_bounds, frustum) {
+        heap.push(Candidate {
+            node_index: 0,
+            bounds: root_bounds,
+            angular_px: angular_pixels(root_bounds, root.centroid, frustum, pixels_per_radian),
+        });
+        unit_count = 1;
+    }
+
+    while let Some(cand) = heap.pop() {
+        let node = index.nodes[cand.node_index as usize];
+        let centroid_in = point_in_frustum(node.centroid, frustum);
+
+        if node.child_mask == 0 {
+            // Leaf: expand into individual stars (partial expansion if dense).
+            let star_count = node.star_count as usize;
+            // Candidate currently occupies one slot; +1 accounts for reclaiming it.
+            let budget_remaining = limit - unit_count + 1;
+
+            if star_count <= budget_remaining {
+                unit_count = unit_count + star_count - 1;
+                output.push(CutEntry::ExpandLeaf {
+                    node_index: cand.node_index,
+                    bounds: cand.bounds,
+                    max_points: star_count,
+                });
+            } else if centroid_in {
+                // Full expansion too expensive but centroid on-screen — emit aggregate.
+                output.push(CutEntry::Aggregate { node_index: cand.node_index });
+            } else {
+                // Off-screen centroid: partial expansion up to remaining budget.
+                let max_points = budget_remaining;
+                unit_count = unit_count + max_points - 1;
+                output.push(CutEntry::ExpandLeaf {
+                    node_index: cand.node_index,
+                    bounds: cand.bounds,
+                    max_points,
+                });
+            }
+            continue;
+        }
+
+        // Internal node: try to refine into in-frustum children.
+        let mut children: Vec<Candidate> = Vec::new();
+        let mut child_index = node.first;
+        for child in 0..8_u8 {
+            if node.child_mask & (1 << child) == 0 {
+                continue;
+            }
+            let cb = cand.bounds.child_bounds(child);
+            let cnode = index.nodes[child_index as usize];
+            if cnode.star_count > 0 && bounds_intersect_frustum(cb, frustum) {
+                children.push(Candidate {
+                    node_index: child_index,
+                    bounds: cb,
+                    angular_px: angular_pixels(cb, cnode.centroid, frustum, pixels_per_radian),
+                });
+            }
+            child_index += 1;
+        }
+
+        let refinement_delta = children.len() as isize - 1;
+        let can_refine = (unit_count as isize + refinement_delta) <= limit as isize;
+
+        if can_refine && !children.is_empty() {
+            unit_count = (unit_count as isize + refinement_delta) as usize;
+            for c in children {
+                heap.push(c);
+            }
+        } else if centroid_in {
+            output.push(CutEntry::Aggregate { node_index: cand.node_index });
+        } else {
+            // Off-screen aggregate with no affordable refinement — drop.
+            unit_count -= 1;
+        }
+    }
+
+    output
+}
+
+fn materialize_cut(
+    file: &mut fs::File,
+    index: &PackedOctreeIndex,
+    cut: &[CutEntry],
+    frustum: &DerivedFrustum,
+) -> Result<Vec<LodUnit>> {
+    let mut units = Vec::with_capacity(cut.len());
+    for entry in cut {
+        match *entry {
+            CutEntry::Aggregate { node_index } => {
+                let node = index.nodes[node_index as usize];
+                units.push(LodUnit {
+                    position: node.centroid,
+                    luminosity: node.total_luminosity,
+                    bp_rp: node.mean_bp_rp,
+                });
+            }
+            CutEntry::ExpandLeaf { node_index, bounds, max_points } => {
+                let node = index.nodes[node_index as usize];
+                let mut emitted = 0;
+                for point in read_leaf_points(file, index, node)? {
+                    if emitted >= max_points {
+                        break;
+                    }
+                    let pos = dequantize_point(bounds, &point);
+                    if point_in_frustum(pos, frustum) {
+                        units.push(LodUnit {
+                            position: pos,
+                            luminosity: point.luminosity,
+                            bp_rp: point.bp_rp,
+                        });
+                        emitted += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(units)
+}
+
+fn encode_lod_binary(units: &[LodUnit]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + units.len() * 20);
+    buf.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    for unit in units {
+        buf.extend_from_slice(&unit.position.x.to_le_bytes());
+        buf.extend_from_slice(&unit.position.y.to_le_bytes());
+        buf.extend_from_slice(&unit.position.z.to_le_bytes());
+        buf.extend_from_slice(&unit.luminosity.to_le_bytes());
+        buf.extend_from_slice(&unit.bp_rp.to_le_bytes());
+    }
+    buf
+}
+
 fn encode_matches_csv(matches: &[QueryMatch]) -> Result<String, (StatusCode, String)> {
     let mut writer = Writer::from_writer(Vec::new());
     writer
-        .write_record(["x", "y", "z", "source_id"])
+        .write_record(["x", "y", "z", "source_id", "luminosity", "bp_rp"])
         .map_err(|error| internal_error(error.into()))?;
     for row in matches {
         writer
-            .serialize((row.position.x, row.position.y, row.position.z, row.source_id))
+            .serialize((
+                row.position.x,
+                row.position.y,
+                row.position.z,
+                row.source_id,
+                row.luminosity,
+                row.bp_rp,
+            ))
             .map_err(|error| internal_error(error.into()))?;
     }
     let bytes = writer
@@ -407,6 +618,80 @@ async fn query_frustum(
     Ok((
         [(CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"))],
         csv,
+    )
+        .into_response())
+}
+
+async fn query_lod_frustum(
+    State(catalog): State<Arc<QueryCatalog>>,
+    AxumPath(name): AxumPath<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, (StatusCode, String)> {
+    if !valid_dataset_name(&name) {
+        return Err(bad_request("dataset name contains invalid characters"));
+    }
+    let Some(dataset) = catalog.dataset(&name).map_err(internal_error)? else {
+        return Err(not_found(format!("unknown dataset {name}")));
+    };
+    let q = query.as_deref().unwrap_or_default();
+    let x: f32 = parse_required(q, "x")?;
+    let y: f32 = parse_required(q, "y")?;
+    let z: f32 = parse_required(q, "z")?;
+    let qx: f32 = parse_required(q, "qx")?;
+    let qy: f32 = parse_required(q, "qy")?;
+    let qz: f32 = parse_required(q, "qz")?;
+    let qw: f32 = parse_required(q, "qw")?;
+    let near: f32 = parse_required(q, "near")?;
+    let far: f32 = parse_required(q, "far")?;
+    let fovy: f32 = parse_required(q, "fovy")?;
+    let aspect: f32 = parse_required(q, "aspect")?;
+    let width: f32 = parse_required(q, "width")?;
+    let height: f32 = parse_required(q, "height")?;
+    let limit: Option<usize> = parse_optional(q, "limit")?;
+    if ![x, y, z, qx, qy, qz, qw, near, far, fovy, aspect, width, height].into_iter().all(f32::is_finite) {
+        return Err(bad_request("parameters must contain only finite numbers"));
+    }
+    if near <= 0.0 {
+        return Err(bad_request("near must be a positive finite number"));
+    }
+    if far <= near {
+        return Err(bad_request("far must be greater than near"));
+    }
+    if fovy <= 0.0 || fovy >= std::f32::consts::PI {
+        return Err(bad_request("fovy must be between 0 and pi"));
+    }
+    if aspect <= 0.0 {
+        return Err(bad_request("aspect must be a positive finite number"));
+    }
+    if width <= 0.0 || height <= 0.0 {
+        return Err(bad_request("width and height must be positive"));
+    }
+    if normalize_quaternion([qx, qy, qz, qw]).is_none() {
+        return Err(bad_request("orientation quaternion must be non-zero"));
+    }
+    let limit = limit.unwrap_or(DEFAULT_LIMIT);
+    if limit == 0 {
+        return Err(bad_request("limit must be greater than zero"));
+    }
+    let binary = tokio::task::spawn_blocking(move || {
+        let frustum = derive_frustum(x, y, z, qx, qy, qz, qw, near, far, fovy, aspect)
+            .map_err(internal_error)?;
+        let pixels_per_radian = height / fovy;
+        let cut = build_lod_cut(&dataset.index, &frustum, pixels_per_radian, limit);
+        let units = if cut.is_empty() {
+            Vec::new()
+        } else {
+            let mut file = fs::File::open(&dataset.index_path)
+                .map_err(|e| internal_error(anyhow::Error::from(e)))?;
+            materialize_cut(&mut file, &dataset.index, &cut, &frustum).map_err(internal_error)?
+        };
+        Ok::<_, (StatusCode, String)>(encode_lod_binary(&units))
+    })
+    .await
+    .map_err(|error| internal_error(error.into()))??;
+    Ok((
+        [(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))],
+        binary,
     )
         .into_response())
 }
@@ -546,6 +831,7 @@ pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
         .route("/indices", get(list_indices))
         .route("/query/{name}/radius", get(query_radius))
         .route("/query/{name}/frustum", get(query_frustum))
+        .route("/query/{name}/lod-frustum", get(query_lod_frustum))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
         .with_state(catalog)
 }
