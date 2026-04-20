@@ -82,8 +82,7 @@ function bprpToColor(bprp) {
   return lerp([1, 0.85, 0.4], [1, 0.3, 0.1], (t - 0.66) / 0.34);
 }
 function rasterize(stars, hdr, cfg) {
-  const { camera, exposure, limitMag, satMag } = cfg;
-  const magSpan = limitMag - satMag;
+  const { camera, exposure } = cfg;
   const { width, height } = camera;
   for (const s of stars) {
     if (!(s.lum > 0)) continue;
@@ -91,10 +90,7 @@ function rasterize(stars, hdr, cfg) {
     if (!proj) continue;
     const [sx, sy, dist] = proj;
     const flux = s.lum / Math.max(dist * dist, 0.01);
-    const mag = -2.5 * Math.log10(flux);
-    const t = (limitMag - mag) / magSpan;
-    if (t <= 0) continue;
-    const brightness = t * exposure;
+    const brightness = flux * exposure;
     const [cr, cg, cb] = bprpToColor(s.bprp);
     const rPx = Math.min(Math.max(brightness * 2, 0.8), 8);
     const ir = Math.ceil(rPx);
@@ -156,8 +152,6 @@ var NEAR = getArgNum("near", 0.1);
 var WIDTH = getArgNum("width", 1920);
 var HEIGHT = getArgNum("height", 1080);
 var EXPOSURE = getArgNum("exposure", 1);
-var LIMIT_MAG = getArgNum("limit-mag", 20);
-var SAT_MAG = getArgNum("sat-mag", 4);
 var PIXEL_THRESHOLD = getArgNum("pixel-threshold", 4);
 var OUT = getArg("output", "stars.ppm");
 var CACHE_DIR = getArg("cache-dir", "/tmp");
@@ -399,12 +393,7 @@ async function main() {
   const starCount = ranges.reduce((a, r) => a + r.count, 0);
   console.log(`cut: ${ranges.length} node-ranges covering ${starCount} stars (M=${PIXEL_THRESHOLD}px)`);
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
-  rasterize(iterateStars(sc, ranges, planes), hdr, {
-    camera,
-    exposure: EXPOSURE,
-    limitMag: LIMIT_MAG,
-    satMag: SAT_MAG
-  });
+  rasterize(iterateStars(sc, ranges, planes), hdr, { camera, exposure: EXPOSURE });
   const pixels = tonemapToBytes(hdr, WIDTH, HEIGHT);
   writePpm(OUT, WIDTH, HEIGHT, pixels);
   console.log(`Saved ${OUT} in ${((Date.now() - started) / 1e3).toFixed(2)}s`);

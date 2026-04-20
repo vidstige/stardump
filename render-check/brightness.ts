@@ -19,8 +19,6 @@ export type Camera = {
 export type RasterConfig = {
   camera: Camera;
   exposure: number;
-  limitMag: number;
-  satMag: number;
 };
 
 export type Star = { x: number; y: number; z: number; lum: number; bprp: number };
@@ -119,8 +117,7 @@ function bprpToColor(bprp: number): [number, number, number] {
 }
 
 export function rasterize(stars: Iterable<Star>, hdr: Float32Array, cfg: RasterConfig): void {
-  const { camera, exposure, limitMag, satMag } = cfg;
-  const magSpan = limitMag - satMag;
+  const { camera, exposure } = cfg;
   const { width, height } = camera;
   for (const s of stars) {
     if (!(s.lum > 0)) continue;
@@ -128,10 +125,7 @@ export function rasterize(stars: Iterable<Star>, hdr: Float32Array, cfg: RasterC
     if (!proj) continue;
     const [sx, sy, dist] = proj;
     const flux = s.lum / Math.max(dist * dist, 0.01);
-    const mag = -2.5 * Math.log10(flux);
-    const t = (limitMag - mag) / magSpan;
-    if (t <= 0) continue;
-    const brightness = t * exposure;
+    const brightness = flux * exposure;
     const [cr, cg, cb] = bprpToColor(s.bprp);
 
     const rPx = Math.min(Math.max(brightness * 2, 0.8), 8);

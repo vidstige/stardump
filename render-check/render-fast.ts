@@ -7,7 +7,6 @@ import * as https from "https";
 import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
-import { URL } from "url";
 
 import {
   makeCamera,
@@ -41,9 +40,7 @@ const DEPTH = getArgNum("depth", 5000);
 const NEAR = getArgNum("near", 0.1);
 const WIDTH = getArgNum("width", 1920);
 const HEIGHT = getArgNum("height", 1080);
-const EXPOSURE = getArgNum("exposure", 1.0);
-const LIMIT_MAG = getArgNum("limit-mag", 20);
-const SAT_MAG = getArgNum("sat-mag", 4);
+const EXPOSURE = getArgNum("exposure", 5000.0);
 const PIXEL_THRESHOLD = getArgNum("pixel-threshold", 4);
 const OUT = getArg("output", "stars.ppm");
 const CACHE_DIR = getArg("cache-dir", "/tmp");
@@ -363,12 +360,7 @@ async function main(): Promise<void> {
   console.log(`cut: ${ranges.length} node-ranges covering ${starCount} stars (M=${PIXEL_THRESHOLD}px)`);
 
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
-  rasterize(iterateStars(sc, ranges, planes), hdr, {
-    camera,
-    exposure: EXPOSURE,
-    limitMag: LIMIT_MAG,
-    satMag: SAT_MAG,
-  });
+  rasterize(iterateStars(sc, ranges, planes), hdr, { camera, exposure: EXPOSURE });
 
   const pixels = tonemapToBytes(hdr, WIDTH, HEIGHT);
   writePpm(OUT, WIDTH, HEIGHT, pixels);

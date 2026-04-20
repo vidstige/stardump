@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::build_index::{load_source_metadata, read_canonical_part_rows};
-use crate::formats::{CANONICAL_ROOT, compute_luminosity};
+use crate::formats::{
+    CANONICAL_ROOT, METADATA_FILENAME, SourceMetadata, compute_luminosity, read_canonical_rows,
+    read_source_metadata,
+};
 use crate::octree::{Bounds3, OctreeConfig};
 use crate::quality::{
     DEFAULT_PARALLAX_QUALITY_THRESHOLD, maximum_distance_pc_for_quality, passes_parallax_quality,
@@ -92,6 +94,27 @@ fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_mul(0x94D049BB133111EB);
     x ^= x >> 31;
     x
+}
+
+fn load_source_metadata(data_root: &Path) -> Result<Vec<SourceMetadata>> {
+    use crate::storage::list_relative_files_recursive;
+    let canonical_root = data_root.join(CANONICAL_ROOT);
+    let mut result = Vec::new();
+    for relative in list_relative_files_recursive(&canonical_root)? {
+        if relative.ends_with(METADATA_FILENAME) {
+            result.push(read_source_metadata(&canonical_root.join(&relative))?);
+        }
+    }
+    result.sort_by(|a, b| a.input_name.cmp(&b.input_name));
+    Ok(result)
+}
+
+fn read_canonical_part_rows(
+    data_root: &Path,
+    source: &SourceMetadata,
+    part: &str,
+) -> Result<Vec<crate::formats::CanonicalRow>> {
+    read_canonical_rows(&data_root.join(&source.canonical_directory).join(part))
 }
 
 fn load_points(

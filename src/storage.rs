@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::formats::{CANONICAL_ROW_SIZE, PackedOctreeIndex, SourceMetadata};
+use crate::formats::{CANONICAL_ROW_SIZE, SourceMetadata};
 
 fn ensure_row_multiple(size: u64, row_size: u64, label: &str) -> Result<u64> {
     if size % row_size != 0 {
@@ -60,21 +60,6 @@ pub fn validate_canonical_layout(root: &Path, metadata: &SourceMetadata) -> Resu
         );
     }
     Ok(canonical_rows)
-}
-
-pub fn validate_packed_index_layout(root: &Path, index: &PackedOctreeIndex) -> Result<u64> {
-    let path = root.join("index.octree");
-    let size = fs::metadata(&path)
-        .with_context(|| format!("failed to read metadata for {}", path.display()))?
-        .len();
-    if size != index.file_size() {
-        bail!(
-            "packed index size {} does not match expected {}",
-            size,
-            index.file_size()
-        );
-    }
-    Ok(index.point_count)
 }
 
 fn collect_local_files(root: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {

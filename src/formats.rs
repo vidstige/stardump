@@ -1,25 +1,15 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::octree::Bounds3;
-use crate::vec3::Vec3;
-
 pub const CANONICAL_ROOT: &str = "canonical";
 pub const CANONICAL_ROW_SIZE: u64 = 32;
 pub const METADATA_FILENAME: &str = "metadata.txt";
-pub const OCTREE_INDEX_FILENAME: &str = "index.octree";
-pub const PACKED_OCTREE_NODE_SIZE: u64 = 36;
-pub const PACKED_POINT_SIZE: u64 = 24;
 
 const METADATA_MAGIC: &str = "STARDUMP-METADATA 1";
-const PACKED_OCTREE_MAGIC: [u8; 8] = *b"OCTPACK\0";
-const PACKED_OCTREE_VERSION: u16 = 2;
-pub const PACKED_OCTREE_HEADER_SIZE: usize = 28;
-const QUANTIZATION_SCALE: f32 = 65_535.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanonicalRow {
@@ -51,35 +41,6 @@ pub struct SourceMetadata {
     pub counts: SourceCounts,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PackedPoint {
-    pub source_id: u64,
-    pub x_local: u16,
-    pub y_local: u16,
-    pub z_local: u16,
-    pub bp_rp: f32,      // NaN if missing
-    pub luminosity: f32, // 0.0 if no valid photometry
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PackedOctreeNode {
-    pub child_mask: u8,
-    pub first: u32,
-    pub count: u32,
-    pub total_luminosity: f32,
-    pub mean_bp_rp: f32, // luminosity-weighted; NaN if no color data
-    pub centroid: Vec3,  // luminosity-weighted position (parsecs)
-    pub star_count: u32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PackedOctreeIndex {
-    pub depth: u8,
-    pub half_extent_pc: f32,
-    pub point_count: u64,
-    pub nodes: Vec<PackedOctreeNode>,
-}
-
 fn canonical_row_bytes(row: &CanonicalRow) -> [u8; CANONICAL_ROW_SIZE as usize] {
     let mut bytes = [0_u8; CANONICAL_ROW_SIZE as usize];
     bytes[0..8].copy_from_slice(&row.source_id.to_le_bytes());
@@ -89,33 +50,6 @@ fn canonical_row_bytes(row: &CanonicalRow) -> [u8; CANONICAL_ROW_SIZE as usize] 
     bytes[20..24].copy_from_slice(&row.parallax_error.to_le_bytes());
     bytes[24..28].copy_from_slice(&row.phot_g_mean_mag.to_le_bytes());
     bytes[28..32].copy_from_slice(&row.bp_rp.to_le_bytes());
-    bytes
-}
-
-fn packed_point_bytes(point: &PackedPoint) -> [u8; PACKED_POINT_SIZE as usize] {
-    let mut bytes = [0_u8; PACKED_POINT_SIZE as usize];
-    bytes[0..8].copy_from_slice(&point.source_id.to_le_bytes());
-    bytes[8..10].copy_from_slice(&point.x_local.to_le_bytes());
-    bytes[10..12].copy_from_slice(&point.y_local.to_le_bytes());
-    bytes[12..14].copy_from_slice(&point.z_local.to_le_bytes());
-    // bytes 14..16: padding
-    bytes[16..20].copy_from_slice(&point.bp_rp.to_le_bytes());
-    bytes[20..24].copy_from_slice(&point.luminosity.to_le_bytes());
-    bytes
-}
-
-fn packed_octree_node_bytes(node: &PackedOctreeNode) -> [u8; PACKED_OCTREE_NODE_SIZE as usize] {
-    let mut bytes = [0_u8; PACKED_OCTREE_NODE_SIZE as usize];
-    bytes[0] = node.child_mask;
-    // bytes 1..4: padding
-    bytes[4..8].copy_from_slice(&node.first.to_le_bytes());
-    bytes[8..12].copy_from_slice(&node.count.to_le_bytes());
-    bytes[12..16].copy_from_slice(&node.total_luminosity.to_le_bytes());
-    bytes[16..20].copy_from_slice(&node.mean_bp_rp.to_le_bytes());
-    bytes[20..24].copy_from_slice(&node.centroid.x.to_le_bytes());
-    bytes[24..28].copy_from_slice(&node.centroid.y.to_le_bytes());
-    bytes[28..32].copy_from_slice(&node.centroid.z.to_le_bytes());
-    bytes[32..36].copy_from_slice(&node.star_count.to_le_bytes());
     bytes
 }
 
@@ -191,38 +125,6 @@ where
     decode_rows(&bytes, row_size, decode)
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
-    let end = offset + 2;
-    let chunk = bytes
-        .get(offset..end)
-        .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
-    Ok(u16::from_le_bytes(chunk.try_into().unwrap()))
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
-    let end = offset + 4;
-    let chunk = bytes
-        .get(offset..end)
-        .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
-    Ok(u32::from_le_bytes(chunk.try_into().unwrap()))
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> Result<u64> {
-    let end = offset + 8;
-    let chunk = bytes
-        .get(offset..end)
-        .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
-    Ok(u64::from_le_bytes(chunk.try_into().unwrap()))
-}
-
-fn read_f32(bytes: &[u8], offset: usize) -> Result<f32> {
-    let end = offset + 4;
-    let chunk = bytes
-        .get(offset..end)
-        .ok_or_else(|| anyhow!("buffer too short at offset {offset}"))?;
-    Ok(f32::from_le_bytes(chunk.try_into().unwrap()))
-}
-
 fn decode_canonical_row(chunk: &[u8]) -> CanonicalRow {
     CanonicalRow {
         source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
@@ -233,72 +135,6 @@ fn decode_canonical_row(chunk: &[u8]) -> CanonicalRow {
         phot_g_mean_mag: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
         bp_rp: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
     }
-}
-
-fn decode_packed_point(chunk: &[u8]) -> PackedPoint {
-    PackedPoint {
-        source_id: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
-        x_local: u16::from_le_bytes(chunk[8..10].try_into().unwrap()),
-        y_local: u16::from_le_bytes(chunk[10..12].try_into().unwrap()),
-        z_local: u16::from_le_bytes(chunk[12..14].try_into().unwrap()),
-        bp_rp: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
-        luminosity: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
-    }
-}
-
-fn decode_packed_octree_node(chunk: &[u8]) -> PackedOctreeNode {
-    PackedOctreeNode {
-        child_mask: chunk[0],
-        first: u32::from_le_bytes(chunk[4..8].try_into().unwrap()),
-        count: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
-        total_luminosity: f32::from_le_bytes(chunk[12..16].try_into().unwrap()),
-        mean_bp_rp: f32::from_le_bytes(chunk[16..20].try_into().unwrap()),
-        centroid: Vec3 {
-            x: f32::from_le_bytes(chunk[20..24].try_into().unwrap()),
-            y: f32::from_le_bytes(chunk[24..28].try_into().unwrap()),
-            z: f32::from_le_bytes(chunk[28..32].try_into().unwrap()),
-        },
-        star_count: u32::from_le_bytes(chunk[32..36].try_into().unwrap()),
-    }
-}
-
-fn parse_packed_octree_header(bytes: &[u8]) -> Result<(u8, f32, u32, u64)> {
-    if bytes.len() < PACKED_OCTREE_HEADER_SIZE {
-        bail!(
-            "packed octree header is too short: {} < {}",
-            bytes.len(),
-            PACKED_OCTREE_HEADER_SIZE
-        );
-    }
-
-    if bytes[0..8] != PACKED_OCTREE_MAGIC {
-        bail!("invalid packed octree magic");
-    }
-
-    let version = read_u16(bytes, 8)?;
-    if version != PACKED_OCTREE_VERSION {
-        bail!("unsupported packed octree version {version}");
-    }
-
-    Ok((
-        bytes[10],
-        read_f32(bytes, 12)?,
-        read_u32(bytes, 16)?,
-        read_u64(bytes, 20)?,
-    ))
-}
-
-fn quantize_axis(value: f32, min: f32, size: f32) -> u16 {
-    let normalized = if size == 0.0 {
-        0.0
-    } else {
-        ((value - min) / size).clamp(0.0, 1.0)
-    };
-    (normalized * QUANTIZATION_SCALE).round() as u16
-}
-
-fn dequantize_axis(value: u16, min: f32, size: f32) -> f32 {
-    min + size * (value as f32 / QUANTIZATION_SCALE)
 }
 
 pub fn canonical_directory_path(input_name: &str) -> String {
@@ -317,24 +153,6 @@ pub fn metadata_path_for_source(input_name: &str) -> String {
     )
 }
 
-impl PackedOctreeIndex {
-    pub fn bounds(&self) -> Bounds3 {
-        let e = self.half_extent_pc;
-        Bounds3 {
-            min: Vec3 { x: -e, y: -e, z: -e },
-            max: Vec3 { x: e, y: e, z: e },
-        }
-    }
-
-    pub fn point_data_offset(&self) -> u64 {
-        PACKED_OCTREE_HEADER_SIZE as u64 + self.nodes.len() as u64 * PACKED_OCTREE_NODE_SIZE
-    }
-
-    pub fn file_size(&self) -> u64 {
-        self.point_data_offset() + self.point_count * PACKED_POINT_SIZE
-    }
-}
-
 pub fn compute_luminosity(parallax_mas: f32, phot_g_mean_mag: f32) -> Option<f32> {
     if !parallax_mas.is_finite() || parallax_mas <= 0.0 {
         return None;
@@ -345,51 +163,12 @@ pub fn compute_luminosity(parallax_mas: f32, phot_g_mean_mag: f32) -> Option<f32
     if lum.is_finite() && lum > 0.0 { Some(lum) } else { None }
 }
 
-pub fn quantize_point(
-    bounds: Bounds3,
-    point: Vec3,
-    source_id: u64,
-    bp_rp: f32,
-    luminosity: f32,
-) -> PackedPoint {
-    let size = bounds.max.x - bounds.min.x;
-    PackedPoint {
-        source_id,
-        x_local: quantize_axis(point.x, bounds.min.x, size),
-        y_local: quantize_axis(point.y, bounds.min.y, size),
-        z_local: quantize_axis(point.z, bounds.min.z, size),
-        bp_rp,
-        luminosity,
-    }
-}
-
-pub fn dequantize_point(bounds: Bounds3, point: &PackedPoint) -> Vec3 {
-    let size = bounds.max.x - bounds.min.x;
-    Vec3 {
-        x: dequantize_axis(point.x_local, bounds.min.x, size),
-        y: dequantize_axis(point.y_local, bounds.min.y, size),
-        z: dequantize_axis(point.z_local, bounds.min.z, size),
-    }
-}
-
 pub fn read_canonical_rows(path: &Path) -> Result<Vec<CanonicalRow>> {
     read_rows(path, CANONICAL_ROW_SIZE, decode_canonical_row)
 }
 
 pub fn decode_canonical_rows(bytes: &[u8]) -> Result<Vec<CanonicalRow>> {
     decode_rows(bytes, CANONICAL_ROW_SIZE, decode_canonical_row)
-}
-
-pub fn decode_packed_points(bytes: &[u8]) -> Result<Vec<PackedPoint>> {
-    decode_rows(bytes, PACKED_POINT_SIZE, decode_packed_point)
-}
-
-pub fn encode_packed_points(points: &[PackedPoint]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(points.len() * PACKED_POINT_SIZE as usize);
-    for point in points {
-        bytes.extend_from_slice(&packed_point_bytes(point));
-    }
-    bytes
 }
 
 pub fn decode_source_metadata(bytes: &[u8]) -> Result<SourceMetadata> {
@@ -442,110 +221,9 @@ rows_written: {}\n",
     .into_bytes()
 }
 
-pub fn encode_packed_octree_node_table(nodes: &[PackedOctreeNode]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(nodes.len() * PACKED_OCTREE_NODE_SIZE as usize);
-    for node in nodes {
-        bytes.extend_from_slice(&packed_octree_node_bytes(node));
-    }
-    bytes
-}
-
-pub fn encode_packed_octree(index: &PackedOctreeIndex) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(index.point_data_offset() as usize);
-    bytes.extend_from_slice(&PACKED_OCTREE_MAGIC);
-    bytes.extend_from_slice(&PACKED_OCTREE_VERSION.to_le_bytes());
-    bytes.push(index.depth);
-    bytes.push(0);
-    bytes.extend_from_slice(&index.half_extent_pc.to_le_bytes());
-    bytes.extend_from_slice(&(index.nodes.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&index.point_count.to_le_bytes());
-    for node in &index.nodes {
-        bytes.extend_from_slice(&packed_octree_node_bytes(node));
-    }
-    bytes
-}
-
-pub fn decode_packed_octree(bytes: &[u8]) -> Result<PackedOctreeIndex> {
-    let (depth, half_extent_pc, node_count, point_count) = parse_packed_octree_header(bytes)?;
-    let nodes_start = PACKED_OCTREE_HEADER_SIZE;
-    let nodes_end = nodes_start + node_count as usize * PACKED_OCTREE_NODE_SIZE as usize;
-    let node_bytes = bytes
-        .get(nodes_start..nodes_end)
-        .ok_or_else(|| anyhow!("packed octree node table is truncated"))?;
-    let nodes = decode_rows(
-        node_bytes,
-        PACKED_OCTREE_NODE_SIZE,
-        decode_packed_octree_node,
-    )?;
-    let index = PackedOctreeIndex {
-        depth,
-        half_extent_pc,
-        point_count,
-        nodes,
-    };
-    if bytes.len() as u64 != index.file_size() {
-        bail!(
-            "packed octree size {} does not match expected {}",
-            bytes.len(),
-            index.file_size()
-        );
-    }
-    Ok(index)
-}
-
 pub fn read_source_metadata(path: &Path) -> Result<SourceMetadata> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     decode_source_metadata(&bytes).with_context(|| format!("failed to parse {}", path.display()))
-}
-
-pub fn read_packed_octree(path: &Path) -> Result<PackedOctreeIndex> {
-    let file =
-        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut header = [0_u8; PACKED_OCTREE_HEADER_SIZE];
-    reader
-        .read_exact(&mut header)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let (_, _, node_count, _) = parse_packed_octree_header(&header)?;
-    let mut bytes = header.to_vec();
-    let mut node_bytes = vec![0_u8; node_count as usize * PACKED_OCTREE_NODE_SIZE as usize];
-    reader
-        .read_exact(&mut node_bytes)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    bytes.extend_from_slice(&node_bytes);
-    let mut index = decode_packed_octree_prefix(&bytes)?;
-    let actual_size = fs::metadata(path)
-        .with_context(|| format!("failed to stat {}", path.display()))?
-        .len();
-    if actual_size != index.file_size() {
-        bail!(
-            "packed octree size {} does not match expected {}",
-            actual_size,
-            index.file_size()
-        );
-    }
-    index.nodes.shrink_to_fit();
-    Ok(index)
-}
-
-pub fn decode_packed_octree_prefix(bytes: &[u8]) -> Result<PackedOctreeIndex> {
-    let (depth, half_extent_pc, node_count, point_count) = parse_packed_octree_header(bytes)?;
-    let nodes_start = PACKED_OCTREE_HEADER_SIZE;
-    let nodes_end = nodes_start + node_count as usize * PACKED_OCTREE_NODE_SIZE as usize;
-    let node_bytes = bytes
-        .get(nodes_start..nodes_end)
-        .ok_or_else(|| anyhow!("packed octree node table is truncated"))?;
-    let nodes = decode_rows(
-        node_bytes,
-        PACKED_OCTREE_NODE_SIZE,
-        decode_packed_octree_node,
-    )?;
-    Ok(PackedOctreeIndex {
-        depth,
-        half_extent_pc,
-        point_count,
-        nodes,
-    })
 }
 
 pub fn write_source_metadata(path: &Path, metadata: &SourceMetadata) -> Result<()> {
@@ -634,77 +312,5 @@ mod tests {
 
         write_source_metadata(&path, &metadata).unwrap();
         assert_eq!(read_source_metadata(&path).unwrap(), metadata);
-    }
-
-    #[test]
-    fn packed_octree_round_trip() {
-        let centroid = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
-        let index = PackedOctreeIndex {
-            depth: 7,
-            half_extent_pc: 4_000.0,
-            point_count: 3,
-            nodes: vec![
-                PackedOctreeNode {
-                    child_mask: 0b0000_0011,
-                    first: 1,
-                    count: 0,
-                    total_luminosity: 10.0,
-                    mean_bp_rp: 1.5,
-                    centroid,
-                    star_count: 3,
-                },
-                PackedOctreeNode {
-                    child_mask: 0,
-                    first: 0,
-                    count: 2,
-                    total_luminosity: 7.0,
-                    mean_bp_rp: 1.2,
-                    centroid,
-                    star_count: 2,
-                },
-                PackedOctreeNode {
-                    child_mask: 0,
-                    first: 2,
-                    count: 1,
-                    total_luminosity: 3.0,
-                    mean_bp_rp: f32::NAN,
-                    centroid,
-                    star_count: 1,
-                },
-            ],
-        };
-        let mut bytes = encode_packed_octree(&index);
-        bytes.extend_from_slice(&encode_packed_points(&[
-            PackedPoint { source_id: 1, x_local: 2, y_local: 3, z_local: 4, bp_rp: 1.2, luminosity: 3.0 },
-            PackedPoint { source_id: 5, x_local: 6, y_local: 7, z_local: 8, bp_rp: f32::NAN, luminosity: 4.0 },
-            PackedPoint { source_id: 9, x_local: 10, y_local: 11, z_local: 12, bp_rp: 0.5, luminosity: 1.5 },
-        ]));
-
-        let decoded = decode_packed_octree(&bytes).unwrap();
-        assert_eq!(decoded.depth, index.depth);
-        assert_eq!(decoded.nodes[0].child_mask, index.nodes[0].child_mask);
-        assert_eq!(decoded.nodes[0].total_luminosity, 10.0);
-        assert_eq!(decoded.nodes[0].star_count, 3);
-        assert!(decoded.nodes[2].mean_bp_rp.is_nan());
-    }
-
-    #[test]
-    fn packed_point_quantization_round_trip_stays_within_one_step() {
-        let bounds = Bounds3 {
-            min: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
-            max: Vec3 { x: 62.5, y: 62.5, z: 62.5 },
-        };
-        let original = Vec3 { x: 12.345, y: 23.456, z: 34.567 };
-        let quantized = quantize_point(bounds, original, 7, 1.5, 2.0);
-        let round_trip = dequantize_point(bounds, &quantized);
-        let step = (bounds.max.x - bounds.min.x) / QUANTIZATION_SCALE;
-
-        assert_eq!(quantized.source_id, 7);
-        for (orig, rt) in [original.x, original.y, original.z]
-            .iter()
-            .zip([round_trip.x, round_trip.y, round_trip.z].iter())
-        {
-            assert!((rt - orig).abs() <= step);
-        }
     }
 }
