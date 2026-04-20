@@ -214,37 +214,27 @@ function parseStarcloud(buf) {
   if (buf.length !== pointsEnd) {
     throw new Error(`starcloud size ${buf.length} != expected ${pointsEnd}`);
   }
+  const nodeView = new DataView(buf.buffer, buf.byteOffset + nodesStart, nodeCount * NODE_SIZE);
   const childMask = new Uint8Array(nodeCount);
   const firstChild = new Uint32Array(nodeCount);
   const pointFirst = new Uint32Array(nodeCount);
   const pointCountArr = new Uint32Array(nodeCount);
   for (let i = 0; i < nodeCount; i++) {
-    const off = nodesStart + i * NODE_SIZE;
-    childMask[i] = buf.readUInt8(off);
-    firstChild[i] = buf.readUInt32LE(off + 4);
-    pointFirst[i] = buf.readUInt32LE(off + 8);
-    pointCountArr[i] = buf.readUInt32LE(off + 12);
+    const off = i * NODE_SIZE;
+    childMask[i] = nodeView.getUint8(off);
+    firstChild[i] = nodeView.getUint32(off + 4, true);
+    pointFirst[i] = nodeView.getUint32(off + 8, true);
+    pointCountArr[i] = nodeView.getUint32(off + 12, true);
   }
-  const x = new Float32Array(pointCount);
-  const y = new Float32Array(pointCount);
-  const z = new Float32Array(pointCount);
-  const lum = new Float32Array(pointCount);
-  const bprp = new Float32Array(pointCount);
-  for (let i = 0; i < pointCount; i++) {
-    const off = nodesEnd + i * POINT_SIZE;
-    x[i] = buf.readFloatLE(off);
-    y[i] = buf.readFloatLE(off + 4);
-    z[i] = buf.readFloatLE(off + 8);
-    lum[i] = buf.readFloatLE(off + 12);
-    bprp[i] = buf.readFloatLE(off + 16);
-  }
+  const pointBase = buf.byteOffset + nodesEnd;
+  const pointFloats = new Float32Array(buf.buffer, pointBase, pointCount * 5);
   return {
     depth,
     halfExtentPc,
     nodeCount,
     pointCount,
     nodes: { childMask, firstChild, pointFirst, pointCount: pointCountArr },
-    points: { x, y, z, lum, bprp }
+    pointFloats
   };
 }
 function childBounds(parent, child) {
@@ -349,8 +339,8 @@ function collectCut(sc, rootBounds, eye, planes, pixelsPerRadian, pixelThreshold
     const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
     const dist = Math.max(Math.hypot(dx, dy, dz), half);
     const footprintPx = half / dist * pixelsPerRadian;
-    if (footprintPx < pixelThreshold) {
-      if (pCount > 0) out.push({ firstPoint: pFirst, count: pCount });
+    if (footprintPx < pixelThreshold && pCount > 0) {
+      out.push({ firstPoint: pFirst, count: pCount });
       return;
     }
     let childIdx = sc.nodes.firstChild[nodeIdx];
@@ -363,12 +353,21 @@ function collectCut(sc, rootBounds, eye, planes, pixelsPerRadian, pixelThreshold
   if (sc.nodeCount > 0) walk(0, rootBounds);
   return out;
 }
-function* iterateStars(sc, ranges) {
-  const { x, y, z, lum, bprp } = sc.points;
+function pointInFrustum(planes, px, py, pz) {
+  for (const p of planes) {
+    if (p.nx * px + p.ny * py + p.nz * pz + p.d < 0) return false;
+  }
+  return true;
+}
+function* iterateStars(sc, ranges, planes) {
+  const pf = sc.pointFloats;
   for (const r of ranges) {
     const end = r.firstPoint + r.count;
     for (let i = r.firstPoint; i < end; i++) {
-      yield { x: x[i], y: y[i], z: z[i], lum: lum[i], bprp: bprp[i] };
+      const base = i * 5;
+      const px = pf[base], py = pf[base + 1], pz = pf[base + 2];
+      if (!pointInFrustum(planes, px, py, pz)) continue;
+      yield { x: px, y: py, z: pz, lum: pf[base + 3], bprp: pf[base + 4] };
     }
   }
 }
@@ -400,7 +399,7 @@ async function main() {
   const starCount = ranges.reduce((a, r) => a + r.count, 0);
   console.log(`cut: ${ranges.length} node-ranges covering ${starCount} stars (M=${PIXEL_THRESHOLD}px)`);
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
-  rasterize(iterateStars(sc, ranges), hdr, {
+  rasterize(iterateStars(sc, ranges, planes), hdr, {
     camera,
     exposure: EXPOSURE,
     limitMag: LIMIT_MAG,

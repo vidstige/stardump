@@ -148,16 +148,17 @@ fn emit_leaf_points(points: &[Point], out: &mut Vec<StarcloudPoint>) {
     }
 }
 
+// Returns true if a subsample was emitted; false if |D| ≤ K (no sample stored).
+// When false, the renderer must always descend past this node.
 fn emit_subsample(
     points: &[Point],
     k: usize,
     morton_prefix: u64,
     depth: u8,
     out: &mut Vec<StarcloudPoint>,
-) {
+) -> bool {
     if points.len() <= k {
-        emit_leaf_points(points, out);
-        return;
+        return false;
     }
     let seed = splitmix64(morton_prefix ^ ((depth as u64) << 56));
     let mut ranked: Vec<(u64, usize)> = points
@@ -177,6 +178,7 @@ fn emit_subsample(
             bp_rp: p.bp_rp,
         });
     }
+    true
 }
 
 fn partition_by_child(points: &[Point], shift: u32) -> [usize; 9] {
@@ -216,8 +218,8 @@ fn build_recursive(
     }
 
     let point_first = out_points.len() as u32;
-    emit_subsample(points, sample_budget, morton_prefix, current_depth, out_points);
-    let point_count = (out_points.len() as u32) - point_first;
+    let sampled = emit_subsample(points, sample_budget, morton_prefix, current_depth, out_points);
+    let point_count = if sampled { (out_points.len() as u32) - point_first } else { 0 };
 
     let shift = (max_depth - current_depth - 1) as u32 * 3;
     let child_bounds = partition_by_child(points, shift);
@@ -364,14 +366,13 @@ mod tests {
     }
 
     #[test]
-    fn subsample_returns_all_when_fewer_than_budget() {
+    fn subsample_emits_nothing_when_fewer_than_budget() {
+        // When |D| ≤ K the renderer must descend to leaves; no sample is stored.
         let points: Vec<Point> = (0..10_u64).map(|i| make_point(i, 0, 2.0)).collect();
         let mut out = Vec::new();
-        emit_subsample(&points, 256, 0, 0, &mut out);
-        assert_eq!(out.len(), 10);
-        for p in &out {
-            assert_eq!(p.luminosity, 2.0);
-        }
+        let sampled = emit_subsample(&points, 256, 0, 0, &mut out);
+        assert!(!sampled);
+        assert_eq!(out.len(), 0);
     }
 
     #[test]
