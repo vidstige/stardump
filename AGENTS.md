@@ -7,6 +7,9 @@ Callee come before callers in a file.
 Test must be useful and test something meaningful. Tests content and names describe the current state of the code.
 When asked to optimize performance, always measure before/after to make sure changes really speed things up.
 
+### Tools
+* `sh/convert.sh` can be used to convert ppm to png
+
 ### Committing
 Split separable work into separate commits, with one step or concern per commit.
 Prefix refactoring commit messages with `refactor: `
