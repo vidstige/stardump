@@ -7,9 +7,10 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Path as AxumPath, RawQuery, State};
 use axum::http::{Method, StatusCode};
-use axum::http::header::{CONTENT_TYPE, HeaderValue};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use csv::Writer;
@@ -20,6 +21,7 @@ use crate::formats::{
     dequantize_point, read_packed_octree,
 };
 use crate::octree::Bounds3;
+use crate::starcloud::STARCLOUD_FILENAME;
 use crate::storage::{local_path, validate_packed_index_layout};
 use crate::vec3::Vec3;
 
@@ -628,6 +630,39 @@ async fn query_frustum(
         .into_response())
 }
 
+async fn serve_starcloud(
+    State(catalog): State<Arc<QueryCatalog>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Response, (StatusCode, String)> {
+    if !valid_dataset_name(&name) {
+        return Err(bad_request("dataset name contains invalid characters"));
+    }
+    let path = dataset_root(&catalog.data_root, &name).join(STARCLOUD_FILENAME);
+    let file = tokio::fs::File::open(&path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            not_found(format!("unknown starcloud dataset {name}"))
+        } else {
+            internal_error(error.into())
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|error| internal_error(error.into()))?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    Ok((
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
+            (
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
+            ),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response())
+}
+
 async fn query_lod_frustum(
     State(catalog): State<Arc<QueryCatalog>>,
     AxumPath(name): AxumPath<String>,
@@ -838,6 +873,7 @@ pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
         .route("/query/{name}/radius", get(query_radius))
         .route("/query/{name}/frustum", get(query_frustum))
         .route("/query/{name}/lod-frustum", get(query_lod_frustum))
+        .route("/datasets/{name}/starcloud.bin", get(serve_starcloud))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
         .with_state(catalog)
 }

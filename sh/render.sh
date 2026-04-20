@@ -37,9 +37,10 @@ while (( $# > 0 )); do
 done
 
 case "$mode" in
-  fast)  src="render.ts";       js="render.js" ;;
-  exact) src="render-exact.ts"; js="render-exact.js" ;;
-  *) echo "unknown --mode '$mode' (expected fast|exact)" >&2; exit 1 ;;
+  fast)    src="render.ts";       js="render.js" ;;
+  fast-v2) src="render-fast.ts";  js="render-fast.js" ;;
+  exact)   src="render-exact.ts"; js="render-exact.js" ;;
+  *) echo "unknown --mode '$mode' (expected fast|fast-v2|exact)" >&2; exit 1 ;;
 esac
 
 # Rebuild JS if source is newer (or JS is missing).

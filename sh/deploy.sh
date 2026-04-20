@@ -23,3 +23,4 @@ export IMAGE_URI="${IMAGE_URI:-gcr.io/${project_id}/star-dump:latest}"
 ./sh/deploy-service.sh
 ./sh/deploy-ingest-job.sh
 ./sh/deploy-build-index-job.sh
+./sh/deploy-build-starcloud-job.sh

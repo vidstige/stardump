@@ -20,22 +20,26 @@ project_number="$(gcloud projects describe "${project_id}" --format='value(proje
 image_uri="${IMAGE_URI:-gcr.io/${project_id}/star-dump:latest}"
 bucket_name="${BUCKET_NAME:-star-dump-data-${project_number}}"
 mount_root="${MOUNT_ROOT:-/mnt/gcs}"
-service_name="${SERVICE_NAME:-star-dump-query-api}"
+job_name="${BUILD_STARCLOUD_JOB_NAME:-star-dump-build-starcloud}"
 service_account_name="${SERVICE_ACCOUNT_NAME:-star-dump-run}"
 service_account_email="${SERVICE_ACCOUNT_EMAIL:-${service_account_name}@${project_id}.iam.gserviceaccount.com}"
 
-gcloud run deploy "${service_name}" \
-  --platform managed \
+if gcloud beta run jobs describe "${job_name}" >/dev/null 2>&1; then
+  deploy_command=update
+else
+  deploy_command=create
+fi
+
+gcloud beta run jobs "${deploy_command}" "${job_name}" \
   --image "${image_uri}" \
   --service-account "${service_account_email}" \
-  --port 8080 \
-  --memory 4Gi \
-  --cpu 2 \
-  --add-volume "name=gcs,type=cloud-storage,bucket=${bucket_name},readonly=true" \
+  --cpu 4 \
+  --memory 8Gi \
+  --task-timeout=86400 \
+  --max-retries=0 \
+  --add-volume "name=gcs,type=cloud-storage,bucket=${bucket_name},readonly=false" \
   --add-volume-mount "volume=gcs,mount-path=${mount_root}" \
-  --command /usr/local/bin/query-api \
-  --args="--data-root,${mount_root},--bind,0.0.0.0:8080" \
-  --allow-unauthenticated
+  --command /usr/local/bin/build-starcloud-job
 
 echo "image: ${image_uri}"
-echo "service: ${service_name}"
+echo "build_starcloud_job: ${job_name}"
