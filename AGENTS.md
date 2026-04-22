@@ -6,6 +6,7 @@ After a refactor, recursively follow up with cleanup to avoid code structure we 
 Callee come before callers in a file.
 Test must be useful and test something meaningful. Tests content and names describe the current state of the code.
 When asked to optimize performance, always measure before/after to make sure changes really speed things up.
+Prefer repo-relative paths over absolute paths
 
 ### Tools
 * `sh/convert.sh` can be used to convert ppm to png
