@@ -11,9 +11,7 @@
         background: #04070d;
       }
 
-      * {
-        box-sizing: border-box;
-      }
+      * { box-sizing: border-box; }
 
       body {
         margin: 0;
@@ -40,97 +38,182 @@
 
       .hud {
         position: absolute;
-        top: 24px;
-        left: 24px;
-        max-width: 320px;
-        padding: 14px 16px;
+        top: 14px;
+        left: 14px;
+        width: 290px;
+        padding: 9px 11px;
         border: 1px solid rgba(159, 184, 222, 0.2);
-        border-radius: 12px;
-        background: rgba(4, 7, 13, 0.72);
+        border-radius: 10px;
+        background: rgba(4, 7, 13, 0.82);
         backdrop-filter: blur(18px);
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
       }
 
       .hud h1 {
-        margin: 0 0 6px;
-        font-size: 15px;
+        margin: 0 0 2px;
+        font-size: 12px;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
 
       .hud .status {
-        margin: 0 0 8px;
-        font-size: 12px;
-        line-height: 1.4;
+        margin: 0;
+        font-size: 10px;
+        line-height: 1.3;
         color: rgba(235, 243, 255, 0.5);
         min-height: 1em;
       }
 
-      .hud .meta {
-        display: grid;
-        gap: 8px;
+      .hud hr {
+        border: none;
+        border-top: 1px solid rgba(159, 184, 222, 0.1);
+        margin: 2px 0;
       }
 
-      .hud .field {
-        display: grid;
+      /* Info rows */
+      .info-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
         gap: 4px;
       }
 
-      .hud label,
-      .hud .label {
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: rgba(235, 243, 255, 0.56);
-      }
-
-      .hud code,
-      .hud select {
-        width: 100%;
-        font: inherit;
-        font-size: 13px;
-        color: #ebf3ff;
-      }
-
-      .hud code {
-        display: block;
-        padding: 8px 10px;
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.06);
-        overflow-wrap: anywhere;
-      }
-
-      .hud code#api-root {
+      .info-row .lbl {
         font-size: 10px;
-        padding: 5px 8px;
-        color: rgba(235, 243, 255, 0.55);
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: rgba(235, 243, 255, 0.5);
+        white-space: nowrap;
+        flex-shrink: 0;
       }
 
-      .hud select {
-        padding: 8px 10px;
-        border: 1px solid rgba(159, 184, 222, 0.2);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.06);
+      .info-row code {
+        font: inherit;
+        font-size: 10px;
+        color: rgba(235, 243, 255, 0.85);
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
-      .hud .slider-row {
+      /* Select rows */
+      .select-row {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 5px;
       }
 
-      .hud .slider-row code {
-        width: auto;
-        flex-shrink: 0;
+      .select-row label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: rgba(235, 243, 255, 0.5);
         white-space: nowrap;
+        flex-shrink: 0;
+        width: 50px;
+      }
+
+      .hud select {
+        flex: 1;
+        font: inherit;
+        font-size: 10px;
+        color: #ebf3ff;
+        padding: 2px 5px;
+        border: 1px solid rgba(159, 184, 222, 0.2);
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      /* Slider rows */
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .slider-row label {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: rgba(235, 243, 255, 0.5);
+        white-space: nowrap;
+        flex-shrink: 0;
+        width: 80px;
+        display: flex;
+        align-items: center;
+        gap: 3px;
       }
 
       .hud input[type="range"] {
         flex: 1;
+        height: 12px;
         accent-color: #9fb8de;
         cursor: pointer;
+        min-width: 0;
       }
+
+      .slider-row code {
+        font: inherit;
+        font-size: 10px;
+        color: rgba(235, 243, 255, 0.85);
+        white-space: nowrap;
+        flex-shrink: 0;
+        width: 46px;
+        text-align: right;
+      }
+
+      /* Tooltip "i" badge */
+      .tip {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: rgba(159, 184, 222, 0.22);
+        color: rgba(235, 243, 255, 0.65);
+        font-size: 7px;
+        font-style: italic;
+        font-weight: 700;
+        text-transform: none;
+        letter-spacing: 0;
+        cursor: default;
+        flex-shrink: 0;
+        line-height: 1;
+      }
+
+      .tip::after {
+        content: attr(data-tip);
+        display: none;
+        position: absolute;
+        left: calc(100% + 7px);
+        top: 50%;
+        transform: translateY(-50%);
+        background: rgba(6, 12, 26, 0.97);
+        border: 1px solid rgba(159, 184, 222, 0.28);
+        border-radius: 7px;
+        padding: 8px 10px;
+        font: 400 11px/1.5 "IBM Plex Sans", sans-serif;
+        color: rgba(235, 243, 255, 0.88);
+        width: 210px;
+        white-space: normal;
+        z-index: 200;
+        pointer-events: none;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.7);
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 400;
+      }
+
+      .tip:hover::after { display: block; }
     </style>
   </head>
   <body>
@@ -138,41 +221,47 @@
       <div class="hud">
         <h1>star-dump</h1>
         <p id="status" class="status"></p>
-        <div class="meta">
-          <div class="field">
-            <label for="api-select">Base URL</label>
-            <select id="api-select"></select>
-          </div>
-          <div class="field">
-            <label for="dataset-select">Dataset</label>
-            <select id="dataset-select"></select>
-          </div>
-          <div class="field">
-            <div class="label">LOD units</div>
-            <code id="units-count">0</code>
-          </div>
-          <div class="field">
-            <div class="label">Pending fetches</div>
-            <code id="query-count">0</code>
-          </div>
-          <div class="field">
-            <div class="label">Coordinates (pc)</div>
-            <code id="coordinates">0.00, 0.00, 0.00</code>
-          </div>
-          <div class="field">
-            <label for="far-slider">Far limit</label>
-            <div class="slider-row">
-              <input type="range" id="far-slider" min="5" max="500" step="5" value="50">
-              <code id="far-value">50 pc</code>
-            </div>
-          </div>
-          <div class="field">
-            <label for="exposure-slider">Exposure</label>
-            <div class="slider-row">
-              <input type="range" id="exposure-slider" min="0" max="100" step="1" value="50">
-              <code id="exposure-value">1.0e-3</code>
-            </div>
-          </div>
+
+        <div class="select-row">
+          <label for="api-select">URL</label>
+          <select id="api-select"></select>
+        </div>
+        <div class="select-row">
+          <label for="dataset-select">Dataset</label>
+          <select id="dataset-select"></select>
+        </div>
+
+        <hr>
+
+        <div class="info-row">
+          <span class="lbl">LOD units</span>
+          <code id="units-count">0</code>
+        </div>
+        <div class="info-row">
+          <span class="lbl">Pending</span>
+          <code id="query-count">0</code>
+        </div>
+        <div class="info-row">
+          <span class="lbl">Position (pc)</span>
+          <code id="coordinates">0.00, 0.00, 0.00</code>
+        </div>
+
+        <hr>
+
+        <div class="slider-row">
+          <label for="far-slider">Far<span class="tip" data-tip="Maximum render distance in parsecs. Stars beyond this are clipped from the view frustum.">i</span></label>
+          <input type="range" id="far-slider" min="5" max="5000" step="5" value="500">
+          <code id="far-value">500 pc</code>
+        </div>
+        <div class="slider-row">
+          <label for="exposure-slider">Exposure<span class="tip" data-tip="Overall brightness multiplier. Higher reveals faint stars but overexposes bright ones.">i</span></label>
+          <input type="range" id="exposure-slider" min="0" max="100" step="1" value="50">
+          <code id="exposure-value">1.0e+0</code>
+        </div>
+        <div class="slider-row">
+          <label for="pixel-threshold-slider">Pixel thr<span class="tip" data-tip="LOD cut-off in pixels. When a node's sky footprint is smaller than this, its precomputed subsample is used instead of descending. Higher = faster but coarser detail.">i</span></label>
+          <input type="range" id="pixel-threshold-slider" min="1" max="16" step="1" value="8">
+          <code id="pixel-threshold-value">8 px</code>
         </div>
       </div>
     </div>

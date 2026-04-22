@@ -49,7 +49,7 @@ const LOCAL_API  = "http://127.0.0.1:3000";
 const API_URLS   = [REMOTE_API, LOCAL_API];
 let API_ROOT = searchParams.get("api") ?? REMOTE_API;
 const DATASET_OVERRIDE = searchParams.get("dataset");
-const PIXEL_THRESHOLD = 4;
+let pixelThreshold = 8;
 const LOD_THROTTLE_MS = 100;
 const MAX_CONCURRENT_FETCHES = 8;
 
@@ -335,11 +335,14 @@ const queryCountElement     = document.querySelector<HTMLElement>("#query-count"
 const coordinatesElement    = document.querySelector<HTMLElement>("#coordinates");
 const farSliderElement      = document.querySelector<HTMLInputElement>("#far-slider");
 const farValueElement       = document.querySelector<HTMLElement>("#far-value");
-const exposureSliderElement = document.querySelector<HTMLInputElement>("#exposure-slider");
-const exposureValueElement  = document.querySelector<HTMLElement>("#exposure-value");
+const exposureSliderElement        = document.querySelector<HTMLInputElement>("#exposure-slider");
+const exposureValueElement         = document.querySelector<HTMLElement>("#exposure-value");
+const pixelThresholdSliderElement  = document.querySelector<HTMLInputElement>("#pixel-threshold-slider");
+const pixelThresholdValueElement   = document.querySelector<HTMLElement>("#pixel-threshold-value");
 if (!statusElement || !apiSelectElement || !datasetSelectElement ||
     !unitsCountElement || !coordinatesElement ||
-    !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement) {
+    !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement ||
+    !pixelThresholdSliderElement || !pixelThresholdValueElement) {
   throw new Error("missing hud elements");
 }
 const hudStatus         = statusElement;
@@ -348,20 +351,22 @@ const datasetSelect     = datasetSelectElement;
 const hudUnitsCount     = unitsCountElement;
 const hudQueryCount     = queryCountElement;
 const hudCoordinates    = coordinatesElement;
-const hudFarSlider      = farSliderElement;
-const hudFarValue       = farValueElement;
-const hudExposureSlider = exposureSliderElement;
-const hudExposureValue  = exposureValueElement;
+const hudFarSlider           = farSliderElement;
+const hudFarValue            = farValueElement;
+const hudExposureSlider      = exposureSliderElement;
+const hudExposureValue       = exposureValueElement;
+const hudPixelThresholdSlider = pixelThresholdSliderElement;
+const hudPixelThresholdValue  = pixelThresholdValueElement;
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
+canvas.width  = window.innerWidth;
+canvas.height = window.innerHeight;
 
 const regl = createRegl({
   canvas,
-  attributes: {
-    antialias: false,
-    alpha: false,
-  },
+  attributes: { antialias: false, alpha: false },
+  extensions: ["OES_texture_float", "WEBGL_color_buffer_float"],
 });
 
 const positionBuffer  = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
@@ -369,19 +374,58 @@ const luminosityBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 
 const bpRpBuffer      = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
 
+// Offscreen float HDR accumulation buffer + full-screen tone-map pass
+const hdrBuffer = regl.framebuffer({
+  width:       canvas.width,
+  height:      canvas.height,
+  colorFormat: "rgba",
+  colorType:   "float",
+  depth:       false,
+});
+
+const quadBuffer = regl.buffer(new Float32Array([
+  -1, -1,  1, -1,  1,  1,
+  -1, -1,  1,  1, -1,  1,
+]));
+
+const toneMap = regl({
+  vert: `
+    precision highp float;
+    attribute vec2 position;
+    varying vec2 vUv;
+    void main() {
+      vUv = position * 0.5 + 0.5;
+      gl_Position = vec4(position, 0.0, 1.0);
+    }
+  `,
+  frag: `
+    precision highp float;
+    uniform sampler2D uHdr;
+    varying vec2 vUv;
+    void main() {
+      vec3 hdr = texture2D(uHdr, vUv).rgb;
+      gl_FragColor = vec4(pow(hdr / (1.0 + hdr), vec3(1.0 / 2.2)), 1.0);
+    }
+  `,
+  attributes: { position: { buffer: quadBuffer, size: 2 } },
+  uniforms:   { uHdr: () => (hdrBuffer as any).color[0] },
+  count: 6,
+  depth: { enable: false },
+});
+
 const camera: Camera = {
   position:    [0, 0, 0],
   orientation: [0, 0, 0, 1],
   fovY:  Math.PI / 3,
   near:  0.1,
-  far:   50,
+  far:   500,
 };
 
 const keyState = new Set<string>();
 let previousTime = 0;
 let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
-let exposure = 30.0;
+let exposure = 500.0;
 
 let nodeTable: NodeTable | null = null;
 let nodePointCache = new Map<number, Float32Array>();
@@ -483,7 +527,7 @@ function collectAndUploadStars(
     min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
     max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
   };
-  const ranges = collectCut(nt, rootBounds, eye, planes, pixelsPerRadian, PIXEL_THRESHOLD);
+  const ranges = collectCut(nt, rootBounds, eye, planes, pixelsPerRadian, pixelThreshold);
 
   // Count cached points for allocation.
   let totalCount = 0;
@@ -582,7 +626,7 @@ hudFarSlider.addEventListener("input", () => {
 });
 
 const exposureMin = Math.log10(1e-3);
-const exposureMax = Math.log10(1e3);
+const exposureMax = Math.log10(1e6);
 hudExposureSlider.value = String(
   ((Math.log10(exposure) - exposureMin) / (exposureMax - exposureMin)) * 100
 );
@@ -592,6 +636,15 @@ hudExposureSlider.addEventListener("input", () => {
   const t = Number(hudExposureSlider.value) / 100;
   exposure = Math.pow(10, exposureMin + t * (exposureMax - exposureMin));
   hudExposureValue.textContent = exposure.toExponential(1);
+});
+
+
+hudPixelThresholdSlider.value = String(pixelThreshold);
+hudPixelThresholdValue.textContent = `${pixelThreshold} px`;
+hudPixelThresholdSlider.addEventListener("input", () => {
+  pixelThreshold = Number(hudPixelThresholdSlider.value);
+  hudPixelThresholdValue.textContent = `${pixelThreshold} px`;
+  lodDirty = true;
 });
 
 function populateDatasetSelect(names: string[], selectedName: string): void {
@@ -703,8 +756,8 @@ const drawStars = regl({
     uniform float exposure;
 
     varying vec3 vColor;
-    varying float vPeak;
-    varying float vSigmaUv;
+    varying float vBrightness;
+    varying float vGaussCoeff;
 
     vec3 bpRpToColor(float t) {
       vec3 blue   = vec3(0.6, 0.7, 1.0);
@@ -724,28 +777,28 @@ const drawStars = regl({
       float t = clamp((bpRp + 0.5) / 3.5, 0.0, 1.0);
       vColor = (bpRp != bpRp) ? vec3(1.0) : bpRpToColor(t);
 
-      float rPx = clamp(sqrt(brightness) * 4.0, 1.0, 8.0);
-      float sizePx = 2.0 * rPx + 1.0;
-      vPeak = brightness;
-      float actualSizePx = clamp(sizePx, 1.0, 128.0);
-      vSigmaUv = rPx / (actualSizePx * sqrt(8.0));
-      gl_PointSize = actualSizePx;
+      // Match render-fast.ts: radius scales with brightness, clamped 0.8–8 px
+      float rPx = clamp(brightness * 2.0, 0.8, 8.0);
+      float spriteSizePx = ceil(rPx) * 2.0 + 1.0;
+      gl_PointSize = spriteSizePx;
+      vBrightness = brightness;
+      // Convert Gaussian coeff from pixel² to gl_PointCoord² space
+      vGaussCoeff = 4.0 * spriteSizePx * spriteSizePx / (rPx * rPx);
     }
   `,
   frag: `
     precision highp float;
 
     varying vec3 vColor;
-    varying float vPeak;
-    varying float vSigmaUv;
+    varying float vBrightness;
+    varying float vGaussCoeff;
 
     void main() {
       vec2 d = gl_PointCoord - 0.5;
       float r2 = dot(d, d);
-      float val = vPeak * exp(-r2 / (2.0 * vSigmaUv * vSigmaUv));
-      if (val < 1e-7) discard;
-      vec3 linear = vColor * val;
-      gl_FragColor = vec4(pow(linear / (1.0 + linear), vec3(1.0 / 2.2)), 1.0);
+      float val = vBrightness * exp(-r2 * vGaussCoeff);
+      if (val < 1e-6) discard;
+      gl_FragColor = vec4(vColor * val, 1.0);
     }
   `,
   attributes: {
@@ -797,8 +850,25 @@ regl.frame(({ time }) => {
     }
   }
 
-  regl.clear({ color: [0, 0, 0, 1], depth: 1 });
-  drawStars();
+  // Resize canvas + HDR buffer to match display
+  const w = canvas.clientWidth  | 0;
+  const h = canvas.clientHeight | 0;
+  if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+    canvas.width  = w;
+    canvas.height = h;
+    hdrBuffer.resize(w, h);
+    lodDirty = true;
+  }
+
+  // Pass 1: accumulate stars into float HDR buffer (linear, no tone map)
+  regl({ framebuffer: hdrBuffer })(() => {
+    regl.clear({ color: [0, 0, 0, 1] });
+    drawStars();
+  });
+
+  // Pass 2: Reinhardt + gamma tone-map HDR → 8-bit screen
+  regl.clear({ color: [0, 0, 0, 1] });
+  toneMap();
 });
 
 void loadDataset();
