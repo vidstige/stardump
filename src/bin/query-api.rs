@@ -6,7 +6,7 @@ use star_dump::query_api::{QueryCatalog, build_app};
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long)]
+    #[arg(long, default_value = "data")]
     data_root: String,
 
     #[arg(long, default_value = "127.0.0.1:3000")]
