@@ -6,10 +6,11 @@ use anyhow::{Context, Result};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{Method, StatusCode};
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderValue, RANGE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::starcloud::STARCLOUD_FILENAME;
@@ -70,34 +71,57 @@ async fn list_indices(
 async fn serve_starcloud(
     State(catalog): State<Arc<QueryCatalog>>,
     AxumPath(name): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     if !valid_dataset_name(&name) {
         return Err(bad_request("dataset name contains invalid characters"));
     }
     let path = dataset_root(&catalog.data_root, &name).join(STARCLOUD_FILENAME);
-    let file = tokio::fs::File::open(&path).await.map_err(|error| {
+    let mut file = tokio::fs::File::open(&path).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             not_found(format!("unknown starcloud dataset {name}"))
         } else {
             internal_error(error.into())
         }
     })?;
-    let metadata = file
+    let total = file
         .metadata()
         .await
-        .map_err(|error| internal_error(error.into()))?;
-    let stream = tokio_util::io::ReaderStream::new(file);
-    Ok((
-        [
-            (CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
-            (
-                CONTENT_LENGTH,
-                HeaderValue::from_str(&metadata.len().to_string()).unwrap(),
-            ),
-        ],
-        Body::from_stream(stream),
-    )
-        .into_response())
+        .map_err(|error| internal_error(error.into()))?
+        .len();
+
+    let range = headers.get(RANGE).and_then(|v| {
+        let s = v.to_str().ok()?;
+        let s = s.strip_prefix("bytes=")?;
+        let (a, b) = s.split_once('-')?;
+        Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))
+    });
+
+    if let Some((start, end)) = range {
+        let end = end.min(total.saturating_sub(1));
+        let len = end - start + 1;
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|e| internal_error(e.into()))?;
+        let stream = tokio_util::io::ReaderStream::new(file.take(len));
+        Ok(Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header(CONTENT_LENGTH, len.to_string())
+            .header(ACCEPT_RANGES, "bytes")
+            .header(CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
+            .body(Body::from_stream(stream))
+            .unwrap())
+    } else {
+        let stream = tokio_util::io::ReaderStream::new(file);
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header(CONTENT_LENGTH, total.to_string())
+            .header(ACCEPT_RANGES, "bytes")
+            .body(Body::from_stream(stream))
+            .unwrap())
+    }
 }
 
 impl QueryCatalog {
