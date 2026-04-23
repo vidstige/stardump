@@ -337,11 +337,17 @@ const farSliderElement      = document.querySelector<HTMLInputElement>("#far-sli
 const farValueElement       = document.querySelector<HTMLElement>("#far-value");
 const exposureSliderElement        = document.querySelector<HTMLInputElement>("#exposure-slider");
 const exposureValueElement         = document.querySelector<HTMLElement>("#exposure-value");
+const sizeScaleSliderElement       = document.querySelector<HTMLInputElement>("#size-scale-slider");
+const sizeScaleValueElement        = document.querySelector<HTMLElement>("#size-scale-value");
+const maxRadiusSliderElement       = document.querySelector<HTMLInputElement>("#max-radius-slider");
+const maxRadiusValueElement        = document.querySelector<HTMLElement>("#max-radius-value");
 const pixelThresholdSliderElement  = document.querySelector<HTMLInputElement>("#pixel-threshold-slider");
 const pixelThresholdValueElement   = document.querySelector<HTMLElement>("#pixel-threshold-value");
 if (!statusElement || !apiSelectElement || !datasetSelectElement ||
     !unitsCountElement || !coordinatesElement ||
     !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement ||
+    !sizeScaleSliderElement || !sizeScaleValueElement ||
+    !maxRadiusSliderElement || !maxRadiusValueElement ||
     !pixelThresholdSliderElement || !pixelThresholdValueElement) {
   throw new Error("missing hud elements");
 }
@@ -355,6 +361,10 @@ const hudFarSlider           = farSliderElement;
 const hudFarValue            = farValueElement;
 const hudExposureSlider      = exposureSliderElement;
 const hudExposureValue       = exposureValueElement;
+const hudSizeScaleSlider     = sizeScaleSliderElement;
+const hudSizeScaleValue      = sizeScaleValueElement;
+const hudMaxRadiusSlider     = maxRadiusSliderElement;
+const hudMaxRadiusValue      = maxRadiusValueElement;
 const hudPixelThresholdSlider = pixelThresholdSliderElement;
 const hudPixelThresholdValue  = pixelThresholdValueElement;
 
@@ -425,7 +435,9 @@ const keyState = new Set<string>();
 let previousTime = 0;
 let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
-let exposure = 500.0;
+let exposure   = 500.0;
+let sizeScale  = 1.0;
+let maxRadius  = 1.0;
 
 let nodeTable: NodeTable | null = null;
 let nodePointCache = new Map<number, Float32Array>();
@@ -638,6 +650,19 @@ hudExposureSlider.addEventListener("input", () => {
   hudExposureValue.textContent = exposure.toExponential(1);
 });
 
+hudSizeScaleSlider.value = String(sizeScale);
+hudSizeScaleValue.textContent = sizeScale.toFixed(1);
+hudSizeScaleSlider.addEventListener("input", () => {
+  sizeScale = Number(hudSizeScaleSlider.value);
+  hudSizeScaleValue.textContent = sizeScale.toFixed(1);
+});
+
+hudMaxRadiusSlider.value = String(maxRadius);
+hudMaxRadiusValue.textContent = `${maxRadius.toFixed(1)} px`;
+hudMaxRadiusSlider.addEventListener("input", () => {
+  maxRadius = Number(hudMaxRadiusSlider.value);
+  hudMaxRadiusValue.textContent = `${maxRadius.toFixed(1)} px`;
+});
 
 hudPixelThresholdSlider.value = String(pixelThreshold);
 hudPixelThresholdValue.textContent = `${pixelThreshold} px`;
@@ -754,6 +779,8 @@ const drawStars = regl({
     uniform mat4 view;
     uniform vec3 cameraPosition;
     uniform float exposure;
+    uniform float uSizeScale;
+    uniform float uMaxRadius;
 
     varying vec3 vColor;
     varying float vBrightness;
@@ -777,8 +804,8 @@ const drawStars = regl({
       float t = clamp((bpRp + 0.5) / 3.5, 0.0, 1.0);
       vColor = (bpRp != bpRp) ? vec3(1.0) : bpRpToColor(t);
 
-      // Match render-fast.ts: radius scales with brightness, clamped 0.8–8 px
-      float rPx = clamp(brightness * 2.0, 0.8, 8.0);
+      // Match render-fast.ts: radius scales with brightness, clamped to [0.8, uMaxRadius]
+      float rPx = clamp(brightness * uSizeScale, 0.8, uMaxRadius);
       float spriteSizePx = ceil(rPx) * 2.0 + 1.0;
       gl_PointSize = spriteSizePx;
       vBrightness = brightness;
@@ -811,6 +838,8 @@ const drawStars = regl({
     view:           () => viewMatrix(camera.position, camera.orientation),
     cameraPosition: () => camera.position,
     exposure:       () => exposure,
+    uSizeScale:     () => sizeScale,
+    uMaxRadius:     () => maxRadius,
   },
   primitive: "points",
   count: () => scene.count,
