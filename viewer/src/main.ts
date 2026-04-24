@@ -376,7 +376,7 @@ canvas.height = window.innerHeight;
 const regl = createRegl({
   canvas,
   attributes: { antialias: false, alpha: false },
-  extensions: ["OES_texture_float", "WEBGL_color_buffer_float"],
+  extensions: ["OES_texture_half_float", "EXT_color_buffer_half_float"],
 });
 
 const positionBuffer  = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
@@ -389,7 +389,7 @@ const hdrBuffer = regl.framebuffer({
   width:       canvas.width,
   height:      canvas.height,
   colorFormat: "rgba",
-  colorType:   "float",
+  colorType:   "half float",
   depth:       false,
 });
 
