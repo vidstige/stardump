@@ -266,16 +266,16 @@ function collectCut(
   planes: Plane[],
   pixelsPerRadian: number,
   pixelThreshold: number,
-): { nodeIdx: number; count: number }[] {
-  const out: { nodeIdx: number; count: number }[] = [];
+): { nodeIdx: number; count: number; depth: number }[] {
+  const out: { nodeIdx: number; count: number; depth: number }[] = [];
 
-  function walk(nodeIdx: number, bounds: Bounds): void {
+  function walk(nodeIdx: number, bounds: Bounds, depth: number): void {
     if (!frustumIntersectsBounds(planes, bounds)) return;
     const cm     = nt.childMask[nodeIdx];
     const pCount = nt.pointCount[nodeIdx];
 
     if (cm === 0) {
-      if (pCount > 0) out.push({ nodeIdx, count: pCount });
+      if (pCount > 0) out.push({ nodeIdx, count: pCount, depth });
       return;
     }
 
@@ -285,19 +285,19 @@ function collectCut(
     const footprintPx = (half / dist) * pixelsPerRadian;
 
     if (footprintPx < pixelThreshold && pCount > 0) {
-      out.push({ nodeIdx, count: pCount });
+      out.push({ nodeIdx, count: pCount, depth });
       return;
     }
 
     let childIdx = nt.firstChild[nodeIdx];
     for (let c = 0; c < 8; c++) {
       if ((cm & (1 << c)) === 0) continue;
-      walk(childIdx, childBounds(bounds, c));
+      walk(childIdx, childBounds(bounds, c), depth + 1);
       childIdx++;
     }
   }
 
-  if (nt.nodeCount > 0) walk(0, rootBounds);
+  if (nt.nodeCount > 0) walk(0, rootBounds, 0);
   return out;
 }
 
@@ -331,7 +331,7 @@ if (!app) {
 const statusElement         = document.querySelector<HTMLParagraphElement>("#status");
 const apiSelectElement      = document.querySelector<HTMLSelectElement>("#api-select");
 const datasetSelectElement  = document.querySelector<HTMLSelectElement>("#dataset-select");
-const unitsCountElement     = document.querySelector<HTMLElement>("#units-count");
+const lodBarElement         = document.querySelector<HTMLElement>("#lod-fill");
 const queryCountElement     = document.querySelector<HTMLElement>("#query-count");
 const coordinatesElement    = document.querySelector<HTMLElement>("#coordinates");
 const farSliderElement      = document.querySelector<HTMLInputElement>("#far-slider");
@@ -345,7 +345,7 @@ const maxRadiusValueElement        = document.querySelector<HTMLElement>("#max-r
 const pixelThresholdSliderElement  = document.querySelector<HTMLInputElement>("#pixel-threshold-slider");
 const pixelThresholdValueElement   = document.querySelector<HTMLElement>("#pixel-threshold-value");
 if (!statusElement || !apiSelectElement || !datasetSelectElement ||
-    !unitsCountElement || !coordinatesElement ||
+    !lodBarElement || !coordinatesElement ||
     !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement ||
     !sizeScaleSliderElement || !sizeScaleValueElement ||
     !maxRadiusSliderElement || !maxRadiusValueElement ||
@@ -355,7 +355,7 @@ if (!statusElement || !apiSelectElement || !datasetSelectElement ||
 const hudStatus         = statusElement;
 const apiSelect         = apiSelectElement;
 const datasetSelect     = datasetSelectElement;
-const hudUnitsCount     = unitsCountElement;
+const hudLodBar         = lodBarElement;
 const hudQueryCount     = queryCountElement;
 const hudCoordinates    = coordinatesElement;
 const hudFarSlider           = farSliderElement;
@@ -511,6 +511,7 @@ async function fetchNodePoints(
     if (nodeTable === nt) {
       nodePointCache.set(nodeIdx, new Float32Array(buf));
       lodDirty = true;
+      updateLodBar();
     }
   } finally {
     pendingFetches.delete(nodeIdx);
@@ -529,13 +530,40 @@ function updateBuffers(
   scene.count = count;
 }
 
+type LeafInfo = { nodeIdx: number; count: number };
+let allLeaves: LeafInfo[] = [];
+
+function buildLeafList(nt: NodeTable): LeafInfo[] {
+  const leaves: LeafInfo[] = [];
+  function walk(nodeIdx: number): void {
+    if (nt.childMask[nodeIdx] === 0) {
+      leaves.push({ nodeIdx, count: nt.pointCount[nodeIdx] });
+      return;
+    }
+    let childIdx = nt.firstChild[nodeIdx];
+    for (let c = 0; c < 8; c++) {
+      if ((nt.childMask[nodeIdx] & (1 << c)) === 0) continue;
+      walk(childIdx);
+      childIdx++;
+    }
+  }
+  if (nt.nodeCount > 0) walk(0);
+  return leaves;
+}
+
+function updateLodBar(): void {
+  if (allLeaves.length === 0) return;
+  const loaded = allLeaves.filter(l => nodePointCache.has(l.nodeIdx)).length;
+  hudLodBar.style.width = `${(loaded / allLeaves.length * 100).toFixed(1)}%`;
+}
+
 function collectAndUploadStars(
   nt: NodeTable,
   eye: Vec3,
   planes: Plane[],
   pixelsPerRadian: number,
   currentDataset: string,
-): number {
+): void {
   const rootBounds: Bounds = {
     min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
     max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
@@ -582,7 +610,6 @@ function collectAndUploadStars(
     bpRps.subarray(0, out),
     out,
   );
-  return out;
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -603,7 +630,8 @@ async function loadDataset(): Promise<void> {
   try {
     const name = await ensureDatasetName();
     nodeTable = await fetchNodeTable(API_ROOT, name);
-    hudUnitsCount.textContent = `${nodeTable.nodeCount} nodes`;
+    allLeaves = buildLeafList(nodeTable);
+    updateLodBar();
     lodDirty = true;
   } catch (error) {
     hudStatus.textContent = error instanceof Error ? error.message : String(error);
@@ -872,11 +900,10 @@ regl.frame(({ time }) => {
         camera.position, forward, right, up,
         camera.near, camera.far, camera.fovY, aspect,
       );
-      const count = collectAndUploadStars(
+      collectAndUploadStars(
         nodeTable, camera.position, planes, pixelsPerRadian,
         datasetName ?? "",
       );
-      hudUnitsCount.textContent = String(count);
     }
   }
 

@@ -130,6 +130,21 @@
         background: rgba(255, 255, 255, 0.06);
       }
 
+      #lod-bar {
+        width: 100%;
+        height: 6px;
+        border-radius: 3px;
+        margin: 1px 0 3px;
+        background: #1e2d42;
+      }
+      #lod-fill {
+        height: 100%;
+        border-radius: 3px;
+        background: #9fb8de;
+        width: 0%;
+        transition: width 0.3s;
+      }
+
       /* Slider rows */
       .slider-row {
         display: flex;
@@ -234,9 +249,9 @@
         <hr>
 
         <div class="info-row">
-          <span class="lbl">LOD units</span>
-          <code id="units-count">0</code>
+          <span class="lbl">LOD</span>
         </div>
+        <div id="lod-bar"><div id="lod-fill"></div></div>
         <div class="info-row">
           <span class="lbl">Pending</span>
           <code id="query-count">0</code>
