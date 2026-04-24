@@ -380,9 +380,7 @@ const regl = createRegl({
   extensions: ["OES_texture_half_float", "EXT_color_buffer_half_float"],
 });
 
-const positionBuffer  = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
-const luminosityBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
-const bpRpBuffer      = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
+const starBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
 
 // Offscreen float HDR accumulation buffer + full-screen tone-map pass
@@ -518,15 +516,8 @@ async function fetchNodePoints(
   }
 }
 
-function updateBuffers(
-  positions: Float32Array,
-  luminosities: Float32Array,
-  bpRps: Float32Array,
-  count: number,
-): void {
-  positionBuffer(positions);
-  luminosityBuffer(luminosities);
-  bpRpBuffer(bpRps);
+function updateBuffers(data: Float32Array, count: number): void {
+  starBuffer(data);
   scene.count = count;
 }
 
@@ -576,9 +567,7 @@ function collectAndUploadStars(
     if (nodePointCache.has(r.nodeIdx)) totalCount += r.count;
   }
 
-  const positions   = new Float32Array(totalCount * 3);
-  const luminosities = new Float32Array(totalCount);
-  const bpRps       = new Float32Array(totalCount);
+  const starData = new Float32Array(totalCount * 5);
   let out = 0;
 
   let queued = 0;
@@ -595,21 +584,12 @@ function collectAndUploadStars(
       const b = i * 5;
       const px = pts[b], py = pts[b + 1], pz = pts[b + 2];
       if (!pointInFrustum(planes, px, py, pz)) continue;
-      positions[out * 3]     = px;
-      positions[out * 3 + 1] = py;
-      positions[out * 3 + 2] = pz;
-      luminosities[out]      = pts[b + 3];
-      bpRps[out]             = pts[b + 4];
+      starData.set(pts.subarray(b, b + 5), out * 5);
       out++;
     }
   }
 
-  updateBuffers(
-    positions.subarray(0, out * 3),
-    luminosities.subarray(0, out),
-    bpRps.subarray(0, out),
-    out,
-  );
+  updateBuffers(starData.subarray(0, out * 5), out);
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -626,7 +606,7 @@ async function loadDataset(): Promise<void> {
   nodeTable = null;
   nodePointCache = new Map();
   pendingFetches = new Set();
-  updateBuffers(new Float32Array(0), new Float32Array(0), new Float32Array(0), 0);
+  updateBuffers(new Float32Array(0), 0);
   try {
     const name = await ensureDatasetName();
     nodeTable = await fetchNodeTable(API_ROOT, name);
@@ -858,9 +838,9 @@ const drawStars = regl({
     }
   `,
   attributes: {
-    position:   { buffer: positionBuffer,   size: 3 },
-    luminosity: { buffer: luminosityBuffer, size: 1 },
-    bpRp:       { buffer: bpRpBuffer,       size: 1 },
+    position:   { buffer: starBuffer, size: 3, stride: 20, offset:  0 },
+    luminosity: { buffer: starBuffer, size: 1, stride: 20, offset: 12 },
+    bpRp:       { buffer: starBuffer, size: 1, stride: 20, offset: 16 },
   },
   uniforms: {
     projection:     () => projectionMatrix({ fovy: camera.fovY, aspect: canvas.width / Math.max(canvas.height, 1), near: camera.near, far: camera.far }),
