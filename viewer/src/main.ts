@@ -717,7 +717,7 @@ function updateCamera(deltaTime: number): void {
     lodDirty = true;
   }
 
-  const rollSpeed = 1.5 * deltaTime;
+  const rollSpeed = 0.25 * deltaTime;
   if (keyState.has("KeyQ")) {
     camera.orientation = normalizeQuaternion(multiplyQuaternion(
       camera.orientation, quaternionFromAxisAngle([0, 0, 1], -rollSpeed)
