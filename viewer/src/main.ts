@@ -861,6 +861,8 @@ const drawStars = regl({
   depth: { enable: false },
 });
 
+const renderToHdr = regl({ framebuffer: hdrBuffer });
+
 regl.frame(({ time }) => {
   const deltaTime = previousTime === 0 ? 0 : time - previousTime;
   previousTime = time;
@@ -904,7 +906,7 @@ regl.frame(({ time }) => {
   }
 
   // Pass 1: accumulate stars into float HDR buffer (linear, no tone map)
-  regl({ framebuffer: hdrBuffer })(() => {
+  renderToHdr(() => {
     regl.clear({ color: [0, 0, 0, 1] });
     drawStars();
   });
