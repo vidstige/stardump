@@ -252,12 +252,6 @@ function childBounds(parent: Bounds, child: number): Bounds {
   };
 }
 
-function pointInFrustum(planes: Plane[], px: number, py: number, pz: number): boolean {
-  for (const p of planes) {
-    if (p.nx * px + p.ny * py + p.nz * pz + p.d < 0) return false;
-  }
-  return true;
-}
 
 function collectCut(
   nt: NodeTable,
@@ -383,6 +377,7 @@ const regl = createRegl({
 
 const starBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
+let starDataBuffer = new Float32Array(0);
 
 // Offscreen float HDR accumulation buffer + full-screen tone-map pass
 const hdrBuffer = regl.framebuffer({
@@ -561,17 +556,19 @@ function collectAndUploadStars(
     min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
     max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
   };
+
   const ranges = collectCut(nt, rootBounds, eye, planes, pixelsPerRadian, pixelThreshold);
 
-  // Count cached points for allocation.
   let totalCount = 0;
   for (const r of ranges) {
     if (nodePointCache.has(r.nodeIdx)) totalCount += r.count;
   }
 
-  const starData = new Float32Array(totalCount * 5);
-  let out = 0;
+  if (starDataBuffer.length < totalCount * 5) {
+    starDataBuffer = new Float32Array(totalCount * 5);
+  }
 
+  let out = 0;
   let queued = 0;
   for (const r of ranges) {
     const pts = nodePointCache.get(r.nodeIdx);
@@ -582,16 +579,11 @@ function collectAndUploadStars(
       }
       continue;
     }
-    for (let i = 0; i < r.count; i++) {
-      const b = i * 5;
-      const px = pts[b], py = pts[b + 1], pz = pts[b + 2];
-      if (!pointInFrustum(planes, px, py, pz)) continue;
-      starData.set(pts.subarray(b, b + 5), out * 5);
-      out++;
-    }
+    starDataBuffer.set(pts, out * 5);
+    out += r.count;
   }
 
-  updateBuffers(starData.subarray(0, out * 5), out);
+  updateBuffers(starDataBuffer.subarray(0, out * 5), out);
 }
 
 async function ensureDatasetName(): Promise<string> {
