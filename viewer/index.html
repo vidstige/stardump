@@ -229,10 +229,23 @@
       }
 
       .tip:hover::after { display: block; }
+
+      #fps {
+        position: absolute;
+        top: 14px;
+        right: 14px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        color: rgba(235, 243, 255, 0.55);
+        pointer-events: none;
+        font-family: "IBM Plex Mono", "IBM Plex Sans", monospace;
+      }
     </style>
   </head>
   <body>
     <div id="app">
+      <div id="fps">-- fps</div>
       <div class="hud">
         <h1>star-dump</h1>
         <p id="status" class="status"></p>

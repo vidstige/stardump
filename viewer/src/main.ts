@@ -368,6 +368,7 @@ const hudMaxRadiusSlider     = maxRadiusSliderElement;
 const hudMaxRadiusValue      = maxRadiusValueElement;
 const hudPixelThresholdSlider = pixelThresholdSliderElement;
 const hudPixelThresholdValue  = pixelThresholdValueElement;
+const hudFps = document.querySelector<HTMLElement>("#fps")!
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
@@ -432,6 +433,7 @@ const camera: Camera = {
 
 const keyState = new Set<string>();
 let previousTime = 0;
+let smoothFps = 0;
 let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
 let exposure   = 500.0;
@@ -862,6 +864,10 @@ const drawStars = regl({
 regl.frame(({ time }) => {
   const deltaTime = previousTime === 0 ? 0 : time - previousTime;
   previousTime = time;
+  if (deltaTime > 0) {
+    smoothFps = smoothFps === 0 ? 1 / deltaTime : smoothFps * 0.9 + (1 / deltaTime) * 0.1;
+    hudFps.textContent = `${smoothFps.toFixed(0)} fps`;
+  }
   updateCamera(deltaTime);
 
   const [cx, cy, cz] = camera.position;
