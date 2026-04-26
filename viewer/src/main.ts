@@ -726,22 +726,11 @@ function updateCamera(deltaTime: number): void {
   }
 }
 
-let cameraActive = false;
-
 canvas.addEventListener("click", () => {
-  if (cameraActive) {
-    document.exitPointerLock();
-  } else {
-    void canvas.requestPointerLock();
-  }
+  void canvas.requestPointerLock();
 });
 
-document.addEventListener("pointerlockchange", () => {
-  cameraActive = document.pointerLockElement === canvas;
-});
-
-document.addEventListener("mousemove", (event) => {
-  if (!cameraActive) return;
+function onMouseMove(event: MouseEvent): void {
   const s = 0.0025;
   if (event.movementX !== 0) {
     camera.orientation = normalizeQuaternion(multiplyQuaternion(
@@ -754,6 +743,14 @@ document.addEventListener("mousemove", (event) => {
       camera.orientation, quaternionFromAxisAngle([1, 0, 0], -event.movementY * s)
     ));
     lodDirty = true;
+  }
+}
+
+document.addEventListener("pointerlockchange", () => {
+  if (document.pointerLockElement === canvas) {
+    document.addEventListener("mousemove", onMouseMove);
+  } else {
+    document.removeEventListener("mousemove", onMouseMove);
   }
 });
 
