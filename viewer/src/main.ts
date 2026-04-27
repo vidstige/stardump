@@ -19,7 +19,6 @@ type FrustumParams = {
   fovy: number;
 };
 
-type Bounds = { min: Vec3; max: Vec3 };
 
 type NodeTable = {
   nodeCount:         number;
@@ -148,71 +147,66 @@ function viewMatrix(position: Vec3, orientation: Quaternion): Mat4 {
 }
 
 
-function boundsCenterAndHalf(b: Bounds): { cx: number; cy: number; cz: number; half: number } {
-  const cx = (b.min[0] + b.max[0]) * 0.5;
-  const cy = (b.min[1] + b.max[1]) * 0.5;
-  const cz = (b.min[2] + b.max[2]) * 0.5;
-  const half = (b.max[0] - b.min[0]) * 0.5;
-  return { cx, cy, cz, half };
-}
-
-function childBounds(parent: Bounds, child: number): Bounds {
-  const mx = (parent.min[0] + parent.max[0]) * 0.5;
-  const my = (parent.min[1] + parent.max[1]) * 0.5;
-  const mz = (parent.min[2] + parent.max[2]) * 0.5;
-  return {
-    min: [
-      (child & 1) === 0 ? parent.min[0] : mx,
-      (child & 2) === 0 ? parent.min[1] : my,
-      (child & 4) === 0 ? parent.min[2] : mz,
-    ],
-    max: [
-      (child & 1) === 0 ? mx : parent.max[0],
-      (child & 2) === 0 ? my : parent.max[1],
-      (child & 4) === 0 ? mz : parent.max[2],
-    ],
-  };
-}
 
 
-function collectCut(
+// Single DFS that both collects the LOD cut for rendering and gathers fetch candidates.
+// Bounds are passed as 6 flat numbers to avoid per-node object allocations.
+// scheduleFetches previously did a separate full-tree walk; this merges both passes
+// and stops at the same LOD cut so the fetch walk no longer recurses past it.
+function rebuildLod(
   nt: NodeTable,
-  rootBounds: Bounds,
   eye: Vec3,
   pixelsPerRadian: number,
-  pixelThreshold: number,
-): { nodeIdx: number; count: number; depth: number }[] {
-  const out: { nodeIdx: number; count: number; depth: number }[] = [];
+  fetchCandidates: { nodeIdx: number; priority: number; subtree: boolean }[],
+): { nodeIdx: number; count: number }[] {
+  const ranges: { nodeIdx: number; count: number }[] = [];
 
-  function walk(nodeIdx: number, bounds: Bounds, depth: number): void {
+  function walk(
+    nodeIdx: number,
+    minX: number, minY: number, minZ: number,
+    maxX: number, maxY: number, maxZ: number,
+  ): void {
     const cm     = nt.childMask[nodeIdx];
     const pCount = nt.pointCount[nodeIdx];
 
-    if (cm === 0) {
-      if (pCount > 0) out.push({ nodeIdx, count: pCount, depth });
-      return;
-    }
-
-    const { cx, cy, cz, half } = boundsCenterAndHalf(bounds);
+    const cx = (minX + maxX) * 0.5;
+    const cy = (minY + maxY) * 0.5;
+    const cz = (minZ + maxZ) * 0.5;
+    const half = (maxX - minX) * 0.5;
     const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
-    const dist = Math.max(Math.hypot(dx, dy, dz), half);
+    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
     const footprintPx = (half / dist) * pixelsPerRadian;
 
-    if (footprintPx < pixelThreshold && pCount > 0) {
-      out.push({ nodeIdx, count: pCount, depth });
+    const atCut = cm === 0 || (footprintPx < pixelThreshold && pCount > 0);
+
+    if (atCut) {
+      if (pCount > 0) ranges.push({ nodeIdx, count: pCount });
+      if (!nodePointCache.has(nodeIdx) && !pendingFetches.has(nodeIdx) && pCount > 0) {
+        const subtree = nt.subtreePointCount[nodeIdx] * 20 <= MAX_SUBTREE_BYTES;
+        fetchCandidates.push({ nodeIdx, priority: footprintPx, subtree });
+      }
       return;
     }
 
+    if (!nodePointCache.has(nodeIdx) && !pendingFetches.has(nodeIdx) && pCount > 0) {
+      fetchCandidates.push({ nodeIdx, priority: footprintPx, subtree: false });
+    }
+
+    const mx = cx, my = cy, mz = cz;
     let childIdx = nt.firstChild[nodeIdx];
     for (let c = 0; c < 8; c++) {
       if ((cm & (1 << c)) === 0) continue;
-      walk(childIdx, childBounds(bounds, c), depth + 1);
+      walk(childIdx,
+        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
+        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
+      );
       childIdx++;
     }
   }
 
-  if (nt.nodeCount > 0) walk(0, rootBounds, 0);
-  return out;
+  const e = nt.halfExtentPc;
+  if (nt.nodeCount > 0) walk(0, -e, -e, -e, e, e, e);
+  return ranges;
 }
 
 async function fetchRange(url: string, start: number, end: number): Promise<ArrayBuffer> {
@@ -532,27 +526,23 @@ function updateLodBar(): void {
   hudLodBar.style.width = `${(loaded / allLeaves.length * 100).toFixed(1)}%`;
 }
 
-function collectAndUploadStars(
-  nt: NodeTable,
-  eye: Vec3,
-  pixelsPerRadian: number,
-): void {
-  const rootBounds: Bounds = {
-    min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
-    max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
-  };
+function lodUpdate(nt: NodeTable, eye: Vec3, pixelsPerRadian: number): void {
+  const t0 = performance.now();
 
-  const ranges = collectCut(nt, rootBounds, eye, pixelsPerRadian, pixelThreshold);
+  type Candidate = { nodeIdx: number; priority: number; subtree: boolean };
+  const candidates: Candidate[] = [];
+  const slots = Math.max(MAX_CONCURRENT_FETCHES - pendingHttpRequests, 0);
+  const ranges = rebuildLod(nt, eye, pixelsPerRadian, candidates);
+
+  const t1 = performance.now();
 
   let totalCount = 0;
   for (const r of ranges) {
     if (nodePointCache.has(r.nodeIdx)) totalCount += r.count;
   }
-
   if (starDataBuffer.length < totalCount * 5) {
     starDataBuffer = new Float32Array(totalCount * 5);
   }
-
   let out = 0;
   for (const r of ranges) {
     const pts = nodePointCache.get(r.nodeIdx);
@@ -560,70 +550,25 @@ function collectAndUploadStars(
     starDataBuffer.set(pts, out * 5);
     out += r.count;
   }
-
   updateBuffers(starDataBuffer.subarray(0, out * 5), out);
-}
 
-function scheduleFetches(nt: NodeTable, eye: Vec3, pixelsPerRadian: number): void {
-  const slots = MAX_CONCURRENT_FETCHES - pendingHttpRequests;
-  if (slots <= 0) return;
+  const t2 = performance.now();
 
-  type Candidate = { nodeIdx: number; priority: number; subtree: boolean };
-  const candidates: Candidate[] = [];
-
-  const rootBounds: Bounds = {
-    min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
-    max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
-  };
-
-  function walk(nodeIdx: number, bounds: Bounds): void {
-    const { cx, cy, cz, half } = boundsCenterAndHalf(bounds);
-    const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
-    const dist = Math.max(Math.hypot(dx, dy, dz), half);
-    const footprintPx = (half / dist) * pixelsPerRadian;
-
-    const cached  = nodePointCache.has(nodeIdx);
-    const pending = pendingFetches.has(nodeIdx);
-    const cm      = nt.childMask[nodeIdx];
-
-    if (!cached && !pending) {
-      const subtreeFits = nt.subtreePointCount[nodeIdx] * 20 <= MAX_SUBTREE_BYTES;
-      if (footprintPx < pixelThreshold || cm === 0) {
-        // Node is small on screen or a leaf: one request covers the whole subtree.
-        if (subtreeFits) {
-          candidates.push({ nodeIdx, priority: footprintPx, subtree: true });
-          return;
-        }
-        // Subtree too large: fetch own sample and let recursion handle children.
+  if (slots > 0) {
+    candidates.sort((a, b) => b.priority - a.priority);
+    const dataset = datasetName ?? "";
+    for (let i = 0; i < Math.min(slots, candidates.length); i++) {
+      const { nodeIdx, subtree } = candidates[i];
+      if (subtree) {
+        void fetchSubtreePoints(API_ROOT, dataset, nt, nodeIdx);
+      } else {
+        void fetchNodePoints(API_ROOT, dataset, nt, nodeIdx);
       }
-      if (nt.pointCount[nodeIdx] > 0) {
-        candidates.push({ nodeIdx, priority: footprintPx, subtree: false });
-      }
-    }
-
-    if (cm === 0) return;
-    let childIdx = nt.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      walk(childIdx, childBounds(bounds, c));
-      childIdx++;
     }
   }
 
-  if (nt.nodeCount > 0) walk(0, rootBounds);
-
-  // Highest footprintPx first: large/close nodes before small/distant ones.
-  candidates.sort((a, b) => b.priority - a.priority);
-
-  const dataset = datasetName ?? "";
-  for (let i = 0; i < Math.min(slots, candidates.length); i++) {
-    const { nodeIdx, subtree } = candidates[i];
-    if (subtree) {
-      void fetchSubtreePoints(API_ROOT, dataset, nt, nodeIdx);
-    } else {
-      void fetchNodePoints(API_ROOT, dataset, nt, nodeIdx);
-    }
-  }
+  const t3 = performance.now();
+  if (t3 - t0 > 1) console.log(`LOD: walk=${(t1-t0).toFixed(1)}ms  copy=${(t2-t1).toFixed(1)}ms  fetches=${(t3-t2).toFixed(1)}ms  stars=${out}`);
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -911,8 +856,7 @@ regl.frame(({ time }) => {
       lastLodAt = now;
       lodDirty  = false;
       const pixelsPerRadian = canvas.height / Math.max(camera.fovY, 1e-6);
-      collectAndUploadStars(nodeTable, camera.position, pixelsPerRadian);
-      scheduleFetches(nodeTable, camera.position, pixelsPerRadian);
+      lodUpdate(nodeTable, camera.position, pixelsPerRadian);
     }
   }
 
