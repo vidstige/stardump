@@ -151,15 +151,37 @@ function viewMatrix(position: Vec3, orientation: Quaternion): Mat4 {
 
 // Single DFS that both collects the LOD cut for rendering and gathers fetch candidates.
 // Bounds are passed as 6 flat numbers to avoid per-node object allocations.
-// scheduleFetches previously did a separate full-tree walk; this merges both passes
-// and stops at the same LOD cut so the fetch walk no longer recurses past it.
+// fetchCandidates is kept as a bounded top-K min-heap so the array never grows
+// larger than maxFetchCandidates, making the final sort at the call site trivial.
 function rebuildLod(
   nt: NodeTable,
   eye: Vec3,
   pixelsPerRadian: number,
   fetchCandidates: { nodeIdx: number; priority: number; subtree: boolean }[],
+  maxFetchCandidates: number,
 ): { nodeIdx: number; count: number }[] {
   const ranges: { nodeIdx: number; count: number }[] = [];
+
+  let heapMin = -Infinity;
+  let heapMinIdx = 0;
+
+  function pushCandidate(nodeIdx: number, priority: number, subtree: boolean): void {
+    if (fetchCandidates.length < maxFetchCandidates) {
+      fetchCandidates.push({ nodeIdx, priority, subtree });
+      if (fetchCandidates.length === maxFetchCandidates) {
+        heapMin = fetchCandidates[0].priority; heapMinIdx = 0;
+        for (let i = 1; i < fetchCandidates.length; i++) {
+          if (fetchCandidates[i].priority < heapMin) { heapMin = fetchCandidates[i].priority; heapMinIdx = i; }
+        }
+      }
+    } else if (priority > heapMin) {
+      fetchCandidates[heapMinIdx] = { nodeIdx, priority, subtree };
+      heapMin = fetchCandidates[0].priority; heapMinIdx = 0;
+      for (let i = 1; i < fetchCandidates.length; i++) {
+        if (fetchCandidates[i].priority < heapMin) { heapMin = fetchCandidates[i].priority; heapMinIdx = i; }
+      }
+    }
+  }
 
   function walk(
     nodeIdx: number,
@@ -183,13 +205,13 @@ function rebuildLod(
       if (pCount > 0) ranges.push({ nodeIdx, count: pCount });
       if (!nodePointCache.has(nodeIdx) && !pendingFetches.has(nodeIdx) && pCount > 0) {
         const subtree = nt.subtreePointCount[nodeIdx] * 20 <= MAX_SUBTREE_BYTES;
-        fetchCandidates.push({ nodeIdx, priority: footprintPx, subtree });
+        pushCandidate(nodeIdx, footprintPx, subtree);
       }
       return;
     }
 
     if (!nodePointCache.has(nodeIdx) && !pendingFetches.has(nodeIdx) && pCount > 0) {
-      fetchCandidates.push({ nodeIdx, priority: footprintPx, subtree: false });
+      pushCandidate(nodeIdx, footprintPx, false);
     }
 
     const mx = cx, my = cy, mz = cz;
@@ -532,7 +554,7 @@ function lodUpdate(nt: NodeTable, eye: Vec3, pixelsPerRadian: number): void {
   type Candidate = { nodeIdx: number; priority: number; subtree: boolean };
   const candidates: Candidate[] = [];
   const slots = Math.max(MAX_CONCURRENT_FETCHES - pendingHttpRequests, 0);
-  const ranges = rebuildLod(nt, eye, pixelsPerRadian, candidates);
+  const ranges = rebuildLod(nt, eye, pixelsPerRadian, candidates, slots);
 
   const t1 = performance.now();
 
