@@ -23,14 +23,15 @@ type Bounds = { min: Vec3; max: Vec3 };
 type Plane  = { nx: number; ny: number; nz: number; d: number };
 
 type NodeTable = {
-  nodeCount:    number;
-  halfExtentPc: number;
-  depth:        number;
-  childMask:    Uint8Array;
-  firstChild:   Uint32Array;
-  pointFirst:   Uint32Array;
-  pointCount:   Uint32Array;
-  pointsOffset: number;
+  nodeCount:         number;
+  halfExtentPc:      number;
+  depth:             number;
+  childMask:         Uint8Array;
+  firstChild:        Uint32Array;
+  pointFirst:        Uint32Array;
+  pointCount:        Uint32Array;
+  subtreePointCount: Uint32Array;
+  pointsOffset:      number;
 };
 
 declare global {
@@ -53,6 +54,7 @@ const DATASET_OVERRIDE = searchParams.get("dataset");
 let pixelThreshold = 8;
 const LOD_THROTTLE_MS = 100;
 const MAX_CONCURRENT_FETCHES = 8;
+const MAX_SUBTREE_BYTES = 512 * 1024;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -438,12 +440,31 @@ let maxRadius  = 1.0;
 let nodeTable: NodeTable | null = null;
 let nodePointCache = new Map<number, Float32Array>();
 let pendingFetches = new Set<number>();
+let pendingHttpRequests = 0;
 let lodDirty = true;
 let lastLodAt = -LOD_THROTTLE_MS;
 
 window.starDump = {
   getCamera: () => camera,
 };
+
+function computeSubtreePointCounts(nt: Omit<NodeTable, "subtreePointCount">): Uint32Array {
+  const counts = new Uint32Array(nt.nodeCount);
+  function walk(nodeIdx: number): number {
+    let total = nt.pointCount[nodeIdx];
+    const cm = nt.childMask[nodeIdx];
+    let childIdx = nt.firstChild[nodeIdx];
+    for (let c = 0; c < 8; c++) {
+      if ((cm & (1 << c)) === 0) continue;
+      total += walk(childIdx);
+      childIdx++;
+    }
+    counts[nodeIdx] = total;
+    return total;
+  }
+  if (nt.nodeCount > 0) walk(0);
+  return counts;
+}
 
 async function fetchNodeTable(apiRoot: string, dataset: string): Promise<NodeTable> {
   const url = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
@@ -481,12 +502,13 @@ async function fetchNodeTable(apiRoot: string, dataset: string): Promise<NodeTab
   }
 
   hudStatus.textContent = "";
-  return {
+  const nt: Omit<NodeTable, "subtreePointCount"> = {
     nodeCount, halfExtentPc, depth,
     childMask, firstChild, pointFirst,
     pointCount: pointCountArr,
     pointsOffset: nodesEnd,
   };
+  return { ...nt, subtreePointCount: computeSubtreePointCounts(nt) };
 }
 
 async function fetchNodePoints(
@@ -497,19 +519,66 @@ async function fetchNodePoints(
 ): Promise<void> {
   if (pendingFetches.has(nodeIdx) || nodePointCache.has(nodeIdx)) return;
   pendingFetches.add(nodeIdx);
+  pendingHttpRequests++;
   try {
     const url   = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
     const start = nt.pointsOffset + nt.pointFirst[nodeIdx] * 20;
     const end   = start + nt.pointCount[nodeIdx] * 20 - 1;
     const buf   = await fetchRange(url, start, end);
-    // Discard if dataset changed while in-flight.
     if (nodeTable === nt) {
       nodePointCache.set(nodeIdx, new Float32Array(buf));
       lodDirty = true;
       updateLodBar();
     }
   } finally {
+    pendingHttpRequests--;
     pendingFetches.delete(nodeIdx);
+  }
+}
+
+async function fetchSubtreePoints(
+  apiRoot: string,
+  dataset: string,
+  nt: NodeTable,
+  nodeIdx: number,
+): Promise<void> {
+  // Collect all uncached, non-pending nodes in the subtree and mark them pending.
+  const toFetch: number[] = [];
+  function collect(idx: number): void {
+    if (pendingFetches.has(idx) || nodePointCache.has(idx)) return;
+    toFetch.push(idx);
+    pendingFetches.add(idx);
+    const cm = nt.childMask[idx];
+    let childIdx = nt.firstChild[idx];
+    for (let c = 0; c < 8; c++) {
+      if ((cm & (1 << c)) === 0) continue;
+      collect(childIdx);
+      childIdx++;
+    }
+  }
+  collect(nodeIdx);
+  if (toFetch.length === 0) return;
+
+  pendingHttpRequests++;
+  try {
+    const url        = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
+    const totalPts   = nt.subtreePointCount[nodeIdx];
+    const byteStart  = nt.pointsOffset + nt.pointFirst[nodeIdx] * 20;
+    const byteEnd    = byteStart + totalPts * 20 - 1;
+    const buf        = await fetchRange(url, byteStart, byteEnd);
+    if (nodeTable !== nt) return;
+    const data = new Float32Array(buf);
+    const base = nt.pointFirst[nodeIdx];
+    for (const idx of toFetch) {
+      if (nt.pointCount[idx] === 0) continue;
+      const off = (nt.pointFirst[idx] - base) * 5;
+      nodePointCache.set(idx, data.subarray(off, off + nt.pointCount[idx] * 5));
+    }
+    lodDirty = true;
+    updateLodBar();
+  } finally {
+    pendingHttpRequests--;
+    for (const idx of toFetch) pendingFetches.delete(idx);
   }
 }
 
@@ -550,7 +619,6 @@ function collectAndUploadStars(
   eye: Vec3,
   planes: Plane[],
   pixelsPerRadian: number,
-  currentDataset: string,
 ): void {
   const rootBounds: Bounds = {
     min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
@@ -569,21 +637,76 @@ function collectAndUploadStars(
   }
 
   let out = 0;
-  let queued = 0;
   for (const r of ranges) {
     const pts = nodePointCache.get(r.nodeIdx);
-    if (!pts) {
-      if (queued < MAX_CONCURRENT_FETCHES && !pendingFetches.has(r.nodeIdx)) {
-        queued++;
-        void fetchNodePoints(API_ROOT, currentDataset, nt, r.nodeIdx);
-      }
-      continue;
-    }
+    if (!pts) continue;
     starDataBuffer.set(pts, out * 5);
     out += r.count;
   }
 
   updateBuffers(starDataBuffer.subarray(0, out * 5), out);
+}
+
+function scheduleFetches(nt: NodeTable, eye: Vec3, pixelsPerRadian: number): void {
+  const slots = MAX_CONCURRENT_FETCHES - pendingHttpRequests;
+  if (slots <= 0) return;
+
+  type Candidate = { nodeIdx: number; priority: number; subtree: boolean };
+  const candidates: Candidate[] = [];
+
+  const rootBounds: Bounds = {
+    min: [-nt.halfExtentPc, -nt.halfExtentPc, -nt.halfExtentPc],
+    max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
+  };
+
+  function walk(nodeIdx: number, bounds: Bounds): void {
+    const { cx, cy, cz, half } = boundsCenterAndHalf(bounds);
+    const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
+    const dist = Math.max(Math.hypot(dx, dy, dz), half);
+    const footprintPx = (half / dist) * pixelsPerRadian;
+
+    const cached  = nodePointCache.has(nodeIdx);
+    const pending = pendingFetches.has(nodeIdx);
+    const cm      = nt.childMask[nodeIdx];
+
+    if (!cached && !pending) {
+      const subtreeFits = nt.subtreePointCount[nodeIdx] * 20 <= MAX_SUBTREE_BYTES;
+      if (footprintPx < pixelThreshold || cm === 0) {
+        // Node is small on screen or a leaf: one request covers the whole subtree.
+        if (subtreeFits) {
+          candidates.push({ nodeIdx, priority: footprintPx, subtree: true });
+          return;
+        }
+        // Subtree too large: fetch own sample and let recursion handle children.
+      }
+      if (nt.pointCount[nodeIdx] > 0) {
+        candidates.push({ nodeIdx, priority: footprintPx, subtree: false });
+      }
+    }
+
+    if (cm === 0) return;
+    let childIdx = nt.firstChild[nodeIdx];
+    for (let c = 0; c < 8; c++) {
+      if ((cm & (1 << c)) === 0) continue;
+      walk(childIdx, childBounds(bounds, c));
+      childIdx++;
+    }
+  }
+
+  if (nt.nodeCount > 0) walk(0, rootBounds);
+
+  // Highest footprintPx first: large/close nodes before small/distant ones.
+  candidates.sort((a, b) => b.priority - a.priority);
+
+  const dataset = datasetName ?? "";
+  for (let i = 0; i < Math.min(slots, candidates.length); i++) {
+    const { nodeIdx, subtree } = candidates[i];
+    if (subtree) {
+      void fetchSubtreePoints(API_ROOT, dataset, nt, nodeIdx);
+    } else {
+      void fetchNodePoints(API_ROOT, dataset, nt, nodeIdx);
+    }
+  }
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -881,10 +1004,8 @@ regl.frame(({ time }) => {
         camera.position, forward, right, up,
         camera.near, camera.far, camera.fovY, aspect,
       );
-      collectAndUploadStars(
-        nodeTable, camera.position, planes, pixelsPerRadian,
-        datasetName ?? "",
-      );
+      collectAndUploadStars(nodeTable, camera.position, planes, pixelsPerRadian);
+      scheduleFetches(nodeTable, camera.position, pixelsPerRadian);
     }
   }
 
