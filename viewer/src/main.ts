@@ -20,7 +20,6 @@ type FrustumParams = {
 };
 
 type Bounds = { min: Vec3; max: Vec3 };
-type Plane  = { nx: number; ny: number; nz: number; d: number };
 
 type NodeTable = {
   nodeCount:         number;
@@ -148,85 +147,6 @@ function viewMatrix(position: Vec3, orientation: Quaternion): Mat4 {
   return lookAt(position, add(position, forward), up);
 }
 
-// Frustum helpers ported from render-fast.ts
-
-function planeFromPointNormal(
-  px: number, py: number, pz: number,
-  nx: number, ny: number, nz: number,
-): Plane {
-  const len = Math.hypot(nx, ny, nz) || 1;
-  const ux = nx / len, uy = ny / len, uz = nz / len;
-  return { nx: ux, ny: uy, nz: uz, d: -(ux * px + uy * py + uz * pz) };
-}
-
-function boundsMaxCorner(b: Bounds, n: Vec3): Vec3 {
-  return [
-    n[0] >= 0 ? b.max[0] : b.min[0],
-    n[1] >= 0 ? b.max[1] : b.min[1],
-    n[2] >= 0 ? b.max[2] : b.min[2],
-  ];
-}
-
-function frustumIntersectsBounds(planes: Plane[], b: Bounds): boolean {
-  for (const p of planes) {
-    const c = boundsMaxCorner(b, [p.nx, p.ny, p.nz]);
-    if (p.nx * c[0] + p.ny * c[1] + p.nz * c[2] + p.d < 0) return false;
-  }
-  return true;
-}
-
-function buildFrustumPlanes(
-  eye: Vec3,
-  forward: Vec3,
-  right: Vec3,
-  up: Vec3,
-  near: number,
-  far: number,
-  fovy: number,
-  aspect: number,
-): Plane[] {
-  const nearCenter: Vec3 = [
-    eye[0] + forward[0] * near,
-    eye[1] + forward[1] * near,
-    eye[2] + forward[2] * near,
-  ];
-  const farCenter: Vec3 = [
-    eye[0] + forward[0] * far,
-    eye[1] + forward[1] * far,
-    eye[2] + forward[2] * far,
-  ];
-  const tanHalf = Math.tan(fovy * 0.5);
-  const hNear = near * tanHalf;
-  const wNear = hNear * aspect;
-  const leftNormal: Vec3 = [
-    right[0] * near + forward[0] * wNear,
-    right[1] * near + forward[1] * wNear,
-    right[2] * near + forward[2] * wNear,
-  ];
-  const rightNormal: Vec3 = [
-    -right[0] * near + forward[0] * wNear,
-    -right[1] * near + forward[1] * wNear,
-    -right[2] * near + forward[2] * wNear,
-  ];
-  const bottomNormal: Vec3 = [
-    up[0] * near + forward[0] * hNear,
-    up[1] * near + forward[1] * hNear,
-    up[2] * near + forward[2] * hNear,
-  ];
-  const topNormal: Vec3 = [
-    -up[0] * near + forward[0] * hNear,
-    -up[1] * near + forward[1] * hNear,
-    -up[2] * near + forward[2] * hNear,
-  ];
-  return [
-    planeFromPointNormal(nearCenter[0], nearCenter[1], nearCenter[2],  forward[0],      forward[1],      forward[2]),
-    planeFromPointNormal(farCenter[0],  farCenter[1],  farCenter[2],  -forward[0],     -forward[1],     -forward[2]),
-    planeFromPointNormal(eye[0],        eye[1],        eye[2],         leftNormal[0],   leftNormal[1],   leftNormal[2]),
-    planeFromPointNormal(eye[0],        eye[1],        eye[2],         rightNormal[0],  rightNormal[1],  rightNormal[2]),
-    planeFromPointNormal(eye[0],        eye[1],        eye[2],         bottomNormal[0], bottomNormal[1], bottomNormal[2]),
-    planeFromPointNormal(eye[0],        eye[1],        eye[2],         topNormal[0],    topNormal[1],    topNormal[2]),
-  ];
-}
 
 function boundsCenterAndHalf(b: Bounds): { cx: number; cy: number; cz: number; half: number } {
   const cx = (b.min[0] + b.max[0]) * 0.5;
@@ -259,14 +179,12 @@ function collectCut(
   nt: NodeTable,
   rootBounds: Bounds,
   eye: Vec3,
-  planes: Plane[],
   pixelsPerRadian: number,
   pixelThreshold: number,
 ): { nodeIdx: number; count: number; depth: number }[] {
   const out: { nodeIdx: number; count: number; depth: number }[] = [];
 
   function walk(nodeIdx: number, bounds: Bounds, depth: number): void {
-    if (!frustumIntersectsBounds(planes, bounds)) return;
     const cm     = nt.childMask[nodeIdx];
     const pCount = nt.pointCount[nodeIdx];
 
@@ -617,7 +535,6 @@ function updateLodBar(): void {
 function collectAndUploadStars(
   nt: NodeTable,
   eye: Vec3,
-  planes: Plane[],
   pixelsPerRadian: number,
 ): void {
   const rootBounds: Bounds = {
@@ -625,7 +542,7 @@ function collectAndUploadStars(
     max: [ nt.halfExtentPc,  nt.halfExtentPc,  nt.halfExtentPc],
   };
 
-  const ranges = collectCut(nt, rootBounds, eye, planes, pixelsPerRadian, pixelThreshold);
+  const ranges = collectCut(nt, rootBounds, eye, pixelsPerRadian, pixelThreshold);
 
   let totalCount = 0;
   for (const r of ranges) {
@@ -997,14 +914,8 @@ regl.frame(({ time }) => {
     if (now - lastLodAt >= LOD_THROTTLE_MS) {
       lastLodAt = now;
       lodDirty  = false;
-      const aspect = canvas.width / Math.max(canvas.height, 1);
-      const { forward, right, up } = cameraBasis(camera);
       const pixelsPerRadian = canvas.height / Math.max(camera.fovY, 1e-6);
-      const planes = buildFrustumPlanes(
-        camera.position, forward, right, up,
-        camera.near, camera.far, camera.fovY, aspect,
-      );
-      collectAndUploadStars(nodeTable, camera.position, planes, pixelsPerRadian);
+      collectAndUploadStars(nodeTable, camera.position, pixelsPerRadian);
       scheduleFetches(nodeTable, camera.position, pixelsPerRadian);
     }
   }
