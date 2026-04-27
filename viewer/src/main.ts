@@ -51,8 +51,8 @@ let API_ROOT = searchParams.get("api") ?? (isLocal ? LOCAL_API : REMOTE_API);
 const DATASET_OVERRIDE = searchParams.get("dataset");
 let pixelThreshold = 8;
 const LOD_THROTTLE_MS = 1000;
-const MAX_CONCURRENT_FETCHES = 8;
-const MAX_SUBTREE_BYTES = 512 * 1024;
+const MAX_CONCURRENT_FETCHES = 16;
+const MAX_SUBTREE_BYTES = 32 * 1024;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
