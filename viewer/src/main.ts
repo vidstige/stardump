@@ -727,7 +727,11 @@ function updateCamera(deltaTime: number): void {
 }
 
 canvas.addEventListener("click", () => {
-  void canvas.requestPointerLock();
+  if (document.pointerLockElement === canvas) {
+    document.exitPointerLock();
+  } else {
+    void canvas.requestPointerLock();
+  }
 });
 
 function onMouseMove(event: MouseEvent): void {
