@@ -51,7 +51,7 @@ const isLocal = window.location.hostname === "localhost" || window.location.host
 let API_ROOT = searchParams.get("api") ?? (isLocal ? LOCAL_API : REMOTE_API);
 const DATASET_OVERRIDE = searchParams.get("dataset");
 let pixelThreshold = 8;
-const LOD_THROTTLE_MS = 100;
+const LOD_THROTTLE_MS = 1000;
 const MAX_CONCURRENT_FETCHES = 8;
 const MAX_SUBTREE_BYTES = 512 * 1024;
 
@@ -756,13 +756,11 @@ function updateCamera(deltaTime: number): void {
     camera.orientation = normalizeQuaternion(multiplyQuaternion(
       camera.orientation, quaternionFromAxisAngle([0, 0, 1], -rollSpeed)
     ));
-    lodDirty = true;
   }
   if (keyState.has("KeyE")) {
     camera.orientation = normalizeQuaternion(multiplyQuaternion(
       camera.orientation, quaternionFromAxisAngle([0, 0, 1], rollSpeed)
     ));
-    lodDirty = true;
   }
 }
 
@@ -780,13 +778,11 @@ function onMouseMove(event: MouseEvent): void {
     camera.orientation = normalizeQuaternion(multiplyQuaternion(
       camera.orientation, quaternionFromAxisAngle([0, 1, 0], -event.movementX * s)
     ));
-    lodDirty = true;
   }
   if (event.movementY !== 0) {
     camera.orientation = normalizeQuaternion(multiplyQuaternion(
       camera.orientation, quaternionFromAxisAngle([1, 0, 0], -event.movementY * s)
     ));
-    lodDirty = true;
   }
 }
 
