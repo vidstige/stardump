@@ -51,6 +51,7 @@ let API_ROOT = searchParams.get("api") ?? (isLocal ? LOCAL_API : REMOTE_API);
 const DATASET_OVERRIDE = searchParams.get("dataset");
 let pixelThreshold = 8;
 const LOD_THROTTLE_MS = 1000;
+const FETCH_THROTTLE_MS = 200;
 const MAX_CONCURRENT_FETCHES = 16;
 const MAX_SUBTREE_BYTES = 32 * 1024;
 
@@ -377,6 +378,9 @@ let pendingFetches = new Set<number>();
 let pendingHttpRequests = 0;
 let lodDirty = true;
 let lastLodAt = -LOD_THROTTLE_MS;
+let lastFetchAt = -FETCH_THROTTLE_MS;
+type FetchCandidate = { nodeIdx: number; priority: number; subtree: boolean };
+let fetchQueue: FetchCandidate[] = [];
 
 window.starDump = {
   getCamera: () => camera,
@@ -575,22 +579,25 @@ function lodUpdate(nt: NodeTable, eye: Vec3, pixelsPerRadian: number): void {
   updateBuffers(starDataBuffer.subarray(0, out * 5), out);
 
   const t2 = performance.now();
+  if (t2 - t0 > 1) console.log(`LOD: walk=${(t1-t0).toFixed(1)}ms  copy=${(t2-t1).toFixed(1)}ms  stars=${out}`);
 
-  if (slots > 0) {
-    candidates.sort((a, b) => b.priority - a.priority);
-    const dataset = datasetName ?? "";
-    for (let i = 0; i < Math.min(slots, candidates.length); i++) {
-      const { nodeIdx, subtree } = candidates[i];
-      if (subtree) {
-        void fetchSubtreePoints(API_ROOT, dataset, nt, nodeIdx);
-      } else {
-        void fetchNodePoints(API_ROOT, dataset, nt, nodeIdx);
-      }
+  fetchQueue = candidates;
+}
+
+function scheduleFetches(nt: NodeTable): void {
+  const slots = MAX_CONCURRENT_FETCHES - pendingHttpRequests;
+  if (slots <= 0 || fetchQueue.length === 0) return;
+  fetchQueue.sort((a, b) => b.priority - a.priority);
+  const dataset = datasetName ?? "";
+  for (let i = 0; i < Math.min(slots, fetchQueue.length); i++) {
+    const { nodeIdx, subtree } = fetchQueue[i];
+    if (subtree) {
+      void fetchSubtreePoints(API_ROOT, dataset, nt, nodeIdx);
+    } else {
+      void fetchNodePoints(API_ROOT, dataset, nt, nodeIdx);
     }
   }
-
-  const t3 = performance.now();
-  if (t3 - t0 > 1) console.log(`LOD: walk=${(t1-t0).toFixed(1)}ms  copy=${(t2-t1).toFixed(1)}ms  fetches=${(t3-t2).toFixed(1)}ms  stars=${out}`);
+  fetchQueue = [];
 }
 
 async function ensureDatasetName(): Promise<string> {
@@ -872,13 +879,17 @@ regl.frame(({ time }) => {
   hudCoordinates.textContent = `${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}`;
   if (hudQueryCount) hudQueryCount.textContent = String(pendingFetches.size);
 
-  if (nodeTable && lodDirty) {
+  if (nodeTable) {
     const now = performance.now();
-    if (now - lastLodAt >= LOD_THROTTLE_MS) {
+    if (lodDirty && now - lastLodAt >= LOD_THROTTLE_MS) {
       lastLodAt = now;
       lodDirty  = false;
       const pixelsPerRadian = canvas.height / Math.max(camera.fovY, 1e-6);
       lodUpdate(nodeTable, camera.position, pixelsPerRadian);
+    }
+    if (now - lastFetchAt >= FETCH_THROTTLE_MS) {
+      lastFetchAt = now;
+      scheduleFetches(nodeTable);
     }
   }
 
