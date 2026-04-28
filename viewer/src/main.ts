@@ -1,5 +1,9 @@
 import createRegl from "regl";
 
+type LodWorkerMsg =
+  | { type: 'frame';    data: Float32Array; count: number }
+  | { type: 'progress'; loaded: number; total: number; pending: number };
+
 type Mat4 = Float32Array;
 type Vec3 = [number, number, number];
 type Quaternion = [number, number, number, number];
@@ -18,7 +22,6 @@ type FrustumParams = {
   far: number;
   fovy: number;
 };
-
 
 type NodeTable = {
   nodeCount:         number;
@@ -50,10 +53,6 @@ const isLocal = window.location.hostname === "localhost" || window.location.host
 let API_ROOT = searchParams.get("api") ?? (isLocal ? LOCAL_API : REMOTE_API);
 const DATASET_OVERRIDE = searchParams.get("dataset");
 let pixelThreshold = 8;
-const LOD_THROTTLE_MS = 1000;
-const FETCH_THROTTLE_MS = 200;
-const MAX_CONCURRENT_FETCHES = 16;
-const MAX_SUBTREE_BYTES = 32 * 1024;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -147,91 +146,6 @@ function viewMatrix(position: Vec3, orientation: Quaternion): Mat4 {
   return lookAt(position, add(position, forward), up);
 }
 
-
-
-
-// Single DFS that both collects the LOD cut for rendering and gathers fetch candidates.
-// Bounds are passed as 6 flat numbers to avoid per-node object allocations.
-// fetchCandidates is kept as a bounded top-K min-heap so the array never grows
-// larger than maxFetchCandidates, making the final sort at the call site trivial.
-function rebuildLod(
-  nt: NodeTable,
-  eye: Vec3,
-  pixelsPerRadian: number,
-  fetchCandidates: { nodeIdx: number; priority: number; subtree: boolean }[],
-  maxFetchCandidates: number,
-): { nodeIdx: number; count: number }[] {
-  const ranges: { nodeIdx: number; count: number }[] = [];
-
-  let heapMin = -Infinity;
-  let heapMinIdx = 0;
-
-  function pushCandidate(nodeIdx: number, priority: number, subtree: boolean): void {
-    if (fetchCandidates.length < maxFetchCandidates) {
-      fetchCandidates.push({ nodeIdx, priority, subtree });
-      if (fetchCandidates.length === maxFetchCandidates) {
-        heapMin = fetchCandidates[0].priority; heapMinIdx = 0;
-        for (let i = 1; i < fetchCandidates.length; i++) {
-          if (fetchCandidates[i].priority < heapMin) { heapMin = fetchCandidates[i].priority; heapMinIdx = i; }
-        }
-      }
-    } else if (priority > heapMin) {
-      fetchCandidates[heapMinIdx] = { nodeIdx, priority, subtree };
-      heapMin = fetchCandidates[0].priority; heapMinIdx = 0;
-      for (let i = 1; i < fetchCandidates.length; i++) {
-        if (fetchCandidates[i].priority < heapMin) { heapMin = fetchCandidates[i].priority; heapMinIdx = i; }
-      }
-    }
-  }
-
-  function walk(
-    nodeIdx: number,
-    minX: number, minY: number, minZ: number,
-    maxX: number, maxY: number, maxZ: number,
-  ): void {
-    const cm     = nt.childMask[nodeIdx];
-    const pCount = nt.pointCount[nodeIdx];
-
-    const cx = (minX + maxX) * 0.5;
-    const cy = (minY + maxY) * 0.5;
-    const cz = (minZ + maxZ) * 0.5;
-    const half = (maxX - minX) * 0.5;
-    const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
-    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
-    const footprintPx = (half / dist) * pixelsPerRadian;
-
-    const atCut = cm === 0 || (footprintPx < pixelThreshold && pCount > 0);
-
-    if (atCut) {
-      if (pCount > 0) ranges.push({ nodeIdx, count: pCount });
-      if (!nodePointCache.has(nodeIdx) && !pendingFetches.has(nodeIdx) && pCount > 0) {
-        const subtree = nt.subtreePointCount[nodeIdx] * 20 <= MAX_SUBTREE_BYTES;
-        pushCandidate(nodeIdx, footprintPx, subtree);
-      }
-      return;
-    }
-
-    if (!nodePointCache.has(nodeIdx) && !pendingFetches.has(nodeIdx) && pCount > 0) {
-      pushCandidate(nodeIdx, footprintPx, false);
-    }
-
-    const mx = cx, my = cy, mz = cz;
-    let childIdx = nt.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      walk(childIdx,
-        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
-        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
-      );
-      childIdx++;
-    }
-  }
-
-  const e = nt.halfExtentPc;
-  if (nt.nodeCount > 0) walk(0, -e, -e, -e, e, e, e);
-  return ranges;
-}
-
 async function fetchRange(url: string, start: number, end: number): Promise<ArrayBuffer> {
   const resp = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
   if (resp.status !== 206 && resp.status !== 200) {
@@ -314,7 +228,6 @@ const regl = createRegl({
 
 const starBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
 const scene: SceneState = { count: 0 };
-let starDataBuffer = new Float32Array(0);
 
 // Offscreen float HDR accumulation buffer + full-screen tone-map pass
 const hdrBuffer = regl.framebuffer({
@@ -371,16 +284,6 @@ let datasetNames: string[] | null = null;
 let exposure   = 500.0;
 let sizeScale  = 1.0;
 let maxRadius  = 1.0;
-
-let nodeTable: NodeTable | null = null;
-let nodePointCache = new Map<number, Float32Array>();
-let pendingFetches = new Set<number>();
-let pendingHttpRequests = 0;
-let lodDirty = true;
-let lastLodAt = -LOD_THROTTLE_MS;
-let lastFetchAt = -FETCH_THROTTLE_MS;
-type FetchCandidate = { nodeIdx: number; priority: number; subtree: boolean };
-let fetchQueue: FetchCandidate[] = [];
 
 window.starDump = {
   getCamera: () => camera,
@@ -449,156 +352,21 @@ async function fetchNodeTable(apiRoot: string, dataset: string): Promise<NodeTab
   return { ...nt, subtreePointCount: computeSubtreePointCounts(nt) };
 }
 
-async function fetchNodePoints(
-  apiRoot: string,
-  dataset: string,
-  nt: NodeTable,
-  nodeIdx: number,
-): Promise<void> {
-  if (pendingFetches.has(nodeIdx) || nodePointCache.has(nodeIdx)) return;
-  pendingFetches.add(nodeIdx);
-  pendingHttpRequests++;
-  try {
-    const url   = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
-    const start = nt.pointsOffset + nt.pointFirst[nodeIdx] * 20;
-    const end   = start + nt.pointCount[nodeIdx] * 20 - 1;
-    const buf   = await fetchRange(url, start, end);
-    if (nodeTable === nt) {
-      nodePointCache.set(nodeIdx, new Float32Array(buf));
-      lodDirty = true;
-      updateLodBar();
+// Background worker that owns the node cache and all fetching.
+const lodWorker = new Worker('dist/lod.worker.js', { type: 'module' });
+
+lodWorker.addEventListener('message', (e: MessageEvent<LodWorkerMsg>) => {
+  const msg = e.data;
+  if (msg.type === 'frame') {
+    starBuffer(msg.data);
+    scene.count = msg.count;
+  } else {
+    if (hudLodBar) {
+      hudLodBar.style.width = `${(msg.loaded / Math.max(msg.total, 1) * 100).toFixed(1)}%`;
     }
-  } finally {
-    pendingHttpRequests--;
-    pendingFetches.delete(nodeIdx);
+    if (hudQueryCount) hudQueryCount.textContent = String(msg.pending);
   }
-}
-
-async function fetchSubtreePoints(
-  apiRoot: string,
-  dataset: string,
-  nt: NodeTable,
-  nodeIdx: number,
-): Promise<void> {
-  // Collect all uncached, non-pending nodes in the subtree and mark them pending.
-  const toFetch: number[] = [];
-  function collect(idx: number): void {
-    if (pendingFetches.has(idx) || nodePointCache.has(idx)) return;
-    toFetch.push(idx);
-    pendingFetches.add(idx);
-    const cm = nt.childMask[idx];
-    let childIdx = nt.firstChild[idx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      collect(childIdx);
-      childIdx++;
-    }
-  }
-  collect(nodeIdx);
-  if (toFetch.length === 0) return;
-
-  pendingHttpRequests++;
-  try {
-    const url        = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
-    const totalPts   = nt.subtreePointCount[nodeIdx];
-    const byteStart  = nt.pointsOffset + nt.pointFirst[nodeIdx] * 20;
-    const byteEnd    = byteStart + totalPts * 20 - 1;
-    const buf        = await fetchRange(url, byteStart, byteEnd);
-    if (nodeTable !== nt) return;
-    const data = new Float32Array(buf);
-    const base = nt.pointFirst[nodeIdx];
-    for (const idx of toFetch) {
-      if (nt.pointCount[idx] === 0) continue;
-      const off = (nt.pointFirst[idx] - base) * 5;
-      nodePointCache.set(idx, data.subarray(off, off + nt.pointCount[idx] * 5));
-    }
-    lodDirty = true;
-    updateLodBar();
-  } finally {
-    pendingHttpRequests--;
-    for (const idx of toFetch) pendingFetches.delete(idx);
-  }
-}
-
-function updateBuffers(data: Float32Array, count: number): void {
-  starBuffer(data);
-  scene.count = count;
-}
-
-type LeafInfo = { nodeIdx: number; count: number };
-let allLeaves: LeafInfo[] = [];
-
-function buildLeafList(nt: NodeTable): LeafInfo[] {
-  const leaves: LeafInfo[] = [];
-  function walk(nodeIdx: number): void {
-    if (nt.childMask[nodeIdx] === 0) {
-      leaves.push({ nodeIdx, count: nt.pointCount[nodeIdx] });
-      return;
-    }
-    let childIdx = nt.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((nt.childMask[nodeIdx] & (1 << c)) === 0) continue;
-      walk(childIdx);
-      childIdx++;
-    }
-  }
-  if (nt.nodeCount > 0) walk(0);
-  return leaves;
-}
-
-function updateLodBar(): void {
-  if (allLeaves.length === 0) return;
-  const loaded = allLeaves.filter(l => nodePointCache.has(l.nodeIdx)).length;
-  hudLodBar.style.width = `${(loaded / allLeaves.length * 100).toFixed(1)}%`;
-}
-
-function lodUpdate(nt: NodeTable, eye: Vec3, pixelsPerRadian: number): void {
-  const t0 = performance.now();
-
-  type Candidate = { nodeIdx: number; priority: number; subtree: boolean };
-  const candidates: Candidate[] = [];
-  const slots = Math.max(MAX_CONCURRENT_FETCHES - pendingHttpRequests, 0);
-  const ranges = rebuildLod(nt, eye, pixelsPerRadian, candidates, slots);
-
-  const t1 = performance.now();
-
-  let totalCount = 0;
-  for (const r of ranges) {
-    if (nodePointCache.has(r.nodeIdx)) totalCount += r.count;
-  }
-  if (starDataBuffer.length < totalCount * 5) {
-    starDataBuffer = new Float32Array(totalCount * 5);
-  }
-  let out = 0;
-  for (const r of ranges) {
-    const pts = nodePointCache.get(r.nodeIdx);
-    if (!pts) continue;
-    starDataBuffer.set(pts, out * 5);
-    out += r.count;
-  }
-  updateBuffers(starDataBuffer.subarray(0, out * 5), out);
-
-  const t2 = performance.now();
-  if (t2 - t0 > 1) console.log(`LOD: walk=${(t1-t0).toFixed(1)}ms  copy=${(t2-t1).toFixed(1)}ms  stars=${out}`);
-
-  fetchQueue = candidates;
-}
-
-function scheduleFetches(nt: NodeTable): void {
-  const slots = MAX_CONCURRENT_FETCHES - pendingHttpRequests;
-  if (slots <= 0 || fetchQueue.length === 0) return;
-  fetchQueue.sort((a, b) => b.priority - a.priority);
-  const dataset = datasetName ?? "";
-  for (let i = 0; i < Math.min(slots, fetchQueue.length); i++) {
-    const { nodeIdx, subtree } = fetchQueue[i];
-    if (subtree) {
-      void fetchSubtreePoints(API_ROOT, dataset, nt, nodeIdx);
-    } else {
-      void fetchNodePoints(API_ROOT, dataset, nt, nodeIdx);
-    }
-  }
-  fetchQueue = [];
-}
+});
 
 async function ensureDatasetName(): Promise<string> {
   if (datasetName) return datasetName;
@@ -611,16 +379,16 @@ async function ensureDatasetName(): Promise<string> {
 }
 
 async function loadDataset(): Promise<void> {
-  nodeTable = null;
-  nodePointCache = new Map();
-  pendingFetches = new Set();
-  updateBuffers(new Float32Array(0), 0);
+  starBuffer(new Float32Array(0));
+  scene.count = 0;
   try {
     const name = await ensureDatasetName();
-    nodeTable = await fetchNodeTable(API_ROOT, name);
-    allLeaves = buildLeafList(nodeTable);
-    updateLodBar();
-    lodDirty = true;
+    const nt = await fetchNodeTable(API_ROOT, name);
+    lodWorker.postMessage(
+      { type: 'init', nodeTable: nt, apiRoot: API_ROOT, dataset: name },
+      [nt.childMask.buffer, nt.firstChild.buffer, nt.pointFirst.buffer,
+       nt.pointCount.buffer, nt.subtreePointCount.buffer],
+    );
   } catch (error) {
     hudStatus.textContent = error instanceof Error ? error.message : String(error);
   }
@@ -651,7 +419,6 @@ hudFarValue.textContent = `${camera.far.toFixed(0)} pc`;
 hudFarSlider.addEventListener("input", () => {
   camera.far = Number(hudFarSlider.value);
   hudFarValue.textContent = `${camera.far.toFixed(0)} pc`;
-  lodDirty = true;
 });
 
 const exposureMin = Math.log10(1e-3);
@@ -686,7 +453,6 @@ hudPixelThresholdValue.textContent = `${pixelThreshold} px`;
 hudPixelThresholdSlider.addEventListener("input", () => {
   pixelThreshold = Number(hudPixelThresholdSlider.value);
   hudPixelThresholdValue.textContent = `${pixelThreshold} px`;
-  lodDirty = true;
 });
 
 function populateDatasetSelect(names: string[], selectedName: string): void {
@@ -722,7 +488,6 @@ function updateCamera(deltaTime: number): void {
 
   if (movement[0] || movement[1] || movement[2]) {
     camera.position = add(camera.position, scale(normalize(movement), speed));
-    lodDirty = true;
   }
 
   const rollSpeed = 0.25 * deltaTime;
@@ -877,21 +642,9 @@ regl.frame(({ time }) => {
 
   const [cx, cy, cz] = camera.position;
   hudCoordinates.textContent = `${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}`;
-  if (hudQueryCount) hudQueryCount.textContent = String(pendingFetches.size);
 
-  if (nodeTable) {
-    const now = performance.now();
-    if (lodDirty && now - lastLodAt >= LOD_THROTTLE_MS) {
-      lastLodAt = now;
-      lodDirty  = false;
-      const pixelsPerRadian = canvas.height / Math.max(camera.fovY, 1e-6);
-      lodUpdate(nodeTable, camera.position, pixelsPerRadian);
-    }
-    if (now - lastFetchAt >= FETCH_THROTTLE_MS) {
-      lastFetchAt = now;
-      scheduleFetches(nodeTable);
-    }
-  }
+  const pixelsPerRadian = canvas.height / Math.max(camera.fovY, 1e-6);
+  lodWorker.postMessage({ type: 'view', eye: camera.position, pixelsPerRadian, pixelThreshold });
 
   // Resize canvas + HDR buffer to match display
   const w = canvas.clientWidth  | 0;
@@ -900,7 +653,6 @@ regl.frame(({ time }) => {
     canvas.width  = w;
     canvas.height = h;
     hdrBuffer.resize(w, h);
-    lodDirty = true;
   }
 
   // Pass 1: accumulate stars into float HDR buffer (linear, no tone map)

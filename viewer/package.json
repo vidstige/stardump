@@ -2,9 +2,9 @@
   "name": "star-dump",
   "private": true,
   "scripts": {
-    "build": "esbuild src/assembly-worker.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/assembly-worker.js && esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js",
-    "check": "tsc --noEmit",
-    "dev": "esbuild src/assembly-worker.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/assembly-worker.js && esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js --watch --serve=8000 --servedir=."
+    "build": "esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js && esbuild src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --outdir=dist",
+    "check": "tsc --noEmit && tsc -p tsconfig.worker.json --noEmit",
+    "dev": "esbuild src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --outdir=dist --watch & esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js --watch --serve=8000 --servedir=."
   },
   "dependencies": {
     "regl": "^2.1.1"
