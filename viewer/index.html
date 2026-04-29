@@ -36,11 +36,9 @@
         height: 100%;
       }
 
-      .hud {
+      /* Shared card style */
+      .hud, #corner-info {
         position: absolute;
-        top: 14px;
-        left: 14px;
-        width: 290px;
         padding: 9px 11px;
         border: 1px solid rgba(159, 184, 222, 0.2);
         border-radius: 10px;
@@ -51,14 +49,71 @@
         gap: 3px;
       }
 
+      .hud {
+        top: 14px;
+        left: 14px;
+        width: 290px;
+      }
+
+      #corner-info {
+        top: 14px;
+        right: 14px;
+        min-width: 200px;
+        pointer-events: none;
+      }
+
+      /* HUD header row */
+      .hud-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
       .hud h1 {
-        margin: 0 0 2px;
+        margin: 0;
         font-size: 12px;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
+        white-space: nowrap;
+        flex-shrink: 0;
       }
 
+      .nodes-inline {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .nodes-lbl {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: rgba(235, 243, 255, 0.5);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .nodes-inline #lod-bar {
+        flex: 1;
+        width: auto;
+        margin: 0;
+      }
+
+      .nodes-inline code {
+        font: inherit;
+        font-size: 10px;
+        color: rgba(235, 243, 255, 0.85);
+        white-space: nowrap;
+        flex-shrink: 0;
+        width: 36px;
+        text-align: right;
+      }
+
+      /* Status */
       .hud .status {
         margin: 0;
         font-size: 10px;
@@ -67,10 +122,43 @@
         min-height: 1em;
       }
 
-      .hud hr {
-        border: none;
-        border-top: 1px solid rgba(159, 184, 222, 0.1);
-        margin: 2px 0;
+      /* Tabs */
+      .tab-btns {
+        display: flex;
+        gap: 3px;
+        margin-top: 2px;
+      }
+
+      .tab-btn {
+        flex: 1;
+        font: inherit;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: rgba(235, 243, 255, 0.4);
+        background: transparent;
+        border: 1px solid rgba(159, 184, 222, 0.12);
+        border-radius: 4px;
+        padding: 3px 0;
+        cursor: pointer;
+      }
+
+      .tab-btn.active {
+        color: rgba(235, 243, 255, 0.85);
+        border-color: rgba(159, 184, 222, 0.3);
+        background: rgba(159, 184, 222, 0.08);
+      }
+
+      .tab-content {
+        display: none;
+        flex-direction: column;
+        gap: 3px;
+        margin-top: 2px;
+      }
+
+      .tab-content.active {
+        display: flex;
       }
 
       /* Info rows */
@@ -130,6 +218,7 @@
         background: rgba(255, 255, 255, 0.06);
       }
 
+      /* Progress bar */
       #lod-bar {
         width: 100%;
         height: 6px;
@@ -238,77 +327,70 @@
       }
 
       .tip:hover::after { display: block; }
-
-      #fps {
-        position: absolute;
-        top: 14px;
-        right: 14px;
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.06em;
-        color: rgba(235, 243, 255, 0.55);
-        pointer-events: none;
-        font-family: "IBM Plex Mono", "IBM Plex Sans", monospace;
-      }
     </style>
   </head>
   <body>
     <div id="app">
-      <div id="fps">-- fps</div>
-      <div class="hud">
-        <h1>star-dump</h1>
-        <p id="status" class="status"></p>
-
-        <div class="select-row">
-          <label for="api-select">URL</label>
-          <select id="api-select"></select>
-        </div>
-        <div class="select-row">
-          <label for="dataset-select">Dataset</label>
-          <select id="dataset-select"></select>
-        </div>
-
-        <hr>
-
-        <div class="info-row">
-          <span class="lbl">LOD</span>
-        </div>
-        <div id="lod-bar"><div id="lod-cached"></div><div id="lod-inflight"></div></div>
-        <div class="info-row">
-          <span class="lbl">Nodes</span>
-          <code id="query-count">0</code>
-        </div>
+      <div id="corner-info">
         <div class="info-row">
           <span class="lbl">Position (pc)</span>
           <code id="coordinates">0.00, 0.00, 0.00</code>
         </div>
-
-        <hr>
-
-        <div class="slider-row">
-          <label for="far-slider">Far<span class="tip" data-tip="Maximum render distance in parsecs. Stars beyond this are clipped from the view frustum.">i</span></label>
-          <input type="range" id="far-slider" min="5" max="5000" step="5" value="500">
-          <code id="far-value">500 pc</code>
+        <div class="info-row">
+          <span class="lbl">Speed</span>
+          <code id="speed">0c</code>
         </div>
-        <div class="slider-row">
-          <label for="exposure-slider">Exposure<span class="tip" data-tip="Overall brightness multiplier. Higher reveals faint stars but overexposes bright ones.">i</span></label>
-          <input type="range" id="exposure-slider" min="0" max="100" step="1" value="50">
-          <code id="exposure-value">1.0e+0</code>
+      </div>
+      <div class="hud">
+        <div class="hud-header">
+          <h1>star-dump</h1>
+          <div class="nodes-inline">
+            <span class="nodes-lbl">NODES</span>
+            <div id="lod-bar"><div id="lod-cached"></div><div id="lod-inflight"></div></div>
+            <code id="query-count">0</code>
+          </div>
         </div>
-        <div class="slider-row">
-          <label for="size-scale-slider">Size scale<span class="tip" data-tip="Scales how much a star's brightness maps to its radius. Lower values shrink all stars; higher values enlarge them.">i</span></label>
-          <input type="range" id="size-scale-slider" min="0.1" max="10" step="0.1" value="2">
-          <code id="size-scale-value">2.0</code>
+        <p id="status" class="status"></p>
+        <div class="tab-btns">
+          <button class="tab-btn active" data-tab="data">Data</button>
+          <button class="tab-btn" data-tab="display">Display</button>
         </div>
-        <div class="slider-row">
-          <label for="max-radius-slider">Max radius<span class="tip" data-tip="Maximum star radius in pixels. Caps the brightest stars so they don't grow too large.">i</span></label>
-          <input type="range" id="max-radius-slider" min="1" max="16" step="0.5" value="8">
-          <code id="max-radius-value">8.0 px</code>
+        <div class="tab-content active" id="tab-data">
+          <div class="select-row">
+            <label for="api-select">URL</label>
+            <select id="api-select"></select>
+          </div>
+          <div class="select-row">
+            <label for="dataset-select">Dataset</label>
+            <select id="dataset-select"></select>
+          </div>
         </div>
-        <div class="slider-row">
-          <label for="pixel-threshold-slider">Pixel thr<span class="tip" data-tip="LOD cut-off in pixels. When a node's sky footprint is smaller than this, its precomputed subsample is used instead of descending. Higher = faster but coarser detail.">i</span></label>
-          <input type="range" id="pixel-threshold-slider" min="1" max="16" step="1" value="8">
-          <code id="pixel-threshold-value">8 px</code>
+        <div class="tab-content" id="tab-display">
+          <div class="slider-row">
+            <label for="far-slider">Far<span class="tip" data-tip="Maximum render distance in parsecs. Stars beyond this are clipped from the view frustum.">i</span></label>
+            <input type="range" id="far-slider" min="5" max="5000" step="5" value="500">
+            <code id="far-value">500 pc</code>
+          </div>
+          <div class="slider-row">
+            <label for="exposure-slider">Exposure<span class="tip" data-tip="Overall brightness multiplier. Higher reveals faint stars but overexposes bright ones.">i</span></label>
+            <input type="range" id="exposure-slider" min="0" max="100" step="1" value="50">
+            <code id="exposure-value">1.0e+0</code>
+          </div>
+          <div class="slider-row">
+            <label for="size-scale-slider">Size scale<span class="tip" data-tip="Scales how much a star's brightness maps to its radius. Lower values shrink all stars; higher values enlarge them.">i</span></label>
+            <input type="range" id="size-scale-slider" min="0.1" max="10" step="0.1" value="2">
+            <code id="size-scale-value">2.0</code>
+          </div>
+          <div class="slider-row">
+            <label for="max-radius-slider">Max radius<span class="tip" data-tip="Maximum star radius in pixels. Caps the brightest stars so they don't grow too large.">i</span></label>
+            <input type="range" id="max-radius-slider" min="1" max="16" step="0.5" value="8">
+            <code id="max-radius-value">8.0 px</code>
+          </div>
+          <div class="slider-row">
+            <label for="pixel-threshold-slider">Pixel thr<span class="tip" data-tip="LOD cut-off in pixels. When a node's sky footprint is smaller than this, its precomputed subsample is used instead of descending. Higher = faster but coarser detail.">i</span></label>
+            <input type="range" id="pixel-threshold-slider" min="1" max="16" step="1" value="8">
+            <code id="pixel-threshold-value">8 px</code>
+          </div>
         </div>
       </div>
     </div>

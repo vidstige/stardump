@@ -180,6 +180,7 @@ const lodCachedElement      = document.querySelector<HTMLElement>("#lod-cached")
 const lodInflightElement    = document.querySelector<HTMLElement>("#lod-inflight");
 const queryCountElement     = document.querySelector<HTMLElement>("#query-count");
 const coordinatesElement    = document.querySelector<HTMLElement>("#coordinates");
+const speedElement          = document.querySelector<HTMLElement>("#speed");
 const farSliderElement      = document.querySelector<HTMLInputElement>("#far-slider");
 const farValueElement       = document.querySelector<HTMLElement>("#far-value");
 const exposureSliderElement        = document.querySelector<HTMLInputElement>("#exposure-slider");
@@ -191,7 +192,7 @@ const maxRadiusValueElement        = document.querySelector<HTMLElement>("#max-r
 const pixelThresholdSliderElement  = document.querySelector<HTMLInputElement>("#pixel-threshold-slider");
 const pixelThresholdValueElement   = document.querySelector<HTMLElement>("#pixel-threshold-value");
 if (!statusElement || !apiSelectElement || !datasetSelectElement ||
-    !lodCachedElement || !lodInflightElement || !coordinatesElement ||
+    !lodCachedElement || !lodInflightElement || !coordinatesElement || !speedElement ||
     !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement ||
     !sizeScaleSliderElement || !sizeScaleValueElement ||
     !maxRadiusSliderElement || !maxRadiusValueElement ||
@@ -205,6 +206,7 @@ const hudLodCached      = lodCachedElement;
 const hudLodInflight    = lodInflightElement;
 const hudQueryCount     = queryCountElement;
 const hudCoordinates    = coordinatesElement;
+const hudSpeed          = speedElement;
 const hudFarSlider           = farSliderElement;
 const hudFarValue            = farValueElement;
 const hudExposureSlider      = exposureSliderElement;
@@ -215,7 +217,6 @@ const hudMaxRadiusSlider     = maxRadiusSliderElement;
 const hudMaxRadiusValue      = maxRadiusValueElement;
 const hudPixelThresholdSlider = pixelThresholdSliderElement;
 const hudPixelThresholdValue  = pixelThresholdValueElement;
-const hudFps = document.querySelector<HTMLElement>("#fps")!
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
@@ -280,7 +281,7 @@ const camera: Camera = {
 
 const keyState = new Set<string>();
 let previousTime = 0;
-let smoothFps = 0;
+let prevPosition: Vec3 = [0, 0, 0];
 let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
 let exposure   = 500.0;
@@ -633,16 +634,37 @@ const drawStars = regl({
 
 const renderToHdr = regl({ framebuffer: hdrBuffer });
 
+const C_PC_PER_S = 9.716e-9;
+
+function formatSpeed(pcPerS: number): string {
+  const c = pcPerS / C_PC_PER_S;
+  if (c < 1e3) return `${c.toFixed(1)}c`;
+  if (c < 1e6) return `${(c / 1e3).toFixed(1)}kc`;
+  if (c < 1e9) return `${(c / 1e6).toFixed(1)}Mc`;
+  return `${(c / 1e9).toFixed(1)}Gc`;
+}
+
+document.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll<HTMLElement>('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`)?.classList.add('active');
+  });
+});
+
 regl.frame(({ time }) => {
   const deltaTime = previousTime === 0 ? 0 : time - previousTime;
   previousTime = time;
-  if (deltaTime > 0) {
-    smoothFps = smoothFps === 0 ? 1 / deltaTime : smoothFps * 0.9 + (1 / deltaTime) * 0.1;
-    hudFps.textContent = `${smoothFps.toFixed(0)} fps`;
-  }
   updateCamera(deltaTime);
 
   const [cx, cy, cz] = camera.position;
+  if (deltaTime > 0) {
+    const [px, py, pz] = prevPosition;
+    const spd = Math.sqrt((cx-px)**2 + (cy-py)**2 + (cz-pz)**2) / deltaTime;
+    hudSpeed.textContent = spd > 0 ? formatSpeed(spd) : '0c';
+  }
+  prevPosition = [cx, cy, cz];
   hudCoordinates.textContent = `${cx.toFixed(2)}, ${cy.toFixed(2)}, ${cz.toFixed(2)}`;
 
   const pixelsPerRadian = canvas.height / Math.max(camera.fovY, 1e-6);
