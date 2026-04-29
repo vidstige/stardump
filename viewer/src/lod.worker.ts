@@ -12,7 +12,7 @@ type NodeTable = {
   pointsOffset:      number;
 };
 
-type WantedNode = { nodeIdx: number; priority: number; subtree: boolean };
+type WantedNode = { nodeIdx: number; priority: number };
 
 type InitMsg = { type: 'init'; nodeTable: NodeTable; apiRoot: string; dataset: string };
 type ViewMsg = { type: 'view'; eye: Vec3; pixelsPerRadian: number; pixelThreshold: number };
@@ -22,7 +22,6 @@ export type ProgressMsg = { type: 'progress'; loaded: number; total: number; pen
 export type LodWorkerMsg = FrameMsg | ProgressMsg;
 
 const MAX_CONCURRENT_FETCHES = 16;
-const MAX_SUBTREE_BYTES      = 32 * 1024;
 const LOD_THROTTLE_MS        = 1000;
 
 let nodeTable: NodeTable | null = null;
@@ -171,14 +170,13 @@ function collectWanted(
 
     if (cm === 0 || (footprintPx < pixelThreshold && pCount > 0)) {
       if (!nodePointCache.has(nodeIdx) && pCount > 0) {
-        const subtree = nt.subtreePointCount[nodeIdx] * 20 <= MAX_SUBTREE_BYTES;
-        wanted.push({ nodeIdx, priority: footprintPx, subtree });
+        wanted.push({ nodeIdx, priority: footprintPx });
       }
       return;
     }
 
     if (!nodePointCache.has(nodeIdx) && pCount > 0) {
-      wanted.push({ nodeIdx, priority: footprintPx, subtree: false });
+      wanted.push({ nodeIdx, priority: footprintPx });
     }
 
     const mx = cx, my = cy, mz = cz;
@@ -207,10 +205,9 @@ function scheduleFetches(): void {
     .sort((a, b) => b.priority - a.priority);
   let dispatched = 0;
   for (let i = 0; i < candidates.length && dispatched < slots; i++) {
-    const { nodeIdx, subtree } = candidates[i];
+    const { nodeIdx } = candidates[i];
     if (pendingFetches.has(nodeIdx) || nodePointCache.has(nodeIdx)) continue;
-    if (subtree) void fetchSubtreePoints(nodeIdx);
-    else         void fetchNodePoints(nodeIdx);
+    void fetchNodePoints(nodeIdx);
     dispatched++;
   }
 }
@@ -242,49 +239,6 @@ async function fetchNodePoints(nodeIdx: number): Promise<void> {
   } finally {
     pendingRequests--;
     pendingFetches.delete(nodeIdx);
-  }
-  rebuildWanted();
-}
-
-async function fetchSubtreePoints(nodeIdx: number): Promise<void> {
-  const nt = nodeTable!;
-  const toFetch: number[] = [];
-  function collect(idx: number): void {
-    if (pendingFetches.has(idx) || nodePointCache.has(idx)) return;
-    toFetch.push(idx);
-    pendingFetches.add(idx);
-    const cm = nt.childMask[idx];
-    let childIdx = nt.firstChild[idx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      collect(childIdx);
-      childIdx++;
-    }
-  }
-  collect(nodeIdx);
-  if (toFetch.length === 0) return;
-
-  pendingRequests++;
-  try {
-    const url       = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
-    const totalPts  = nt.subtreePointCount[nodeIdx];
-    const byteStart = nt.pointsOffset + nt.pointFirst[nodeIdx] * 20;
-    const byteEnd   = byteStart + totalPts * 20 - 1;
-    const buf       = await fetchRange(url, byteStart, byteEnd);
-    if (nodeTable !== nt) return;
-    const data = new Float32Array(buf);
-    const base = nt.pointFirst[nodeIdx];
-    for (const idx of toFetch) {
-      if (nt.pointCount[idx] === 0) continue;
-      const off = (nt.pointFirst[idx] - base) * 5;
-      nodePointCache.set(idx, data.subarray(off, off + nt.pointCount[idx] * 5));
-    }
-    postProgress();
-    lodDirty = true;
-    maybeRunLod();
-  } finally {
-    pendingRequests--;
-    for (const idx of toFetch) pendingFetches.delete(idx);
   }
   rebuildWanted();
 }
