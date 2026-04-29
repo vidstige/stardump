@@ -15,6 +15,7 @@ use crate::octree::Bounds3;
 use crate::vec3::Vec3;
 
 pub const STARCLOUD_FILENAME: &str = "starcloud.bin";
+pub const LABELS_FILENAME: &str = "labels.json";
 pub const STARCLOUD_MAGIC: [u8; 8] = *b"STRCLD\0\0";
 pub const STARCLOUD_VERSION: u16 = 1;
 pub const STARCLOUD_HEADER_SIZE: usize = 32;

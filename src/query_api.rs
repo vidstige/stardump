@@ -13,7 +13,7 @@ use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::starcloud::STARCLOUD_FILENAME;
+use crate::starcloud::{LABELS_FILENAME, STARCLOUD_FILENAME};
 use crate::storage::local_path;
 
 pub struct QueryCatalog {
@@ -162,11 +162,27 @@ impl QueryCatalog {
     }
 }
 
+async fn serve_labels(
+    State(catalog): State<Arc<QueryCatalog>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !valid_dataset_name(&name) {
+        return Err(bad_request("dataset name contains invalid characters"));
+    }
+    let path = dataset_root(&catalog.data_root, &name).join(LABELS_FILENAME);
+    let body = tokio::fs::read(&path).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => not_found(format!("no labels for dataset {name}")),
+        _ => internal_error(e.into()),
+    })?;
+    Ok(([("content-type", "application/json")], body))
+}
+
 pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/indices", get(list_indices))
         .route("/datasets/{name}/starcloud.bin", get(serve_starcloud))
+        .route("/datasets/{name}/labels.json", get(serve_labels))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
         .with_state(catalog)
 }
