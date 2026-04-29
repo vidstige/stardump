@@ -4,7 +4,7 @@
   "scripts": {
     "build": "esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js && esbuild src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --outdir=dist",
     "check": "tsc --noEmit && tsc -p tsconfig.worker.json --noEmit",
-    "dev": "esbuild src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --outdir=dist --watch & esbuild src/main.ts --bundle --format=iife --platform=browser --target=es2020 --outfile=dist/main.js --watch --serve=8000 --servedir=."
+    "dev": "esbuild src/main.ts src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --outdir=dist --watch --serve=8000 --servedir=."
   },
   "dependencies": {
     "regl": "^2.1.1"
