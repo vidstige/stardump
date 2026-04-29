@@ -2,7 +2,7 @@ import createRegl from "regl";
 
 type LodWorkerMsg =
   | { type: 'frame';    data: Float32Array; count: number }
-  | { type: 'progress'; loaded: number; total: number; pending: number };
+  | { type: 'progress'; cached: number; inFlight: number; total: number };
 
 type Mat4 = Float32Array;
 type Vec3 = [number, number, number];
@@ -176,7 +176,8 @@ if (!app) {
 const statusElement         = document.querySelector<HTMLParagraphElement>("#status");
 const apiSelectElement      = document.querySelector<HTMLSelectElement>("#api-select");
 const datasetSelectElement  = document.querySelector<HTMLSelectElement>("#dataset-select");
-const lodBarElement         = document.querySelector<HTMLElement>("#lod-fill");
+const lodCachedElement      = document.querySelector<HTMLElement>("#lod-cached");
+const lodInflightElement    = document.querySelector<HTMLElement>("#lod-inflight");
 const queryCountElement     = document.querySelector<HTMLElement>("#query-count");
 const coordinatesElement    = document.querySelector<HTMLElement>("#coordinates");
 const farSliderElement      = document.querySelector<HTMLInputElement>("#far-slider");
@@ -190,7 +191,7 @@ const maxRadiusValueElement        = document.querySelector<HTMLElement>("#max-r
 const pixelThresholdSliderElement  = document.querySelector<HTMLInputElement>("#pixel-threshold-slider");
 const pixelThresholdValueElement   = document.querySelector<HTMLElement>("#pixel-threshold-value");
 if (!statusElement || !apiSelectElement || !datasetSelectElement ||
-    !lodBarElement || !coordinatesElement ||
+    !lodCachedElement || !lodInflightElement || !coordinatesElement ||
     !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement ||
     !sizeScaleSliderElement || !sizeScaleValueElement ||
     !maxRadiusSliderElement || !maxRadiusValueElement ||
@@ -200,7 +201,8 @@ if (!statusElement || !apiSelectElement || !datasetSelectElement ||
 const hudStatus         = statusElement;
 const apiSelect         = apiSelectElement;
 const datasetSelect     = datasetSelectElement;
-const hudLodBar         = lodBarElement;
+const hudLodCached      = lodCachedElement;
+const hudLodInflight    = lodInflightElement;
 const hudQueryCount     = queryCountElement;
 const hudCoordinates    = coordinatesElement;
 const hudFarSlider           = farSliderElement;
@@ -361,10 +363,10 @@ lodWorker.addEventListener('message', (e: MessageEvent<LodWorkerMsg>) => {
     starBuffer(msg.data);
     scene.count = msg.count;
   } else {
-    if (hudLodBar) {
-      hudLodBar.style.width = `${(msg.loaded / Math.max(msg.total, 1) * 100).toFixed(1)}%`;
-    }
-    if (hudQueryCount) hudQueryCount.textContent = String(msg.pending);
+    const pct = 100 / Math.max(msg.total, 1);
+    hudLodCached.style.width   = `${(msg.cached             * pct).toFixed(1)}%`;
+    hudLodInflight.style.width = `${(msg.inFlight           * pct).toFixed(1)}%`;
+    if (hudQueryCount) hudQueryCount.textContent = msg.cached >= 1000 ? `${(msg.cached / 1000).toFixed(1)}k` : String(msg.cached);
   }
 });
 

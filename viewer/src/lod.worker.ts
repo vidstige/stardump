@@ -18,7 +18,7 @@ type InitMsg = { type: 'init'; nodeTable: NodeTable; apiRoot: string; dataset: s
 type ViewMsg = { type: 'view'; eye: Vec3; pixelsPerRadian: number; pixelThreshold: number };
 
 export type FrameMsg    = { type: 'frame';    data: Float32Array; count: number };
-export type ProgressMsg = { type: 'progress'; loaded: number; total: number; pending: number };
+export type ProgressMsg = { type: 'progress'; cached: number; inFlight: number; total: number };
 export type LodWorkerMsg = FrameMsg | ProgressMsg;
 
 const MAX_CONCURRENT_FETCHES = 16;
@@ -30,7 +30,7 @@ let nodePointCache  = new Map<number, Float32Array>();
 let pendingFetches  = new Set<number>();
 let pendingRequests = 0;
 let wantedNodes: WantedNode[] = [];
-let leafSet = new Set<number>();
+let lodCachedCount = 0;
 
 let apiRoot = '';
 let dataset = '';
@@ -53,7 +53,6 @@ self.addEventListener('message', (e: MessageEvent<InitMsg | ViewMsg>) => {
     pendingFetches  = new Set();
     pendingRequests = 0;
     wantedNodes     = [];
-    leafSet         = buildLeafSet(msg.nodeTable);
     lastLodAt       = -LOD_THROTTLE_MS;
     lodDirty        = true;
   } else {
@@ -99,8 +98,11 @@ function runLodUpdate(): void {
 
 function rebuildWanted(): void {
   if (!nodeTable) return;
-  wantedNodes = collectWanted(nodeTable, latestEye, latestPixelsPerRadian, latestPixelThreshold);
+  const { wanted, cachedCount } = collectWanted(nodeTable, latestEye, latestPixelsPerRadian, latestPixelThreshold);
+  wantedNodes    = wanted;
+  lodCachedCount = cachedCount;
   scheduleFetches();
+  postProgress();
 }
 
 function collectRanges(
@@ -152,8 +154,9 @@ function collectWanted(
   eye: Vec3,
   pixelsPerRadian: number,
   pixelThreshold: number,
-): WantedNode[] {
+): { wanted: WantedNode[]; cachedCount: number } {
   const wanted: WantedNode[] = [];
+  let cachedCount = 0;
 
   function walk(
     nodeIdx: number,
@@ -170,14 +173,16 @@ function collectWanted(
     const footprintPx = (half / dist) * pixelsPerRadian;
 
     if (cm === 0 || (footprintPx < pixelThreshold && pCount > 0)) {
-      if (!nodePointCache.has(nodeIdx) && pCount > 0) {
-        wanted.push({ nodeIdx, priority: footprintPx });
+      if (pCount > 0) {
+        if (nodePointCache.has(nodeIdx)) cachedCount++;
+        else wanted.push({ nodeIdx, priority: footprintPx });
       }
       return;
     }
 
-    if (!nodePointCache.has(nodeIdx) && pCount > 0) {
-      wanted.push({ nodeIdx, priority: footprintPx });
+    if (pCount > 0) {
+      if (nodePointCache.has(nodeIdx)) cachedCount++;
+      else wanted.push({ nodeIdx, priority: footprintPx });
     }
 
     const mx = cx, my = cy, mz = cz;
@@ -194,7 +199,7 @@ function collectWanted(
 
   const e = nt.halfExtentPc;
   if (nt.nodeCount > 0) walk(0, -e, -e, -e, e, e, e);
-  return wanted;
+  return { wanted, cachedCount };
 }
 
 function scheduleFetches(): void {
@@ -256,7 +261,6 @@ async function fetchBatch(nodes: number[]): Promise<void> {
         const off = (nt.pointFirst[nodeIdx] - nt.pointFirst[firstNode]) * 20;
         nodePointCache.set(nodeIdx, new Float32Array(buf.slice(off, off + nt.pointCount[nodeIdx] * 20)));
       }
-      postProgress();
       lodDirty = true;
       maybeRunLod();
     }
@@ -268,26 +272,11 @@ async function fetchBatch(nodes: number[]): Promise<void> {
 }
 
 function postProgress(): void {
-  let loaded = 0;
-  for (const nodeIdx of leafSet) {
-    if (nodePointCache.has(nodeIdx)) loaded++;
-  }
   self.postMessage({
-    type: 'progress', loaded, total: leafSet.size, pending: pendingRequests,
+    type: 'progress',
+    cached: lodCachedCount,
+    inFlight: pendingFetches.size,
+    total: lodCachedCount + wantedNodes.length,
   } as ProgressMsg);
 }
 
-function buildLeafSet(nt: NodeTable): Set<number> {
-  const leaves = new Set<number>();
-  function walk(nodeIdx: number): void {
-    if (nt.childMask[nodeIdx] === 0) { leaves.add(nodeIdx); return; }
-    let childIdx = nt.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((nt.childMask[nodeIdx] & (1 << c)) === 0) continue;
-      walk(childIdx);
-      childIdx++;
-    }
-  }
-  if (nt.nodeCount > 0) walk(0);
-  return leaves;
-}

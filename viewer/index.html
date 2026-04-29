@@ -136,13 +136,22 @@
         border-radius: 3px;
         margin: 1px 0 3px;
         background: #1e2d42;
+        display: flex;
+        overflow: hidden;
       }
-      #lod-fill {
+      #lod-cached {
         height: 100%;
-        border-radius: 3px;
         background: #9fb8de;
         width: 0%;
         transition: width 0.3s;
+        flex-shrink: 0;
+      }
+      #lod-inflight {
+        height: 100%;
+        background: #3e6496;
+        width: 0%;
+        transition: width 0.3s;
+        flex-shrink: 0;
       }
 
       /* Slider rows */
@@ -264,9 +273,9 @@
         <div class="info-row">
           <span class="lbl">LOD</span>
         </div>
-        <div id="lod-bar"><div id="lod-fill"></div></div>
+        <div id="lod-bar"><div id="lod-cached"></div><div id="lod-inflight"></div></div>
         <div class="info-row">
-          <span class="lbl">Pending</span>
+          <span class="lbl">Nodes</span>
           <code id="query-count">0</code>
         </div>
         <div class="info-row">
