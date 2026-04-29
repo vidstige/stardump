@@ -91,7 +91,7 @@ function runLodUpdate(): void {
     packed.set(nodePointCache.get(r.nodeIdx)!, offset * 5);
     offset += r.count;
   }
-  self.postMessage({ type: 'frame', data: packed, count: offset } as FrameMsg, [packed.buffer]);
+  self.postMessage({ type: 'frame', data: packed, count: offset } as FrameMsg, { transfer: [packed.buffer] });
 
   rebuildWanted();
 }
