@@ -22,6 +22,7 @@ export type ProgressMsg = { type: 'progress'; loaded: number; total: number; pen
 export type LodWorkerMsg = FrameMsg | ProgressMsg;
 
 const MAX_CONCURRENT_FETCHES = 16;
+const MAX_BATCH_BYTES        = 128 * 1024;
 const LOD_THROTTLE_MS        = 1000;
 
 let nodeTable: NodeTable | null = null;
@@ -198,17 +199,36 @@ function collectWanted(
 
 function scheduleFetches(): void {
   if (!nodeTable) return;
+  const nt = nodeTable;
   const slots = MAX_CONCURRENT_FETCHES - pendingRequests;
   if (slots <= 0) return;
+
   const candidates = wantedNodes
     .filter(w => !pendingFetches.has(w.nodeIdx) && !nodePointCache.has(w.nodeIdx))
-    .sort((a, b) => b.priority - a.priority);
-  let dispatched = 0;
-  for (let i = 0; i < candidates.length && dispatched < slots; i++) {
-    const { nodeIdx } = candidates[i];
-    if (pendingFetches.has(nodeIdx) || nodePointCache.has(nodeIdx)) continue;
-    void fetchNodePoints(nodeIdx);
-    dispatched++;
+    .sort((a, b) => nt.pointFirst[a.nodeIdx] - nt.pointFirst[b.nodeIdx]);
+
+  const batches: { nodes: number[]; priority: number; bytes: number }[] = [];
+  for (const w of candidates) {
+    const nodeBytes = nt.pointCount[w.nodeIdx] * 20;
+    if (batches.length > 0) {
+      const last     = batches[batches.length - 1];
+      const lastNode = last.nodes[last.nodes.length - 1];
+      if (
+        nt.pointFirst[w.nodeIdx] === nt.pointFirst[lastNode] + nt.pointCount[lastNode] &&
+        last.bytes + nodeBytes <= MAX_BATCH_BYTES
+      ) {
+        last.nodes.push(w.nodeIdx);
+        last.bytes += nodeBytes;
+        last.priority = Math.max(last.priority, w.priority);
+        continue;
+      }
+    }
+    batches.push({ nodes: [w.nodeIdx], priority: w.priority, bytes: nodeBytes });
+  }
+
+  batches.sort((a, b) => b.priority - a.priority);
+  for (let i = 0; i < batches.length && i < slots; i++) {
+    void fetchBatch(batches[i].nodes);
   }
 }
 
@@ -220,25 +240,29 @@ async function fetchRange(url: string, start: number, end: number): Promise<Arra
   return resp.arrayBuffer();
 }
 
-async function fetchNodePoints(nodeIdx: number): Promise<void> {
+async function fetchBatch(nodes: number[]): Promise<void> {
   const nt = nodeTable!;
-  if (pendingFetches.has(nodeIdx) || nodePointCache.has(nodeIdx)) return;
-  pendingFetches.add(nodeIdx);
+  for (const nodeIdx of nodes) pendingFetches.add(nodeIdx);
   pendingRequests++;
   try {
-    const url   = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
-    const start = nt.pointsOffset + nt.pointFirst[nodeIdx] * 20;
-    const end   = start + nt.pointCount[nodeIdx] * 20 - 1;
-    const buf   = await fetchRange(url, start, end);
+    const url       = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
+    const firstNode = nodes[0];
+    const lastNode  = nodes[nodes.length - 1];
+    const start     = nt.pointsOffset + nt.pointFirst[firstNode] * 20;
+    const end       = nt.pointsOffset + (nt.pointFirst[lastNode] + nt.pointCount[lastNode]) * 20 - 1;
+    const buf       = await fetchRange(url, start, end);
     if (nodeTable === nt) {
-      nodePointCache.set(nodeIdx, new Float32Array(buf));
+      for (const nodeIdx of nodes) {
+        const off = (nt.pointFirst[nodeIdx] - nt.pointFirst[firstNode]) * 20;
+        nodePointCache.set(nodeIdx, new Float32Array(buf.slice(off, off + nt.pointCount[nodeIdx] * 20)));
+      }
       postProgress();
       lodDirty = true;
       maybeRunLod();
     }
   } finally {
     pendingRequests--;
-    pendingFetches.delete(nodeIdx);
+    for (const nodeIdx of nodes) pendingFetches.delete(nodeIdx);
   }
   rebuildWanted();
 }
@@ -249,7 +273,7 @@ function postProgress(): void {
     if (nodePointCache.has(nodeIdx)) loaded++;
   }
   self.postMessage({
-    type: 'progress', loaded, total: leafSet.size, pending: pendingFetches.size,
+    type: 'progress', loaded, total: leafSet.size, pending: pendingRequests,
   } as ProgressMsg);
 }
 
