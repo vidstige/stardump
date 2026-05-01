@@ -82,6 +82,53 @@ function maybeRunLod(): void {
   }
 }
 
+// Iterative subtree scan: collects cached LOD-cut nodes and counts total expected.
+// Using an explicit stack avoids deep call-stack recursion for large trees.
+function collectSubtreeNodes(
+  nt: NodeTable,
+  eye: Vec3,
+  pixelsPerRadian: number,
+  pixelThreshold: number,
+  rootIdx: number,
+  rootMinX: number, rootMinY: number, rootMinZ: number,
+  rootMaxX: number, rootMaxY: number, rootMaxZ: number,
+): { cached: number[]; total: number } {
+  const cached: number[] = [];
+  let total = 0;
+  const stack: [number, number, number, number, number, number, number][] = [
+    [rootIdx, rootMinX, rootMinY, rootMinZ, rootMaxX, rootMaxY, rootMaxZ],
+  ];
+  while (stack.length > 0) {
+    const [nodeIdx, minX, minY, minZ, maxX, maxY, maxZ] = stack.pop()!;
+    const cm     = nt.childMask[nodeIdx];
+    const pCount = nt.pointCount[nodeIdx];
+    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
+    const half = (maxX - minX) * 0.5;
+    const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
+    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
+    const footprintPx = (half / dist) * pixelsPerRadian;
+    if (cm === 0 || (footprintPx < pixelThreshold && pCount > 0)) {
+      if (pCount > 0) {
+        total++;
+        if (nodePointCache.has(nodeIdx)) cached.push(nodeIdx);
+      }
+      continue;
+    }
+    const mx = cx, my = cy, mz = cz;
+    let childIdx = nt.firstChild[nodeIdx];
+    for (let c = 0; c < 8; c++) {
+      if ((cm & (1 << c)) === 0) continue;
+      stack.push([
+        childIdx,
+        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
+        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
+      ]);
+      childIdx++;
+    }
+  }
+  return { cached, total };
+}
+
 function runLodUpdate(): void {
   const nt = nodeTable!;
   lastLodAt = performance.now();
@@ -110,44 +157,8 @@ function runLodUpdate(): void {
     draws.push({ chunkId, byteOffset: 0, count: totalPoints });
   }
 
-  // Returns { cached: cached LOD-cut nodes, total: total LOD-cut nodes } in this subtree.
-  function collectNodes(
-    nodeIdx: number,
-    minX: number, minY: number, minZ: number,
-    maxX: number, maxY: number, maxZ: number,
-  ): { cached: number[]; total: number } {
-    const cm     = nt.childMask[nodeIdx];
-    const pCount = nt.pointCount[nodeIdx];
-    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
-    const half = (maxX - minX) * 0.5;
-    const dx = cx - latestEye[0], dy = cy - latestEye[1], dz = cz - latestEye[2];
-    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
-    const footprintPx = (half / dist) * latestPixelsPerRadian;
-    if (cm === 0 || (footprintPx < latestPixelThreshold && pCount > 0)) {
-      if (pCount === 0) return { cached: [], total: 0 };
-      return { cached: nodePointCache.has(nodeIdx) ? [nodeIdx] : [], total: 1 };
-    }
-    const cached: number[] = [];
-    let total = 0;
-    const mx = cx, my = cy, mz = cz;
-    let childIdx = nt.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      const child = collectNodes(
-        childIdx,
-        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
-        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
-      );
-      for (const n of child.cached) cached.push(n);
-      total += child.total;
-      childIdx++;
-    }
-    return { cached, total };
-  }
-
-  // Returns cached LOD-cut nodes if the subtree is complete (all loaded), or null if not.
-  // Below mergeThreshold: uses collectNodes — complete subtrees bubble up for parent merging;
-  // incomplete ones emit a partial chunk and return null.
+  // Returns the cached LOD-cut nodes for this subtree when fully loaded, null otherwise.
+  // Recursion is bounded to nodes above mergeThreshold (a few levels at most).
   function walk(
     nodeIdx: number,
     minX: number, minY: number, minZ: number,
@@ -155,31 +166,36 @@ function runLodUpdate(): void {
   ): number[] | null {
     const cm     = nt.childMask[nodeIdx];
     const pCount = nt.pointCount[nodeIdx];
-
     const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
     const half = (maxX - minX) * 0.5;
     const dx = cx - latestEye[0], dy = cy - latestEye[1], dz = cz - latestEye[2];
     const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
     const footprintPx = (half / dist) * latestPixelsPerRadian;
 
+    // LOD cut: node is fine-grained enough — use its own sample data
     if (cm === 0 || (footprintPx < latestPixelThreshold && pCount > 0)) {
       if (pCount === 0) return [];
       return nodePointCache.has(nodeIdx) ? [nodeIdx] : null;
     }
 
+    // Merge boundary: pack everything in this subtree into one chunk.
+    // If fully loaded, return the list so an ancestor can merge further.
     if (footprintPx < mergeThreshold) {
-      const { cached, total } = collectNodes(nodeIdx, minX, minY, minZ, maxX, maxY, maxZ);
-      if (cached.length === total) return cached; // complete: let parent merge
+      const { cached, total } = collectSubtreeNodes(
+        nt, latestEye, latestPixelsPerRadian, latestPixelThreshold,
+        nodeIdx, minX, minY, minZ, maxX, maxY, maxZ,
+      );
+      if (cached.length === total) return cached;
       emitChunk(nodeIdx, cached);
       return null;
     }
 
+    // Above merge threshold: recurse and merge only when all children are complete
     const childResults: (number[] | null)[] = [];
     const childIndices: number[] = [];
     const mx = cx, my = cy, mz = cz;
     let childIdx = nt.firstChild[nodeIdx];
     let allComplete = true;
-
     for (let c = 0; c < 8; c++) {
       if ((cm & (1 << c)) === 0) continue;
       const result = walk(
@@ -192,15 +208,11 @@ function runLodUpdate(): void {
       if (result === null) allComplete = false;
       childIdx++;
     }
-
     if (allComplete) {
       const merged: number[] = [];
       for (const r of childResults) if (r) merged.push(...r);
       return merged;
     }
-
-    // Subtree is incomplete: emit each complete child subtree as its own chunk.
-    // Incomplete children already handled their own partial emission recursively.
     for (let i = 0; i < childResults.length; i++) {
       const r = childResults[i];
       if (r !== null) emitChunk(childIndices[i], r);
