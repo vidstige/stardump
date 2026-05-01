@@ -23,10 +23,11 @@ export type ChunkMsg    = { type: 'chunk';    chunkId: number; data: Float32Arra
 export type ProgressMsg = { type: 'progress'; cached: number; inFlight: number; total: number };
 export type LodWorkerMsg = FrameMsg | ChunkMsg | ProgressMsg;
 
-const MAX_CONCURRENT_FETCHES  = 16;
-const MAX_BATCH_BYTES         = 1024 * 1024;
-const LOD_THROTTLE_MS         = 200;
-const MERGE_FOOTPRINT_FACTOR  = 8; // merge subtrees with footprint < pixelThreshold * factor
+const MAX_CONCURRENT_FETCHES = 16;
+const MAX_BATCH_BYTES        = 1024 * 1024;
+const MERGE_FOOTPRINT_FACTOR = 8;
+const CAMERA_MOVE_FACTOR     = 0.02; // re-walk when eye moves > 2% of scene half-extent
+const CAMERA_ZOOM_FACTOR     = 1.05; // re-walk when zoom changes by 5%
 
 let nodeTable: NodeTable | null = null;
 let nodePointCache  = new Map<number, Float32Array>();
@@ -43,43 +44,44 @@ let latestEye: Vec3       = [0, 0, 0];
 let latestPixelsPerRadian = 1;
 let latestPixelThreshold  = 8;
 
-let lodDirty  = false;
-let lastLodAt = -LOD_THROTTLE_MS;
-let lodTimer: ReturnType<typeof setTimeout> | null = null;
+let lastWalkEye: Vec3         = [Infinity, Infinity, Infinity];
+let lastWalkPixelsPerRadian   = 0;
+let lastWalkPixelThreshold    = 0;
 
 self.addEventListener('message', (e: MessageEvent<InitMsg | ViewMsg>) => {
   const msg = e.data;
   if (msg.type === 'init') {
-    nodeTable       = msg.nodeTable;
-    apiRoot         = msg.apiRoot;
-    dataset         = msg.dataset;
-    nodePointCache  = new Map();
-    pendingFetches  = new Set();
-    pendingRequests = 0;
-    wantedNodes     = [];
-    sentChunks      = new Map();
-    lastLodAt       = -LOD_THROTTLE_MS;
-    lodDirty        = true;
+    nodeTable             = msg.nodeTable;
+    apiRoot               = msg.apiRoot;
+    dataset               = msg.dataset;
+    nodePointCache        = new Map();
+    pendingFetches        = new Set();
+    pendingRequests       = 0;
+    wantedNodes           = [];
+    sentChunks            = new Map();
+    lastWalkEye           = [Infinity, Infinity, Infinity];
+    lastWalkPixelsPerRadian = 0;
+    lastWalkPixelThreshold  = 0;
   } else {
     latestEye             = msg.eye;
     latestPixelsPerRadian = msg.pixelsPerRadian;
     latestPixelThreshold  = msg.pixelThreshold;
-    lodDirty = true;
-    maybeRunLod();
+    if (cameraMovedEnough()) runLodUpdate();
   }
 });
 
-function maybeRunLod(): void {
-  if (!lodDirty || !nodeTable) return;
-  const now = performance.now();
-  const remaining = LOD_THROTTLE_MS - (now - lastLodAt);
-  if (remaining <= 0) {
-    runLodUpdate();
-    return;
-  }
-  if (lodTimer === null) {
-    lodTimer = setTimeout(() => { lodTimer = null; maybeRunLod(); }, remaining);
-  }
+function cameraMovedEnough(): boolean {
+  if (!nodeTable) return false;
+  if (latestPixelThreshold !== lastWalkPixelThreshold) return true;
+  const dx = latestEye[0] - lastWalkEye[0];
+  const dy = latestEye[1] - lastWalkEye[1];
+  const dz = latestEye[2] - lastWalkEye[2];
+  const moveSq = dx*dx + dy*dy + dz*dz;
+  const threshold = nodeTable.halfExtentPc * CAMERA_MOVE_FACTOR;
+  if (moveSq > threshold * threshold) return true;
+  if (lastWalkPixelsPerRadian === 0) return true;
+  const ratio = latestPixelsPerRadian / lastWalkPixelsPerRadian;
+  return ratio > CAMERA_ZOOM_FACTOR || ratio < 1 / CAMERA_ZOOM_FACTOR;
 }
 
 // Iterative subtree scan: collects cached LOD-cut nodes and counts total expected.
@@ -129,11 +131,9 @@ function collectSubtreeNodes(
   return { cached, total };
 }
 
-function runLodUpdate(): void {
-  const nt = nodeTable!;
-  lastLodAt = performance.now();
-  lodDirty  = false;
-
+function emitFrame(): void {
+  if (!nodeTable) return;
+  const nt = nodeTable;
   const draws: DrawRange[] = [];
   const activeChunks = new Set<number>();
   const mergeThreshold = latestPixelThreshold * MERGE_FOOTPRINT_FACTOR;
@@ -231,6 +231,14 @@ function runLodUpdate(): void {
   }
 
   self.postMessage({ type: 'frame', draws } as FrameMsg);
+}
+
+function runLodUpdate(): void {
+  lastWalkEye           = [...latestEye] as Vec3;
+  lastWalkPixelsPerRadian = latestPixelsPerRadian;
+  lastWalkPixelThreshold  = latestPixelThreshold;
+
+  emitFrame();
   rebuildWanted();
 }
 
@@ -355,20 +363,21 @@ async function fetchBatch(nodes: number[]): Promise<void> {
         const off = (nt.pointFirst[nodeIdx] - nt.pointFirst[firstNode]) * 20;
         nodePointCache.set(nodeIdx, new Float32Array(buf.slice(off, off + nt.pointCount[nodeIdx] * 20)));
       }
-      lodDirty = true;
-      maybeRunLod();
+      emitFrame();
     }
   } finally {
     pendingRequests--;
     for (const nodeIdx of nodes) pendingFetches.delete(nodeIdx);
   }
-  rebuildWanted();
+  scheduleFetches();
+  postProgress();
 }
 
 function postProgress(): void {
+  const nowCached = wantedNodes.filter(w => nodePointCache.has(w.nodeIdx)).length;
   self.postMessage({
     type: 'progress',
-    cached: lodCachedCount,
+    cached: lodCachedCount + nowCached,
     inFlight: pendingFetches.size,
     total: lodCachedCount + wantedNodes.length,
   } as ProgressMsg);
