@@ -8,6 +8,8 @@ type Mat4 = Float32Array;
 type Vec3 = [number, number, number];
 type Quaternion = [number, number, number, number];
 
+type Label = { name: string; position: Vec3 };
+
 type Camera = {
   position: Vec3;
   orientation: Quaternion;
@@ -146,6 +148,22 @@ function viewMatrix(position: Vec3, orientation: Quaternion): Mat4 {
   return lookAt(position, add(position, forward), up);
 }
 
+function mat4MulVec4(m: Mat4, v: [number, number, number, number]): [number, number, number, number] {
+  return [
+    m[0]*v[0] + m[4]*v[1] + m[8]*v[2]  + m[12]*v[3],
+    m[1]*v[0] + m[5]*v[1] + m[9]*v[2]  + m[13]*v[3],
+    m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14]*v[3],
+    m[3]*v[0] + m[7]*v[1] + m[11]*v[2] + m[15]*v[3],
+  ];
+}
+
+function worldToScreen(pos: Vec3, view: Mat4, proj: Mat4, w: number, h: number): [number, number] | null {
+  const [vx, vy, vz, vw] = mat4MulVec4(view, [pos[0], pos[1], pos[2], 1]);
+  const [cx, cy, , cw]   = mat4MulVec4(proj, [vx, vy, vz, vw]);
+  if (cw <= 0) return null;
+  return [(cx / cw + 1) * 0.5 * w, (1 - cy / cw) * 0.5 * h];
+}
+
 async function fetchRange(url: string, start: number, end: number): Promise<ArrayBuffer> {
   const resp = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
   if (resp.status !== 206 && resp.status !== 200) {
@@ -220,6 +238,10 @@ const hudPixelThresholdValue  = pixelThresholdValueElement;
 
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
+const labelCanvas = document.createElement("canvas");
+labelCanvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none";
+app.append(labelCanvas);
+const labelCtx = labelCanvas.getContext("2d")!;
 canvas.width  = window.innerWidth;
 canvas.height = window.innerHeight;
 
@@ -282,6 +304,7 @@ const camera: Camera = {
 const keyState = new Set<string>();
 let previousTime = 0;
 let prevPosition: Vec3 = [0, 0, 0];
+let labels: Label[] = [];
 let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
 let exposure   = 500.0;
@@ -308,6 +331,14 @@ function computeSubtreePointCounts(nt: Omit<NodeTable, "subtreePointCount">): Ui
   }
   if (nt.nodeCount > 0) walk(0);
   return counts;
+}
+
+async function fetchLabels(apiRoot: string, dataset: string): Promise<Label[]> {
+  const resp = await fetch(`${apiRoot}/datasets/${dataset}/labels.json`);
+  if (resp.status === 404) return [];
+  if (!resp.ok) throw new Error(`labels fetch failed: ${resp.status}`);
+  const dict: Record<string, [number, number, number]> = await resp.json();
+  return Object.entries(dict).map(([name, [x, y, z]]) => ({ name, position: [x, y, z] }));
 }
 
 async function fetchNodeTable(apiRoot: string, dataset: string): Promise<NodeTable> {
@@ -382,11 +413,13 @@ async function ensureDatasetName(): Promise<string> {
 }
 
 async function loadDataset(): Promise<void> {
+  labels = [];
   starBuffer(new Float32Array(0));
   scene.count = 0;
   try {
     const name = await ensureDatasetName();
     const nt = await fetchNodeTable(API_ROOT, name);
+    labels = await fetchLabels(API_ROOT, name);
     lodWorker.postMessage(
       { type: 'init', nodeTable: nt, apiRoot: API_ROOT, dataset: name },
       [nt.childMask.buffer, nt.firstChild.buffer, nt.pointFirst.buffer,
@@ -395,6 +428,53 @@ async function loadDataset(): Promise<void> {
   } catch (error) {
     hudStatus.textContent = error instanceof Error ? error.message : String(error);
   }
+}
+
+function drawLabels(): void {
+  const w = canvas.width;
+  const h = canvas.height;
+  if (labelCanvas.width !== w || labelCanvas.height !== h) {
+    labelCanvas.width  = w;
+    labelCanvas.height = h;
+  }
+  labelCtx.clearRect(0, 0, w, h);
+  if (labels.length === 0) return;
+
+  const proj = projectionMatrix({ fovy: camera.fovY, aspect: w / Math.max(h, 1), near: camera.near, far: camera.far });
+  const view = viewMatrix(camera.position, camera.orientation);
+
+  labelCtx.font         = "11px 'IBM Plex Sans', sans-serif";
+  labelCtx.fillStyle    = "rgba(235, 243, 255, 0.85)";
+  labelCtx.strokeStyle  = "rgba(235, 243, 255, 0.5)";
+  labelCtx.lineWidth    = 1;
+
+  const FADE_START_PC = 12;
+  const FADE_END_PC   = 16;
+
+  for (const label of labels) {
+    const dx = label.position[0] - camera.position[0];
+    const dy = label.position[1] - camera.position[1];
+    const dz = label.position[2] - camera.position[2];
+    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    const alpha = 1 - Math.min(1, Math.max(0, (dist - FADE_START_PC) / (FADE_END_PC - FADE_START_PC)));
+    if (alpha <= 0) continue;
+
+    const screen = worldToScreen(label.position, view, proj, w, h);
+    if (!screen) continue;
+    const [sx, sy] = screen;
+    const lx = sx + 20;
+    const ly = sy - 20;
+    labelCtx.globalAlpha = alpha;
+    labelCtx.beginPath();
+    labelCtx.arc(sx, sy, 2, 0, Math.PI * 2);
+    labelCtx.fill();
+    labelCtx.beginPath();
+    labelCtx.moveTo(sx, sy);
+    labelCtx.lineTo(lx, ly);
+    labelCtx.stroke();
+    labelCtx.fillText(label.name, lx + 4, ly + 4);
+  }
+  labelCtx.globalAlpha = 1;
 }
 
 for (const url of API_URLS) {
@@ -688,6 +768,7 @@ regl.frame(({ time }) => {
   // Pass 2: Reinhardt + gamma tone-map HDR → 8-bit screen
   regl.clear({ color: [0, 0, 0, 1] });
   toneMap();
+  drawLabels();
 });
 
 void loadDataset();
