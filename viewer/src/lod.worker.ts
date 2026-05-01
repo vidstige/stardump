@@ -24,7 +24,7 @@ export type ProgressMsg = { type: 'progress'; cached: number; inFlight: number; 
 export type LodWorkerMsg = FrameMsg | ChunkMsg | ProgressMsg;
 
 const MAX_CONCURRENT_FETCHES  = 16;
-const MAX_BATCH_BYTES         = 128 * 1024;
+const MAX_BATCH_BYTES         = 1024 * 1024;
 const LOD_THROTTLE_MS         = 200;
 const MERGE_FOOTPRINT_FACTOR  = 8; // merge subtrees with footprint < pixelThreshold * factor
 
