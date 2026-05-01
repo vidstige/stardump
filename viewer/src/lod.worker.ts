@@ -23,9 +23,10 @@ export type ChunkMsg    = { type: 'chunk';    chunkId: number; data: Float32Arra
 export type ProgressMsg = { type: 'progress'; cached: number; inFlight: number; total: number };
 export type LodWorkerMsg = FrameMsg | ChunkMsg | ProgressMsg;
 
-const MAX_CONCURRENT_FETCHES = 16;
-const MAX_BATCH_BYTES        = 128 * 1024;
-const LOD_THROTTLE_MS        = 200;
+const MAX_CONCURRENT_FETCHES  = 16;
+const MAX_BATCH_BYTES         = 128 * 1024;
+const LOD_THROTTLE_MS         = 200;
+const MERGE_FOOTPRINT_FACTOR  = 8; // merge subtrees with footprint < pixelThreshold * factor
 
 let nodeTable: NodeTable | null = null;
 let nodePointCache  = new Map<number, Float32Array>();
@@ -88,6 +89,7 @@ function runLodUpdate(): void {
 
   const draws: DrawRange[] = [];
   const activeChunks = new Set<number>();
+  const mergeThreshold = latestPixelThreshold * MERGE_FOOTPRINT_FACTOR;
 
   function emitChunk(chunkId: number, nodes: number[]): void {
     if (nodes.length === 0) return;
@@ -108,9 +110,44 @@ function runLodUpdate(): void {
     draws.push({ chunkId, byteOffset: 0, count: totalPoints });
   }
 
-  // Returns the list of LOD-cut node indices for this subtree if all are cached,
-  // or null if any are missing. When returning null, emits partial chunks for
-  // complete sub-subtrees as a side-effect.
+  // Returns { cached: cached LOD-cut nodes, total: total LOD-cut nodes } in this subtree.
+  function collectNodes(
+    nodeIdx: number,
+    minX: number, minY: number, minZ: number,
+    maxX: number, maxY: number, maxZ: number,
+  ): { cached: number[]; total: number } {
+    const cm     = nt.childMask[nodeIdx];
+    const pCount = nt.pointCount[nodeIdx];
+    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
+    const half = (maxX - minX) * 0.5;
+    const dx = cx - latestEye[0], dy = cy - latestEye[1], dz = cz - latestEye[2];
+    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
+    const footprintPx = (half / dist) * latestPixelsPerRadian;
+    if (cm === 0 || (footprintPx < latestPixelThreshold && pCount > 0)) {
+      if (pCount === 0) return { cached: [], total: 0 };
+      return { cached: nodePointCache.has(nodeIdx) ? [nodeIdx] : [], total: 1 };
+    }
+    const cached: number[] = [];
+    let total = 0;
+    const mx = cx, my = cy, mz = cz;
+    let childIdx = nt.firstChild[nodeIdx];
+    for (let c = 0; c < 8; c++) {
+      if ((cm & (1 << c)) === 0) continue;
+      const child = collectNodes(
+        childIdx,
+        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
+        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
+      );
+      for (const n of child.cached) cached.push(n);
+      total += child.total;
+      childIdx++;
+    }
+    return { cached, total };
+  }
+
+  // Returns cached LOD-cut nodes if the subtree is complete (all loaded), or null if not.
+  // Below mergeThreshold: uses collectNodes — complete subtrees bubble up for parent merging;
+  // incomplete ones emit a partial chunk and return null.
   function walk(
     nodeIdx: number,
     minX: number, minY: number, minZ: number,
@@ -128,6 +165,13 @@ function runLodUpdate(): void {
     if (cm === 0 || (footprintPx < latestPixelThreshold && pCount > 0)) {
       if (pCount === 0) return [];
       return nodePointCache.has(nodeIdx) ? [nodeIdx] : null;
+    }
+
+    if (footprintPx < mergeThreshold) {
+      const { cached, total } = collectNodes(nodeIdx, minX, minY, minZ, maxX, maxY, maxZ);
+      if (cached.length === total) return cached; // complete: let parent merge
+      emitChunk(nodeIdx, cached);
+      return null;
     }
 
     const childResults: (number[] | null)[] = [];
