@@ -17,13 +17,15 @@ type WantedNode = { nodeIdx: number; priority: number };
 type InitMsg = { type: 'init'; nodeTable: NodeTable; apiRoot: string; dataset: string };
 type ViewMsg = { type: 'view'; eye: Vec3; pixelsPerRadian: number; pixelThreshold: number };
 
-export type FrameMsg    = { type: 'frame';    data: Float32Array; count: number };
+export type DrawRange   = { chunkId: number; byteOffset: number; count: number };
+export type FrameMsg    = { type: 'frame';    draws: DrawRange[] };
+export type ChunkMsg    = { type: 'chunk';    chunkId: number; data: Float32Array };
 export type ProgressMsg = { type: 'progress'; cached: number; inFlight: number; total: number };
-export type LodWorkerMsg = FrameMsg | ProgressMsg;
+export type LodWorkerMsg = FrameMsg | ChunkMsg | ProgressMsg;
 
 const MAX_CONCURRENT_FETCHES = 16;
 const MAX_BATCH_BYTES        = 128 * 1024;
-const LOD_THROTTLE_MS        = 1000;
+const LOD_THROTTLE_MS        = 200;
 
 let nodeTable: NodeTable | null = null;
 let nodePointCache  = new Map<number, Float32Array>();
@@ -31,6 +33,7 @@ let pendingFetches  = new Set<number>();
 let pendingRequests = 0;
 let wantedNodes: WantedNode[] = [];
 let lodCachedCount = 0;
+let sentChunks = new Map<number, number>(); // chunkId -> sum-of-nodeIdx token
 
 let apiRoot = '';
 let dataset = '';
@@ -53,6 +56,7 @@ self.addEventListener('message', (e: MessageEvent<InitMsg | ViewMsg>) => {
     pendingFetches  = new Set();
     pendingRequests = 0;
     wantedNodes     = [];
+    sentChunks      = new Map();
     lastLodAt       = -LOD_THROTTLE_MS;
     lodDirty        = true;
   } else {
@@ -82,17 +86,95 @@ function runLodUpdate(): void {
   lastLodAt = performance.now();
   lodDirty  = false;
 
-  const ranges = collectRanges(nt, latestEye, latestPixelsPerRadian, latestPixelThreshold);
-  let totalCount = 0;
-  for (const r of ranges) totalCount += r.count;
-  const packed = new Float32Array(totalCount * 5);
-  let offset = 0;
-  for (const r of ranges) {
-    packed.set(nodePointCache.get(r.nodeIdx)!, offset * 5);
-    offset += r.count;
-  }
-  self.postMessage({ type: 'frame', data: packed, count: offset } as FrameMsg, { transfer: [packed.buffer] });
+  const draws: DrawRange[] = [];
+  const activeChunks = new Set<number>();
 
+  function emitChunk(chunkId: number, nodes: number[]): void {
+    if (nodes.length === 0) return;
+    const totalPoints = nodes.reduce((s, n) => s + nt.pointCount[n], 0);
+    if (totalPoints === 0) return;
+    activeChunks.add(chunkId);
+    const token = nodes.reduce((s, n) => s + n, 0);
+    if (sentChunks.get(chunkId) !== token) {
+      const packed = new Float32Array(totalPoints * 5);
+      let off = 0;
+      for (const n of nodes) {
+        packed.set(nodePointCache.get(n)!, off);
+        off += nt.pointCount[n] * 5;
+      }
+      self.postMessage({ type: 'chunk', chunkId, data: packed } as ChunkMsg);
+      sentChunks.set(chunkId, token);
+    }
+    draws.push({ chunkId, byteOffset: 0, count: totalPoints });
+  }
+
+  // Returns the list of LOD-cut node indices for this subtree if all are cached,
+  // or null if any are missing. When returning null, emits partial chunks for
+  // complete sub-subtrees as a side-effect.
+  function walk(
+    nodeIdx: number,
+    minX: number, minY: number, minZ: number,
+    maxX: number, maxY: number, maxZ: number,
+  ): number[] | null {
+    const cm     = nt.childMask[nodeIdx];
+    const pCount = nt.pointCount[nodeIdx];
+
+    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
+    const half = (maxX - minX) * 0.5;
+    const dx = cx - latestEye[0], dy = cy - latestEye[1], dz = cz - latestEye[2];
+    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
+    const footprintPx = (half / dist) * latestPixelsPerRadian;
+
+    if (cm === 0 || (footprintPx < latestPixelThreshold && pCount > 0)) {
+      if (pCount === 0) return [];
+      return nodePointCache.has(nodeIdx) ? [nodeIdx] : null;
+    }
+
+    const childResults: (number[] | null)[] = [];
+    const childIndices: number[] = [];
+    const mx = cx, my = cy, mz = cz;
+    let childIdx = nt.firstChild[nodeIdx];
+    let allComplete = true;
+
+    for (let c = 0; c < 8; c++) {
+      if ((cm & (1 << c)) === 0) continue;
+      const result = walk(
+        childIdx,
+        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
+        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
+      );
+      childResults.push(result);
+      childIndices.push(childIdx);
+      if (result === null) allComplete = false;
+      childIdx++;
+    }
+
+    if (allComplete) {
+      const merged: number[] = [];
+      for (const r of childResults) if (r) merged.push(...r);
+      return merged;
+    }
+
+    // Subtree is incomplete: emit each complete child subtree as its own chunk.
+    // Incomplete children already handled their own partial emission recursively.
+    for (let i = 0; i < childResults.length; i++) {
+      const r = childResults[i];
+      if (r !== null) emitChunk(childIndices[i], r);
+    }
+    return null;
+  }
+
+  const e = nt.halfExtentPc;
+  if (nt.nodeCount > 0) {
+    const rootResult = walk(0, -e, -e, -e, e, e, e);
+    if (rootResult !== null) emitChunk(0, rootResult);
+  }
+
+  for (const chunkId of sentChunks.keys()) {
+    if (!activeChunks.has(chunkId)) sentChunks.delete(chunkId);
+  }
+
+  self.postMessage({ type: 'frame', draws } as FrameMsg);
   rebuildWanted();
 }
 
@@ -103,50 +185,6 @@ function rebuildWanted(): void {
   lodCachedCount = cachedCount;
   scheduleFetches();
   postProgress();
-}
-
-function collectRanges(
-  nt: NodeTable,
-  eye: Vec3,
-  pixelsPerRadian: number,
-  pixelThreshold: number,
-): { nodeIdx: number; count: number }[] {
-  const ranges: { nodeIdx: number; count: number }[] = [];
-
-  function walk(
-    nodeIdx: number,
-    minX: number, minY: number, minZ: number,
-    maxX: number, maxY: number, maxZ: number,
-  ): void {
-    const cm     = nt.childMask[nodeIdx];
-    const pCount = nt.pointCount[nodeIdx];
-
-    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5;
-    const half = (maxX - minX) * 0.5;
-    const dx = cx - eye[0], dy = cy - eye[1], dz = cz - eye[2];
-    const dist = Math.max(Math.sqrt(dx*dx + dy*dy + dz*dz), half);
-    const footprintPx = (half / dist) * pixelsPerRadian;
-
-    if (cm === 0 || (footprintPx < pixelThreshold && pCount > 0)) {
-      if (nodePointCache.has(nodeIdx) && pCount > 0) ranges.push({ nodeIdx, count: pCount });
-      return;
-    }
-
-    const mx = cx, my = cy, mz = cz;
-    let childIdx = nt.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      walk(childIdx,
-        (c & 1) === 0 ? minX : mx, (c & 2) === 0 ? minY : my, (c & 4) === 0 ? minZ : mz,
-        (c & 1) === 0 ? mx : maxX, (c & 2) === 0 ? my : maxY, (c & 4) === 0 ? mz : maxZ,
-      );
-      childIdx++;
-    }
-  }
-
-  const e = nt.halfExtentPc;
-  if (nt.nodeCount > 0) walk(0, -e, -e, -e, e, e, e);
-  return ranges;
 }
 
 function collectWanted(
@@ -279,4 +317,3 @@ function postProgress(): void {
     total: lodCachedCount + wantedNodes.length,
   } as ProgressMsg);
 }
-

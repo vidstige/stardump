@@ -1,7 +1,9 @@
 import createRegl from "regl";
 
+type DrawRange = { chunkId: number; byteOffset: number; count: number };
 type LodWorkerMsg =
-  | { type: 'frame';    data: Float32Array; count: number }
+  | { type: 'frame';    draws: DrawRange[] }
+  | { type: 'chunk';    chunkId: number; data: Float32Array }
   | { type: 'progress'; cached: number; inFlight: number; total: number };
 
 type Mat4 = Float32Array;
@@ -45,7 +47,7 @@ declare global {
   }
 }
 
-type SceneState = { count: number };
+type SceneState = { draws: DrawRange[] };
 
 const searchParams = new URLSearchParams(window.location.search);
 const REMOTE_API = "https://star-dump-query-api-494247280614.europe-west1.run.app";
@@ -197,6 +199,8 @@ const datasetSelectElement  = document.querySelector<HTMLSelectElement>("#datase
 const lodCachedElement      = document.querySelector<HTMLElement>("#lod-cached");
 const lodInflightElement    = document.querySelector<HTMLElement>("#lod-inflight");
 const queryCountElement     = document.querySelector<HTMLElement>("#query-count");
+const fpsElement            = document.querySelector<HTMLElement>("#fps");
+const chunkCountElement     = document.querySelector<HTMLElement>("#chunk-count");
 const coordinatesElement    = document.querySelector<HTMLElement>("#coordinates");
 const speedElement          = document.querySelector<HTMLElement>("#speed");
 const farSliderElement      = document.querySelector<HTMLInputElement>("#far-slider");
@@ -210,7 +214,8 @@ const maxRadiusValueElement        = document.querySelector<HTMLElement>("#max-r
 const pixelThresholdSliderElement  = document.querySelector<HTMLInputElement>("#pixel-threshold-slider");
 const pixelThresholdValueElement   = document.querySelector<HTMLElement>("#pixel-threshold-value");
 if (!statusElement || !apiSelectElement || !datasetSelectElement ||
-    !lodCachedElement || !lodInflightElement || !coordinatesElement || !speedElement ||
+    !lodCachedElement || !lodInflightElement || !fpsElement || !chunkCountElement ||
+    !coordinatesElement || !speedElement ||
     !farSliderElement || !farValueElement || !exposureSliderElement || !exposureValueElement ||
     !sizeScaleSliderElement || !sizeScaleValueElement ||
     !maxRadiusSliderElement || !maxRadiusValueElement ||
@@ -223,6 +228,8 @@ const datasetSelect     = datasetSelectElement;
 const hudLodCached      = lodCachedElement;
 const hudLodInflight    = lodInflightElement;
 const hudQueryCount     = queryCountElement;
+const hudFps            = fpsElement;
+const hudChunkCount     = chunkCountElement;
 const hudCoordinates    = coordinatesElement;
 const hudSpeed          = speedElement;
 const hudFarSlider           = farSliderElement;
@@ -251,8 +258,8 @@ const regl = createRegl({
   extensions: ["OES_texture_half_float", "EXT_color_buffer_half_float"],
 });
 
-const starBuffer = regl.buffer({ usage: "dynamic", type: "float", length: 0 });
-const scene: SceneState = { count: 0 };
+const chunkBuffers = new Map<number, ReturnType<typeof regl.buffer>>();
+const scene: SceneState = { draws: [] };
 
 // Offscreen float HDR accumulation buffer + full-screen tone-map pass
 const hdrBuffer = regl.framebuffer({
@@ -303,6 +310,7 @@ const camera: Camera = {
 
 const keyState = new Set<string>();
 let previousTime = 0;
+let smoothFps    = 0;
 let prevPosition: Vec3 = [0, 0, 0];
 let labels: Label[] = [];
 let datasetName: string | null = null;
@@ -392,12 +400,22 @@ const lodWorker = new Worker('dist/lod.worker.js', { type: 'module' });
 lodWorker.addEventListener('message', (e: MessageEvent<LodWorkerMsg>) => {
   const msg = e.data;
   if (msg.type === 'frame') {
-    starBuffer(msg.data);
-    scene.count = msg.count;
+    const newChunkIds = new Set(msg.draws.map(d => d.chunkId));
+    for (const [id, buf] of chunkBuffers) {
+      if (!newChunkIds.has(id)) { buf.destroy(); chunkBuffers.delete(id); }
+    }
+    scene.draws = msg.draws;
+  } else if (msg.type === 'chunk') {
+    const existing = chunkBuffers.get(msg.chunkId);
+    if (existing) {
+      existing(msg.data);
+    } else {
+      chunkBuffers.set(msg.chunkId, regl.buffer({ usage: 'dynamic', type: 'float', data: msg.data }));
+    }
   } else {
     const pct = 100 / Math.max(msg.total, 1);
-    hudLodCached.style.width   = `${(msg.cached             * pct).toFixed(1)}%`;
-    hudLodInflight.style.width = `${(msg.inFlight           * pct).toFixed(1)}%`;
+    hudLodCached.style.width   = `${(msg.cached   * pct).toFixed(1)}%`;
+    hudLodInflight.style.width = `${(msg.inFlight * pct).toFixed(1)}%`;
     if (hudQueryCount) hudQueryCount.textContent = msg.cached >= 1000 ? `${(msg.cached / 1000).toFixed(1)}k` : String(msg.cached);
   }
 });
@@ -414,8 +432,9 @@ async function ensureDatasetName(): Promise<string> {
 
 async function loadDataset(): Promise<void> {
   labels = [];
-  starBuffer(new Float32Array(0));
-  scene.count = 0;
+  scene.draws = [];
+  for (const buf of chunkBuffers.values()) buf.destroy();
+  chunkBuffers.clear();
   try {
     const name = await ensureDatasetName();
     const nt = await fetchNodeTable(API_ROOT, name);
@@ -691,9 +710,9 @@ const drawStars = regl({
     }
   `,
   attributes: {
-    position:   { buffer: starBuffer, size: 3, stride: 20, offset:  0 },
-    luminosity: { buffer: starBuffer, size: 1, stride: 20, offset: 12 },
-    bpRp:       { buffer: starBuffer, size: 1, stride: 20, offset: 16 },
+    position:   (_: any, p: any) => ({ buffer: p.buf, size: 3, stride: 20, offset: p.byteOffset }),
+    luminosity: (_: any, p: any) => ({ buffer: p.buf, size: 1, stride: 20, offset: p.byteOffset + 12 }),
+    bpRp:       (_: any, p: any) => ({ buffer: p.buf, size: 1, stride: 20, offset: p.byteOffset + 16 }),
   },
   uniforms: {
     projection:     () => projectionMatrix({ fovy: camera.fovY, aspect: canvas.width / Math.max(canvas.height, 1), near: camera.near, far: camera.far }),
@@ -704,7 +723,7 @@ const drawStars = regl({
     uMaxRadius:     () => maxRadius,
   },
   primitive: "points",
-  count: () => scene.count,
+  count: (_: any, p: any) => p.count,
   blend: {
     enable: true,
     func: { src: "one", dst: "one" },
@@ -736,6 +755,11 @@ document.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach(btn => {
 regl.frame(({ time }) => {
   const deltaTime = previousTime === 0 ? 0 : time - previousTime;
   previousTime = time;
+  if (deltaTime > 0) {
+    smoothFps = smoothFps === 0 ? 1 / deltaTime : smoothFps * 0.9 + (1 / deltaTime) * 0.1;
+    hudFps.textContent = `${smoothFps.toFixed(0)}`;
+  }
+  hudChunkCount.textContent = String(new Set(scene.draws.map(d => d.chunkId)).size);
   updateCamera(deltaTime);
 
   const [cx, cy, cz] = camera.position;
@@ -762,7 +786,10 @@ regl.frame(({ time }) => {
   // Pass 1: accumulate stars into float HDR buffer (linear, no tone map)
   renderToHdr(() => {
     regl.clear({ color: [0, 0, 0, 1] });
-    drawStars();
+    for (const draw of scene.draws) {
+      const buf = chunkBuffers.get(draw.chunkId);
+      if (buf) drawStars({ buf, byteOffset: draw.byteOffset, count: draw.count });
+    }
   });
 
   // Pass 2: Reinhardt + gamma tone-map HDR → 8-bit screen
