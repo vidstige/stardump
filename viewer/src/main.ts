@@ -580,7 +580,8 @@ datasetSelect.addEventListener("change", () => {
 
 function updateCamera(deltaTime: number): void {
   const { forward, right } = cameraBasis(camera);
-  const speed = 2 * deltaTime;
+  const boost = (keyState.has("ShiftLeft") || keyState.has("ShiftRight")) ? 20 : 1;
+  const speed = 2 * boost * deltaTime;
   let movement: Vec3 = [0, 0, 0];
 
   if (keyState.has("KeyW")) movement = add(movement, forward);
@@ -636,7 +637,7 @@ document.addEventListener("pointerlockchange", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (event.code.startsWith("Key")) {
+  if (event.code.startsWith("Key") || event.code === "ShiftLeft" || event.code === "ShiftRight") {
     keyState.add(event.code);
   }
   if (["KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE"].includes(event.code)) {
