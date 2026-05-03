@@ -5,8 +5,15 @@
 // uniform random subsample of K descendants with luminosities boosted by
 // |D|/K so the subsample's total flux equals the descendants' total flux in
 // expectation.
+//
+// Memory strategy: process one level-1 octant at a time (~N/8 stars per pass),
+// streaming output points directly to a temp file. Total peak RAM ≈ N/8 × 32 B
+// for the octant input plus nodes (~48 MB). The root subsample is selected via
+// a streaming max-heap reservoir requiring only O(K) memory.
 
+use std::collections::{BinaryHeap, HashMap};
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -20,7 +27,8 @@ use crate::quality::{
     DEFAULT_PARALLAX_QUALITY_THRESHOLD, PARALLAX_SYSTEMATIC_FLOOR_MAS, passes_parallax_quality,
 };
 use crate::starcloud::{
-    STARCLOUD_FILENAME, StarcloudIndex, StarcloudNode, StarcloudPoint, encode_starcloud,
+    STARCLOUD_FILENAME, StarcloudNode, StarcloudPoint,
+    write_starcloud_header_and_nodes, write_starcloud_point,
 };
 use crate::storage::local_path;
 use crate::vec3::Vec3;
@@ -118,24 +126,87 @@ fn read_canonical_part_rows(
     read_canonical_rows(&data_root.join(&source.canonical_directory).join(part))
 }
 
-fn load_points(
+// Streaming reservoir for the root node subsample.
+// Keeps the K points with the smallest splitmix64(source_id ^ seed) hash values.
+struct RootReservoir {
+    heap: BinaryHeap<(u64, u64)>, // max-heap: (hash, source_id)
+    data: HashMap<u64, Point>,    // source_id → point
+    capacity: usize,
+    seed: u64,
+}
+
+impl RootReservoir {
+    fn new(capacity: usize) -> Self {
+        // Root: depth=0, morton_prefix=0 → seed = splitmix64(0 ^ (0 << 56)) = splitmix64(0)
+        let seed = splitmix64(0);
+        Self {
+            heap: BinaryHeap::with_capacity(capacity + 1),
+            data: HashMap::with_capacity(capacity + 1),
+            capacity,
+            seed,
+        }
+    }
+
+    fn add(&mut self, p: Point) {
+        if self.capacity == 0 {
+            return;
+        }
+        let hash = splitmix64(p.source_id ^ self.seed);
+        if self.heap.len() < self.capacity {
+            self.heap.push((hash, p.source_id));
+            self.data.insert(p.source_id, p);
+        } else {
+            let &(top_hash, top_id) = self.heap.peek().unwrap();
+            if hash < top_hash || (hash == top_hash && p.source_id < top_id) {
+                self.heap.pop();
+                self.data.remove(&top_id);
+                self.heap.push((hash, p.source_id));
+                self.data.insert(p.source_id, p);
+            }
+        }
+    }
+
+    // Writes the selected subsample to `out` with flux boost, returns count written.
+    // Returns 0 if total_count <= capacity (renderer must always descend).
+    fn emit<W: Write>(self, total_count: u64, out: &mut W) -> Result<u32> {
+        if total_count <= self.capacity as u64 {
+            return Ok(0);
+        }
+        let boost = total_count as f32 / self.capacity as f32;
+        let mut selected: Vec<(u64, Point)> = self.heap
+            .into_iter()
+            .map(|(_, id)| (id, *self.data.get(&id).unwrap()))
+            .collect();
+        selected.sort_by_key(|(id, _)| *id);
+        for (_, p) in &selected {
+            write_starcloud_point(out, &StarcloudPoint {
+                position: p.position,
+                luminosity: p.luminosity * boost,
+                bp_rp: p.bp_rp,
+            })?;
+        }
+        Ok(selected.len() as u32)
+    }
+}
+
+// Single pass: build root reservoir, discover which octants contain stars, gather stats.
+fn scan_for_root(
+    metadata: &[SourceMetadata],
     data_root: &Path,
     octree: OctreeConfig,
     quality_threshold: f32,
-) -> Result<(Vec<Point>, usize, u64, u64)> {
-    let metadata = load_source_metadata(data_root)?;
-    let mut points = Vec::new();
-    let mut rows_in_bounds = 0_u64;
-    let mut quality_passed_out_of_bounds = 0_u64;
-    let sources_seen = metadata.len();
-    for source in &metadata {
+    sample_budget: usize,
+    octant_shift: u32,
+) -> Result<(RootReservoir, [bool; 8], u64, u64)> {
+    let mut reservoir = RootReservoir::new(sample_budget);
+    let mut octant_has_stars = [false; 8];
+    let mut rows_in_bounds = 0u64;
+    let mut quality_passed_out_of_bounds = 0u64;
+
+    for source in metadata {
         for part in &source.canonical_parts {
             for row in read_canonical_part_rows(data_root, source, part)? {
-                if !passes_parallax_quality(
-                    row.parallax,
-                    row.parallax_error,
-                    quality_threshold,
-                ) {
+                if !passes_parallax_quality(row.parallax, row.parallax_error, quality_threshold) {
                     continue;
                 }
                 let position = cartesian_coordinates(row.ra, row.dec, row.parallax);
@@ -149,6 +220,48 @@ fn load_points(
                     continue;
                 }
                 rows_in_bounds += 1;
+                let p = Point {
+                    source_id: row.source_id,
+                    position,
+                    luminosity,
+                    bp_rp: row.bp_rp,
+                    morton,
+                };
+                octant_has_stars[((morton >> octant_shift) & 7) as usize] = true;
+                reservoir.add(p);
+            }
+        }
+    }
+
+    Ok((reservoir, octant_has_stars, rows_in_bounds, quality_passed_out_of_bounds))
+}
+
+// One pass over canonical data collecting only stars whose top Morton bits equal target_octant.
+fn collect_octant(
+    metadata: &[SourceMetadata],
+    data_root: &Path,
+    octree: OctreeConfig,
+    quality_threshold: f32,
+    target_octant: u32,
+    octant_shift: u32,
+) -> Result<Vec<Point>> {
+    let mut points = Vec::new();
+    for source in metadata {
+        for part in &source.canonical_parts {
+            for row in read_canonical_part_rows(data_root, source, part)? {
+                if !passes_parallax_quality(row.parallax, row.parallax_error, quality_threshold) {
+                    continue;
+                }
+                let position = cartesian_coordinates(row.ra, row.dec, row.parallax);
+                let Some(morton) = octree.morton_for_point(position) else { continue };
+                if (morton >> octant_shift) & 7 != target_octant {
+                    continue;
+                }
+                let luminosity =
+                    compute_luminosity(row.parallax, row.phot_g_mean_mag).unwrap_or(0.0);
+                if !(luminosity > 0.0) {
+                    continue;
+                }
                 points.push(Point {
                     source_id: row.source_id,
                     position,
@@ -160,30 +273,35 @@ fn load_points(
         }
     }
     points.sort_by_key(|p| (p.morton, p.source_id));
-    Ok((points, sources_seen, rows_in_bounds, quality_passed_out_of_bounds))
+    Ok(points)
 }
 
-fn emit_leaf_points(points: &[Point], out: &mut Vec<StarcloudPoint>) {
+fn stream_leaf_points<W: Write>(
+    points: &[Point],
+    out: &mut W,
+    cursor: &mut u32,
+) -> Result<()> {
     for p in points {
-        out.push(StarcloudPoint {
+        write_starcloud_point(out, &StarcloudPoint {
             position: p.position,
             luminosity: p.luminosity,
             bp_rp: p.bp_rp,
-        });
+        })?;
+        *cursor += 1;
     }
+    Ok(())
 }
 
-// Returns true if a subsample was emitted; false if |D| ≤ K (no sample stored).
-// When false, the renderer must always descend past this node.
-fn emit_subsample(
+fn stream_subsample<W: Write>(
     points: &[Point],
     k: usize,
     morton_prefix: u64,
     depth: u8,
-    out: &mut Vec<StarcloudPoint>,
-) -> bool {
+    out: &mut W,
+    cursor: &mut u32,
+) -> Result<bool> {
     if points.len() <= k {
-        return false;
+        return Ok(false);
     }
     let seed = splitmix64(morton_prefix ^ ((depth as u64) << 56));
     let mut ranked: Vec<(u64, usize)> = points
@@ -197,17 +315,17 @@ fn emit_subsample(
     selected.sort_by_key(|(_, i)| points[*i].source_id);
     for (_, i) in selected {
         let p = &points[*i];
-        out.push(StarcloudPoint {
+        write_starcloud_point(out, &StarcloudPoint {
             position: p.position,
             luminosity: p.luminosity * boost,
             bp_rp: p.bp_rp,
-        });
+        })?;
+        *cursor += 1;
     }
-    true
+    Ok(true)
 }
 
 fn partition_by_child(points: &[Point], shift: u32) -> [usize; 9] {
-    // points are sorted by morton; child bit = (morton >> shift) & 7.
     let mut bounds = [points.len(); 9];
     bounds[0] = 0;
     let mut cursor = 0;
@@ -220,7 +338,7 @@ fn partition_by_child(points: &[Point], shift: u32) -> [usize; 9] {
     bounds
 }
 
-fn build_recursive(
+fn build_recursive_stream<W: Write>(
     node_index: usize,
     points: &[Point],
     current_depth: u8,
@@ -228,31 +346,33 @@ fn build_recursive(
     morton_prefix: u64,
     sample_budget: usize,
     nodes: &mut Vec<StarcloudNode>,
-    out_points: &mut Vec<StarcloudPoint>,
-) {
+    out: &mut W,
+    cursor: &mut u32,
+) -> Result<()> {
     if current_depth == max_depth || points.is_empty() {
-        let point_first = out_points.len() as u32;
-        emit_leaf_points(points, out_points);
+        let point_first = *cursor;
+        stream_leaf_points(points, out, cursor)?;
         nodes[node_index] = StarcloudNode {
             child_mask: 0,
             first_child: 0,
             point_first,
-            point_count: points.len() as u32,
+            point_count: *cursor - point_first,
         };
-        return;
+        return Ok(());
     }
 
-    let point_first = out_points.len() as u32;
-    let sampled = emit_subsample(points, sample_budget, morton_prefix, current_depth, out_points);
-    let point_count = if sampled { (out_points.len() as u32) - point_first } else { 0 };
+    let point_first = *cursor;
+    let sampled =
+        stream_subsample(points, sample_budget, morton_prefix, current_depth, out, cursor)?;
+    let point_count = if sampled { *cursor - point_first } else { 0 };
 
     let shift = (max_depth - current_depth - 1) as u32 * 3;
-    let child_bounds = partition_by_child(points, shift);
+    let child_ranges = partition_by_child(points, shift);
 
     let mut child_mask = 0_u8;
     let mut nonempty: Vec<u32> = Vec::new();
     for child in 0..8_u32 {
-        if child_bounds[(child + 1) as usize] > child_bounds[child as usize] {
+        if child_ranges[(child + 1) as usize] > child_ranges[child as usize] {
             child_mask |= 1 << child;
             nonempty.push(child);
         }
@@ -270,10 +390,10 @@ fn build_recursive(
 
     for (idx, &child) in nonempty.iter().enumerate() {
         let child_node_index = first_child as usize + idx;
-        let s = child_bounds[child as usize];
-        let e = child_bounds[(child + 1) as usize];
+        let s = child_ranges[child as usize];
+        let e = child_ranges[(child + 1) as usize];
         let child_prefix = (morton_prefix << 3) | (child as u64);
-        build_recursive(
+        build_recursive_stream(
             child_node_index,
             &points[s..e],
             current_depth + 1,
@@ -281,35 +401,11 @@ fn build_recursive(
             child_prefix,
             sample_budget,
             nodes,
-            out_points,
-        );
+            out,
+            cursor,
+        )?;
     }
-}
-
-fn build_starcloud_index(
-    points: Vec<Point>,
-    depth: u8,
-    half_extent_pc: f32,
-    sample_budget: usize,
-) -> StarcloudIndex {
-    let mut nodes: Vec<StarcloudNode> = vec![StarcloudNode {
-        child_mask: 0,
-        first_child: 0,
-        point_first: 0,
-        point_count: 0,
-    }];
-    let mut out_points: Vec<StarcloudPoint> = Vec::new();
-    build_recursive(
-        0,
-        &points,
-        0,
-        depth,
-        0,
-        sample_budget,
-        &mut nodes,
-        &mut out_points,
-    );
-    StarcloudIndex { depth, half_extent_pc, nodes, points: out_points }
+    Ok(())
 }
 
 pub fn run_build_starcloud(config: BuildStarcloudConfig) -> Result<BuildStarcloudResult> {
@@ -335,26 +431,108 @@ pub fn run_build_starcloud(config: BuildStarcloudConfig) -> Result<BuildStarclou
     let bounds = bounds_for_quality_threshold(config.quality_threshold);
     let half_extent_pc = bounds.max.x;
     let octree = OctreeConfig { depth: config.octree_depth, bounds };
-    let (points, sources_seen, rows_in_bounds, quality_passed_out_of_bounds) =
-        load_points(&data_root, octree, config.quality_threshold)?;
-    let index = build_starcloud_index(
-        points,
-        config.octree_depth,
-        half_extent_pc,
-        config.sample_budget,
-    );
+    let octant_shift = (config.octree_depth - 1) as u32 * 3;
 
+    let metadata = load_source_metadata(&data_root)?;
+    let sources_seen = metadata.len();
+
+    // Phase 0: single pass — root reservoir + octant map + stats.
+    let (reservoir, octant_has_stars, rows_in_bounds, quality_passed_out_of_bounds) =
+        scan_for_root(
+            &metadata,
+            &data_root,
+            octree,
+            config.quality_threshold,
+            config.sample_budget,
+            octant_shift,
+        )?;
+    // Phase 1: stream output points to a temp file, build node tree.
+    let temp_path = output_root.join("starcloud_points.tmp");
+    let (nodes, point_count) = {
+        let temp_file = fs::File::create(&temp_path)
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        let mut out = BufWriter::new(temp_file);
+        let mut cursor = 0u32;
+
+        // Root subsample points come first in the stream (point_first = 0).
+        let root_point_count = reservoir.emit(rows_in_bounds, &mut out)?;
+        cursor += root_point_count;
+
+        // Allocate root node + one slot per non-empty octant (contiguous children).
+        let mut nodes: Vec<StarcloudNode> =
+            vec![StarcloudNode { child_mask: 0, first_child: 0, point_first: 0, point_count: 0 }];
+        let nonempty_octants: Vec<u32> =
+            (0u32..8).filter(|&c| octant_has_stars[c as usize]).collect();
+        let root_first_child = nodes.len() as u32;
+        for _ in &nonempty_octants {
+            nodes.push(StarcloudNode::default());
+        }
+
+        // One canonical scan per non-empty octant.
+        let mut child_mask = 0u8;
+        for (idx, &octant) in nonempty_octants.iter().enumerate() {
+            child_mask |= 1 << octant;
+            let child_node_idx = root_first_child as usize + idx;
+            let oct_points = collect_octant(
+                &metadata,
+                &data_root,
+                octree,
+                config.quality_threshold,
+                octant,
+                octant_shift,
+            )?;
+            build_recursive_stream(
+                child_node_idx,
+                &oct_points,
+                1,
+                config.octree_depth,
+                octant as u64,
+                config.sample_budget,
+                &mut nodes,
+                &mut out,
+                &mut cursor,
+            )?;
+            // oct_points dropped here, freeing ~N/8 × 32 B.
+        }
+
+        nodes[0] = StarcloudNode {
+            child_mask,
+            first_child: if child_mask != 0 { root_first_child } else { 0 },
+            point_first: 0,
+            point_count: root_point_count,
+        };
+
+        out.flush()?;
+        (nodes, cursor)
+    }; // temp file closed and flushed when `out` drops here
+
+    // Assemble final file: header + nodes + point data from temp file.
     let output_path = output_root.join(STARCLOUD_FILENAME);
-    let bytes = encode_starcloud(&index);
-    fs::write(&output_path, &bytes)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    {
+        let out_file = fs::File::create(&output_path)
+            .with_context(|| format!("failed to create {}", output_path.display()))?;
+        let mut writer = BufWriter::new(out_file);
+        write_starcloud_header_and_nodes(
+            &mut writer,
+            config.octree_depth,
+            half_extent_pc,
+            &nodes,
+            point_count as u64,
+        )?;
+        let mut temp_reader = fs::File::open(&temp_path)
+            .with_context(|| format!("failed to open {}", temp_path.display()))?;
+        std::io::copy(&mut temp_reader, &mut writer)
+            .context("failed to copy point data to output")?;
+        writer.flush()?;
+    }
+    fs::remove_file(&temp_path).ok();
 
     Ok(BuildStarcloudResult {
         sources_seen,
         rows_in_bounds,
         quality_passed_out_of_bounds,
-        node_count: index.nodes.len(),
-        point_count: index.points.len(),
+        node_count: nodes.len(),
+        point_count: point_count as usize,
         output_path,
     })
 }
@@ -362,7 +540,7 @@ pub fn run_build_starcloud(config: BuildStarcloudConfig) -> Result<BuildStarclou
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::starcloud::decode_starcloud;
+    use crate::starcloud::{StarcloudIndex, decode_starcloud, decode_starcloud_point_bytes, encode_starcloud};
 
     fn bounds_cube(e: f32) -> Bounds3 {
         Bounds3 {
@@ -381,29 +559,57 @@ mod tests {
         }
     }
 
+    // In-memory build helper for unit tests (uses streaming API internally).
+    fn build_starcloud_index(
+        points: Vec<Point>,
+        depth: u8,
+        half_extent_pc: f32,
+        sample_budget: usize,
+    ) -> StarcloudIndex {
+        let mut nodes =
+            vec![StarcloudNode { child_mask: 0, first_child: 0, point_first: 0, point_count: 0 }];
+        let mut point_bytes: Vec<u8> = Vec::new();
+        let mut cursor = 0u32;
+        build_recursive_stream(
+            0,
+            &points,
+            0,
+            depth,
+            0,
+            sample_budget,
+            &mut nodes,
+            &mut point_bytes,
+            &mut cursor,
+        )
+        .unwrap();
+        let out_points = decode_starcloud_point_bytes(&point_bytes);
+        StarcloudIndex { depth, half_extent_pc, nodes, points: out_points }
+    }
+
     #[test]
     fn subsample_boost_conserves_flux_in_expectation_on_average() {
         let points: Vec<Point> = (0..1_000_u64).map(|i| make_point(i, 0, 1.0)).collect();
-        let mut out = Vec::new();
-        emit_subsample(&points, 50, 0, 0, &mut out);
-        let total: f32 = out.iter().map(|p| p.luminosity).sum();
+        let mut out: Vec<u8> = Vec::new();
+        let mut cursor = 0u32;
+        stream_subsample(&points, 50, 0, 0, &mut out, &mut cursor).unwrap();
+        let selected = decode_starcloud_point_bytes(&out);
+        let total: f32 = selected.iter().map(|p| p.luminosity).sum();
         let true_total: f32 = points.iter().map(|p| p.luminosity).sum();
         assert_eq!(total, true_total);
     }
 
     #[test]
     fn subsample_emits_nothing_when_fewer_than_budget() {
-        // When |D| ≤ K the renderer must descend to leaves; no sample is stored.
         let points: Vec<Point> = (0..10_u64).map(|i| make_point(i, 0, 2.0)).collect();
-        let mut out = Vec::new();
-        let sampled = emit_subsample(&points, 256, 0, 0, &mut out);
+        let mut out: Vec<u8> = Vec::new();
+        let mut cursor = 0u32;
+        let sampled = stream_subsample(&points, 256, 0, 0, &mut out, &mut cursor).unwrap();
         assert!(!sampled);
         assert_eq!(out.len(), 0);
     }
 
     #[test]
     fn build_emits_leaves_and_internal_samples() {
-        // 4 points in distinct leaves of a depth-1 tree.
         let bounds = bounds_cube(10.0);
         let octree = OctreeConfig { depth: 1, bounds };
         let mut points: Vec<Point> = Vec::new();
@@ -425,16 +631,13 @@ mod tests {
         points.sort_by_key(|p| (p.morton, p.source_id));
 
         let index = build_starcloud_index(points, 1, 10.0, 2);
-        // Root + one child per populated leaf (4).
         assert_eq!(index.nodes.len(), 5);
         assert_eq!(index.nodes[0].child_mask.count_ones(), 4);
-        assert_eq!(index.nodes[0].point_count, 2); // root subsample K=2
-        // Each leaf has one point.
+        assert_eq!(index.nodes[0].point_count, 2);
         for child in 1..5 {
             assert_eq!(index.nodes[child].child_mask, 0);
             assert_eq!(index.nodes[child].point_count, 1);
         }
-        // Total points written = 2 (root sample) + 4 (leaves) = 6.
         assert_eq!(index.points.len(), 6);
 
         let bytes = encode_starcloud(&index);

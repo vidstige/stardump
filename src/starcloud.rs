@@ -9,6 +9,8 @@
 //   node table (20 bytes × node_count)
 //   point table (20 bytes × point_count)
 
+use std::io::Write;
+
 use anyhow::{Result, anyhow, bail};
 
 use crate::octree::Bounds3;
@@ -22,7 +24,7 @@ pub const STARCLOUD_HEADER_SIZE: usize = 32;
 pub const STARCLOUD_NODE_SIZE: u64 = 20;
 pub const STARCLOUD_POINT_SIZE: u64 = 20;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StarcloudNode {
     pub child_mask: u8,
     pub first_child: u32,
@@ -157,6 +159,34 @@ pub fn decode_starcloud(bytes: &[u8]) -> Result<StarcloudIndex> {
         .map(decode_point)
         .collect();
     Ok(StarcloudIndex { depth, half_extent_pc, nodes, points })
+}
+
+pub fn write_starcloud_point<W: Write>(w: &mut W, p: &StarcloudPoint) -> std::io::Result<()> {
+    w.write_all(&point_bytes(p))
+}
+
+pub fn write_starcloud_header_and_nodes<W: Write>(
+    w: &mut W,
+    depth: u8,
+    half_extent_pc: f32,
+    nodes: &[StarcloudNode],
+    point_count: u64,
+) -> std::io::Result<()> {
+    w.write_all(&STARCLOUD_MAGIC)?;
+    w.write_all(&STARCLOUD_VERSION.to_le_bytes())?;
+    w.write_all(&[depth, 0u8])?;
+    w.write_all(&half_extent_pc.to_le_bytes())?;
+    w.write_all(&(nodes.len() as u32).to_le_bytes())?;
+    w.write_all(&point_count.to_le_bytes())?;
+    w.write_all(&[0u8; 4])?;
+    for node in nodes {
+        w.write_all(&node_bytes(node))?;
+    }
+    Ok(())
+}
+
+pub fn decode_starcloud_point_bytes(bytes: &[u8]) -> Vec<StarcloudPoint> {
+    bytes.chunks_exact(STARCLOUD_POINT_SIZE as usize).map(decode_point).collect()
 }
 
 #[cfg(test)]
