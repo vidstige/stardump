@@ -1,0 +1,7 @@
+{
+  "name": "stardump-render-check",
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}
