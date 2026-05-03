@@ -1,8 +1,3 @@
-// Per-star rasterization shared between render-exact.ts and render-fast.ts.
-// Mirrors the loop currently in render-exact.ts:141–173. Kept in a separate
-// module so the fast renderer can use the exact brightness math without
-// modifying the reference path until parity is proven.
-
 export type Vec3 = [number, number, number];
 
 export type Camera = {
@@ -14,10 +9,6 @@ export type Camera = {
   height: number;
 };
 
-export type Projection =
-  | { kind: "perspective"; tanH: number; aspect: number }
-  | { kind: "orthographic"; halfWidth: number; aspect: number };
-
 export type RasterConfig = {
   camera: Camera;
   projection: Projection;
@@ -25,6 +16,8 @@ export type RasterConfig = {
 };
 
 export type Star = { x: number; y: number; z: number; lum: number; bprp: number };
+
+export type Plane = { nx: number; ny: number; nz: number; d: number };
 
 function dot(a: Vec3, b: Vec3): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -43,32 +36,15 @@ export function cross(a: Vec3, b: Vec3): Vec3 {
   ];
 }
 
-export function makeCamera(
-  eye: Vec3,
-  dir: Vec3,
-  up: Vec3,
-  width: number,
-  height: number,
-): Camera {
+export function makeCamera(eye: Vec3, dir: Vec3, up: Vec3, width: number, height: number): Camera {
   const forward = normalize(dir);
   const right = normalize(cross(forward, up));
   const upOrth = cross(right, forward);
   return { eye, forward, right, up: upOrth, width, height };
 }
 
-export function perspectiveProjection(fovDeg: number, width: number, height: number): Projection {
-  const tanH = Math.tan((fovDeg * Math.PI) / 360);
-  return { kind: "perspective", tanH, aspect: width / height };
-}
-
-export function orthographicProjection(halfWidth: number, width: number, height: number): Projection {
-  return { kind: "orthographic", halfWidth, aspect: width / height };
-}
-
 export function cameraQuaternion(c: Camera): [number, number, number, number] {
-  const r = c.right;
-  const u = c.up;
-  const f = c.forward;
+  const r = c.right, u = c.up, f = c.forward;
   const m00 = r[0], m10 = r[1], m20 = r[2];
   const m01 = u[0], m11 = u[1], m21 = u[2];
   const m02 = -f[0], m12 = -f[1], m22 = -f[2];
@@ -89,32 +65,119 @@ export function cameraQuaternion(c: Camera): [number, number, number, number] {
   return [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s];
 }
 
-function project(c: Camera, proj: Projection, px: number, py: number, pz: number): [number, number, number] | null {
-  const rx = px - c.eye[0], ry = py - c.eye[1], rz = pz - c.eye[2];
-  const depth = dot([rx, ry, rz], c.forward);
-  if (depth <= 0) return null;
-  const h = dot([rx, ry, rz], c.right);
-  const v = dot([rx, ry, rz], c.up);
-  let sx: number, sy: number;
-  if (proj.kind === "orthographic") {
-    const halfH = proj.halfWidth / proj.aspect;
-    sx = (h / proj.halfWidth * 0.5 + 0.5) * c.width;
-    sy = (1 - (v / halfH * 0.5 + 0.5)) * c.height;
-  } else {
-    sx = (h / (depth * proj.tanH * proj.aspect) * 0.5 + 0.5) * c.width;
-    sy = (1 - (v / (depth * proj.tanH) * 0.5 + 0.5)) * c.height;
+function planeFromPointNormal(px: number, py: number, pz: number, nx: number, ny: number, nz: number): Plane {
+  const len = Math.hypot(nx, ny, nz) || 1;
+  const ux = nx / len, uy = ny / len, uz = nz / len;
+  return { nx: ux, ny: uy, nz: uz, d: -(ux * px + uy * py + uz * pz) };
+}
+
+export abstract class Projection {
+  abstract project(c: Camera, px: number, py: number, pz: number): [number, number, number] | null;
+  abstract buildCullingPlanes(camera: Camera, near: number, far: number): Plane[];
+  abstract refDist(depth: number): number;
+  abstract footprintPx(half: number, dist: number, camera: Camera): number;
+}
+
+export class PerspectiveProjection extends Projection {
+  readonly tanH: number;
+  readonly aspect: number;
+
+  constructor(fovDeg: number, width: number, height: number) {
+    super();
+    this.tanH = Math.tan((fovDeg * Math.PI) / 360);
+    this.aspect = width / height;
   }
-  return [sx, sy, depth];
+
+  project(c: Camera, px: number, py: number, pz: number): [number, number, number] | null {
+    const rx = px - c.eye[0], ry = py - c.eye[1], rz = pz - c.eye[2];
+    const depth = dot([rx, ry, rz], c.forward);
+    if (depth <= 0) return null;
+    const h = dot([rx, ry, rz], c.right);
+    const v = dot([rx, ry, rz], c.up);
+    const sx = (h / (depth * this.tanH * this.aspect) * 0.5 + 0.5) * c.width;
+    const sy = (1 - (v / (depth * this.tanH) * 0.5 + 0.5)) * c.height;
+    return [sx, sy, depth];
+  }
+
+  refDist(depth: number): number { return depth; }
+
+  footprintPx(half: number, dist: number, camera: Camera): number {
+    const pixelsPerRadian = camera.height / (2 * Math.atan(this.tanH));
+    return (half / dist) * pixelsPerRadian;
+  }
+
+  buildCullingPlanes(camera: Camera, near: number, far: number): Plane[] {
+    const { eye, forward, right, up } = camera;
+    const ne: Vec3 = [eye[0]+forward[0]*near, eye[1]+forward[1]*near, eye[2]+forward[2]*near];
+    const fe: Vec3 = [eye[0]+forward[0]*far,  eye[1]+forward[1]*far,  eye[2]+forward[2]*far];
+    const hNear = near * this.tanH, wNear = hNear * this.aspect;
+    const lN: Vec3 = [ right[0]*near+forward[0]*wNear,  right[1]*near+forward[1]*wNear,  right[2]*near+forward[2]*wNear];
+    const rN: Vec3 = [-right[0]*near+forward[0]*wNear, -right[1]*near+forward[1]*wNear, -right[2]*near+forward[2]*wNear];
+    const bN: Vec3 = [   up[0]*near+forward[0]*hNear,     up[1]*near+forward[1]*hNear,     up[2]*near+forward[2]*hNear];
+    const tN: Vec3 = [  -up[0]*near+forward[0]*hNear,    -up[1]*near+forward[1]*hNear,    -up[2]*near+forward[2]*hNear];
+    return [
+      planeFromPointNormal(ne[0],ne[1],ne[2],   forward[0],  forward[1],  forward[2]),
+      planeFromPointNormal(fe[0],fe[1],fe[2],  -forward[0], -forward[1], -forward[2]),
+      planeFromPointNormal(eye[0],eye[1],eye[2], lN[0],lN[1],lN[2]),
+      planeFromPointNormal(eye[0],eye[1],eye[2], rN[0],rN[1],rN[2]),
+      planeFromPointNormal(eye[0],eye[1],eye[2], bN[0],bN[1],bN[2]),
+      planeFromPointNormal(eye[0],eye[1],eye[2], tN[0],tN[1],tN[2]),
+    ];
+  }
+}
+
+export class OrthographicProjection extends Projection {
+  readonly halfWidth: number;
+  readonly aspect: number;
+
+  constructor(halfWidth: number, width: number, height: number) {
+    super();
+    this.halfWidth = halfWidth;
+    this.aspect = width / height;
+  }
+
+  project(c: Camera, px: number, py: number, pz: number): [number, number, number] | null {
+    const rx = px - c.eye[0], ry = py - c.eye[1], rz = pz - c.eye[2];
+    const depth = dot([rx, ry, rz], c.forward);
+    if (depth <= 0) return null;
+    const h = dot([rx, ry, rz], c.right);
+    const v = dot([rx, ry, rz], c.up);
+    const halfH = this.halfWidth / this.aspect;
+    const sx = (h / this.halfWidth * 0.5 + 0.5) * c.width;
+    const sy = (1 - (v / halfH * 0.5 + 0.5)) * c.height;
+    return [sx, sy, depth];
+  }
+
+  refDist(_depth: number): number { return this.halfWidth; }
+
+  footprintPx(half: number, _dist: number, camera: Camera): number {
+    return half * (camera.width / this.halfWidth);
+  }
+
+  buildCullingPlanes(camera: Camera, near: number, far: number): Plane[] {
+    const { eye, forward, right, up } = camera;
+    const ne: Vec3 = [eye[0]+forward[0]*near, eye[1]+forward[1]*near, eye[2]+forward[2]*near];
+    const fe: Vec3 = [eye[0]+forward[0]*far,  eye[1]+forward[1]*far,  eye[2]+forward[2]*far];
+    const hw = this.halfWidth, hh = hw / this.aspect;
+    const lp: Vec3 = [eye[0]-right[0]*hw, eye[1]-right[1]*hw, eye[2]-right[2]*hw];
+    const rp: Vec3 = [eye[0]+right[0]*hw, eye[1]+right[1]*hw, eye[2]+right[2]*hw];
+    const bp: Vec3 = [eye[0]-up[0]*hh,    eye[1]-up[1]*hh,    eye[2]-up[2]*hh];
+    const tp: Vec3 = [eye[0]+up[0]*hh,    eye[1]+up[1]*hh,    eye[2]+up[2]*hh];
+    return [
+      planeFromPointNormal(ne[0],ne[1],ne[2],  forward[0], forward[1], forward[2]),
+      planeFromPointNormal(fe[0],fe[1],fe[2], -forward[0],-forward[1],-forward[2]),
+      planeFromPointNormal(lp[0],lp[1],lp[2],  right[0],   right[1],   right[2]),
+      planeFromPointNormal(rp[0],rp[1],rp[2], -right[0],  -right[1],  -right[2]),
+      planeFromPointNormal(bp[0],bp[1],bp[2],  up[0],      up[1],      up[2]),
+      planeFromPointNormal(tp[0],tp[1],tp[2], -up[0],     -up[1],     -up[2]),
+    ];
+  }
 }
 
 function bprpToColor(bprp: number): [number, number, number] {
   if (!isFinite(bprp)) return [1, 1, 1];
   const t = Math.max(0, Math.min(1, (bprp + 0.5) / 3.5));
-  const lerp = (
-    a: [number, number, number],
-    b: [number, number, number],
-    t: number,
-  ): [number, number, number] => [
+  const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => [
     a[0] + (b[0] - a[0]) * t,
     a[1] + (b[1] - a[1]) * t,
     a[2] + (b[2] - a[2]) * t,
@@ -127,14 +190,12 @@ function bprpToColor(bprp: number): [number, number, number] {
 export function rasterize(stars: Iterable<Star>, hdr: Float32Array, cfg: RasterConfig): void {
   const { camera, projection, exposure } = cfg;
   const { width, height } = camera;
-  const orthoRef = projection.kind === "orthographic" ? projection.halfWidth : 0;
   for (const s of stars) {
     if (!(s.lum > 0)) continue;
-    const screenPos = project(camera, projection, s.x, s.y, s.z);
+    const screenPos = projection.project(camera, s.x, s.y, s.z);
     if (!screenPos) continue;
     const [sx, sy, depth] = screenPos;
-    const refDist = orthoRef || depth;
-    const flux = s.lum / Math.max(refDist * refDist, 0.01);
+    const flux = s.lum / Math.max(projection.refDist(depth) ** 2, 0.01);
     const brightness = flux * exposure;
     const [cr, cg, cb] = bprpToColor(s.bprp);
 
@@ -147,7 +208,7 @@ export function rasterize(stars: Iterable<Star>, hdr: Float32Array, cfg: RasterC
         const nr = Math.sqrt(dx * dx + dy * dy) / rPx;
         const val = brightness * Math.exp(-nr * nr * 4);
         const idx = (yi * width + xi) * 3;
-        hdr[idx] += cr * val;
+        hdr[idx]     += cr * val;
         hdr[idx + 1] += cg * val;
         hdr[idx + 2] += cb * val;
       }
@@ -159,7 +220,7 @@ export function tonemapToBytes(hdr: Float32Array, width: number, height: number)
   const pixels = Buffer.allocUnsafe(width * height * 3);
   const tm = (v: number) => Math.min(255, Math.round(255 * Math.pow(v / (1 + v), 1 / 2.2)));
   for (let i = 0; i < width * height; i++) {
-    pixels[i * 3] = tm(hdr[i * 3]);
+    pixels[i * 3]     = tm(hdr[i * 3]);
     pixels[i * 3 + 1] = tm(hdr[i * 3 + 1]);
     pixels[i * 3 + 2] = tm(hdr[i * 3 + 2]);
   }
