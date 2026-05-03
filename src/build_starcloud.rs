@@ -53,6 +53,7 @@ impl Default for BuildStarcloudConfig {
 pub struct BuildStarcloudResult {
     pub sources_seen: usize,
     pub rows_in_bounds: u64,
+    pub quality_passed_out_of_bounds: u64,
     pub node_count: usize,
     pub point_count: usize,
     pub output_path: PathBuf,
@@ -121,10 +122,11 @@ fn load_points(
     data_root: &Path,
     octree: OctreeConfig,
     quality_threshold: f32,
-) -> Result<(Vec<Point>, usize, u64)> {
+) -> Result<(Vec<Point>, usize, u64, u64)> {
     let metadata = load_source_metadata(data_root)?;
     let mut points = Vec::new();
     let mut rows_in_bounds = 0_u64;
+    let mut quality_passed_out_of_bounds = 0_u64;
     let sources_seen = metadata.len();
     for source in &metadata {
         for part in &source.canonical_parts {
@@ -138,6 +140,7 @@ fn load_points(
                 }
                 let position = cartesian_coordinates(row.ra, row.dec, row.parallax);
                 let Some(morton) = octree.morton_for_point(position) else {
+                    quality_passed_out_of_bounds += 1;
                     continue;
                 };
                 let luminosity =
@@ -157,7 +160,7 @@ fn load_points(
         }
     }
     points.sort_by_key(|p| (p.morton, p.source_id));
-    Ok((points, sources_seen, rows_in_bounds))
+    Ok((points, sources_seen, rows_in_bounds, quality_passed_out_of_bounds))
 }
 
 fn emit_leaf_points(points: &[Point], out: &mut Vec<StarcloudPoint>) {
@@ -332,7 +335,7 @@ pub fn run_build_starcloud(config: BuildStarcloudConfig) -> Result<BuildStarclou
     let bounds = bounds_for_quality_threshold(config.quality_threshold);
     let half_extent_pc = bounds.max.x;
     let octree = OctreeConfig { depth: config.octree_depth, bounds };
-    let (points, sources_seen, rows_in_bounds) =
+    let (points, sources_seen, rows_in_bounds, quality_passed_out_of_bounds) =
         load_points(&data_root, octree, config.quality_threshold)?;
     let index = build_starcloud_index(
         points,
@@ -349,6 +352,7 @@ pub fn run_build_starcloud(config: BuildStarcloudConfig) -> Result<BuildStarclou
     Ok(BuildStarcloudResult {
         sources_seen,
         rows_in_bounds,
+        quality_passed_out_of_bounds,
         node_count: index.nodes.len(),
         point_count: index.points.len(),
         output_path,

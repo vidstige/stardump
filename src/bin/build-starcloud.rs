@@ -44,5 +44,11 @@ fn main() -> anyhow::Result<()> {
         result.output_path.display(),
         started.elapsed().as_secs_f32(),
     );
+    if result.quality_passed_out_of_bounds > 0 {
+        println!(
+            "build-starcloud: warning: {} stars passed quality but fell outside octree bounds",
+            result.quality_passed_out_of_bounds,
+        );
+    }
     Ok(())
 }
