@@ -12,12 +12,15 @@ export type Camera = {
   up: Vec3;
   width: number;
   height: number;
-  tanH: number;
-  aspect: number;
 };
+
+export type Projection =
+  | { kind: "perspective"; tanH: number; aspect: number }
+  | { kind: "orthographic"; halfWidth: number; aspect: number };
 
 export type RasterConfig = {
   camera: Camera;
+  projection: Projection;
   exposure: number;
 };
 
@@ -44,24 +47,22 @@ export function makeCamera(
   eye: Vec3,
   dir: Vec3,
   up: Vec3,
-  fovDeg: number,
   width: number,
   height: number,
 ): Camera {
   const forward = normalize(dir);
   const right = normalize(cross(forward, up));
   const upOrth = cross(right, forward);
-  const fovy = (fovDeg * Math.PI) / 180;
-  return {
-    eye,
-    forward,
-    right,
-    up: upOrth,
-    width,
-    height,
-    tanH: Math.tan(fovy * 0.5),
-    aspect: width / height,
-  };
+  return { eye, forward, right, up: upOrth, width, height };
+}
+
+export function perspectiveProjection(fovDeg: number, width: number, height: number): Projection {
+  const tanH = Math.tan((fovDeg * Math.PI) / 360);
+  return { kind: "perspective", tanH, aspect: width / height };
+}
+
+export function orthographicProjection(halfWidth: number, width: number, height: number): Projection {
+  return { kind: "orthographic", halfWidth, aspect: width / height };
 }
 
 export function cameraQuaternion(c: Camera): [number, number, number, number] {
@@ -88,14 +89,21 @@ export function cameraQuaternion(c: Camera): [number, number, number, number] {
   return [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s];
 }
 
-function project(c: Camera, px: number, py: number, pz: number): [number, number, number] | null {
+function project(c: Camera, proj: Projection, px: number, py: number, pz: number): [number, number, number] | null {
   const rx = px - c.eye[0], ry = py - c.eye[1], rz = pz - c.eye[2];
   const depth = dot([rx, ry, rz], c.forward);
   if (depth <= 0) return null;
   const h = dot([rx, ry, rz], c.right);
   const v = dot([rx, ry, rz], c.up);
-  const sx = (h / (depth * c.tanH * c.aspect) * 0.5 + 0.5) * c.width;
-  const sy = (1 - (v / (depth * c.tanH) * 0.5 + 0.5)) * c.height;
+  let sx: number, sy: number;
+  if (proj.kind === "orthographic") {
+    const halfH = proj.halfWidth / proj.aspect;
+    sx = (h / proj.halfWidth * 0.5 + 0.5) * c.width;
+    sy = (1 - (v / halfH * 0.5 + 0.5)) * c.height;
+  } else {
+    sx = (h / (depth * proj.tanH * proj.aspect) * 0.5 + 0.5) * c.width;
+    sy = (1 - (v / (depth * proj.tanH) * 0.5 + 0.5)) * c.height;
+  }
   return [sx, sy, depth];
 }
 
@@ -117,18 +125,20 @@ function bprpToColor(bprp: number): [number, number, number] {
 }
 
 export function rasterize(stars: Iterable<Star>, hdr: Float32Array, cfg: RasterConfig): void {
-  const { camera, exposure } = cfg;
+  const { camera, projection, exposure } = cfg;
   const { width, height } = camera;
+  const orthoRef = projection.kind === "orthographic" ? projection.halfWidth : 0;
   for (const s of stars) {
     if (!(s.lum > 0)) continue;
-    const proj = project(camera, s.x, s.y, s.z);
-    if (!proj) continue;
-    const [sx, sy, dist] = proj;
-    const flux = s.lum / Math.max(dist * dist, 0.01);
+    const screenPos = project(camera, projection, s.x, s.y, s.z);
+    if (!screenPos) continue;
+    const [sx, sy, depth] = screenPos;
+    const refDist = orthoRef || depth;
+    const flux = s.lum / Math.max(refDist * refDist, 0.01);
     const brightness = flux * exposure;
     const [cr, cg, cb] = bprpToColor(s.bprp);
 
-    const rPx = Math.min(Math.max(brightness * 2, 0.8), 8);
+    const rPx = Math.min(Math.max(brightness, 0.8), 1.0);
     const ir = Math.ceil(rPx);
     for (let dy = -ir; dy <= ir; dy++) {
       for (let dx = -ir; dx <= ir; dx++) {

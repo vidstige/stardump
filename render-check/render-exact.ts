@@ -2,9 +2,14 @@ import * as fs from "fs";
 
 import {
   makeCamera,
+  perspectiveProjection,
+  orthographicProjection,
+  normalize,
   rasterize,
   tonemapToBytes,
   writePpm,
+  type Camera,
+  type Projection,
   type Star,
 } from "./brightness";
 
@@ -22,18 +27,21 @@ function getArgNum(name: string, def?: number): number {
   if (def !== undefined) return def;
   throw new Error(`missing --${name}`);
 }
+function hasArg(name: string): boolean { return args.includes("--" + name); }
 
 const STARCLOUD = getArg("starcloud");
-const eyeStr   = getArg("eye", "0,0,0").split(",").map(Number) as [number, number, number];
-const dirStr   = getArg("dir", "0,0,-1").split(",").map(Number) as [number, number, number];
-const upStr    = getArg("up",  "0,1,0").split(",").map(Number) as [number, number, number];
 const FOV_DEG  = getArgNum("fov", 60);
 const DEPTH    = getArgNum("depth", 5000);
 const NEAR     = getArgNum("near", 0.1);
 const WIDTH    = getArgNum("width", 1920);
 const HEIGHT   = getArgNum("height", 1080);
-const EXPOSURE = getArgNum("exposure", 5000.0);
 const OUT      = getArg("output", "stars.ppm");
+const ORTHO    = hasArg("orthographic");
+
+// Galactic north pole and galactic center direction in equatorial J2000 cartesian.
+// Used as default camera orientation for --orthographic.
+const NGP = normalize([-0.86703, -0.20006, 0.45673] as [number,number,number]);
+const GC  = normalize([-0.05487, -0.87344, -0.48384] as [number,number,number]);
 
 // --- Starcloud binary format ---
 const HEADER_SIZE = 32;
@@ -111,7 +119,7 @@ function planeFromPointNormal(px: number, py: number, pz: number, nx: number, ny
   return { nx: ux, ny: uy, nz: uz, d: -(ux * px + uy * py + uz * pz) };
 }
 
-function frustumIntersectsBounds(planes: Plane[], b: Bounds): boolean {
+function viewIntersectsBounds(planes: Plane[], b: Bounds): boolean {
   for (const p of planes) {
     const cx = p.nx >= 0 ? b.max[0] : b.min[0];
     const cy = p.ny >= 0 ? b.max[1] : b.min[1];
@@ -121,26 +129,37 @@ function frustumIntersectsBounds(planes: Plane[], b: Bounds): boolean {
   return true;
 }
 
-function buildFrustumPlanes(
-  eye: [number, number, number], forward: [number, number, number],
-  right: [number, number, number], up: [number, number, number],
-  near: number, far: number, fovy: number, aspect: number,
-): Plane[] {
-  const tanHalf = Math.tan(fovy * 0.5);
-  const hNear = near * tanHalf, wNear = hNear * aspect;
-  const ne: [number, number, number] = [eye[0]+forward[0]*near, eye[1]+forward[1]*near, eye[2]+forward[2]*near];
-  const fe: [number, number, number] = [eye[0]+forward[0]*far,  eye[1]+forward[1]*far,  eye[2]+forward[2]*far];
-  const lN: [number, number, number] = [ right[0]*near+forward[0]*wNear,  right[1]*near+forward[1]*wNear,  right[2]*near+forward[2]*wNear];
-  const rN: [number, number, number] = [-right[0]*near+forward[0]*wNear, -right[1]*near+forward[1]*wNear, -right[2]*near+forward[2]*wNear];
-  const bN: [number, number, number] = [   up[0]*near+forward[0]*hNear,     up[1]*near+forward[1]*hNear,     up[2]*near+forward[2]*hNear];
-  const tN: [number, number, number] = [  -up[0]*near+forward[0]*hNear,    -up[1]*near+forward[1]*hNear,    -up[2]*near+forward[2]*hNear];
+function buildCullingPlanes(camera: Camera, proj: Projection, near: number, far: number): Plane[] {
+  const { eye, forward, right, up } = camera;
+  const ne: [number,number,number] = [eye[0]+forward[0]*near, eye[1]+forward[1]*near, eye[2]+forward[2]*near];
+  const fe: [number,number,number] = [eye[0]+forward[0]*far,  eye[1]+forward[1]*far,  eye[2]+forward[2]*far];
+  if (proj.kind === "orthographic") {
+    const hw = proj.halfWidth, hh = hw / proj.aspect;
+    const lp: [number,number,number] = [eye[0]-right[0]*hw, eye[1]-right[1]*hw, eye[2]-right[2]*hw];
+    const rp: [number,number,number] = [eye[0]+right[0]*hw, eye[1]+right[1]*hw, eye[2]+right[2]*hw];
+    const bp: [number,number,number] = [eye[0]-up[0]*hh,    eye[1]-up[1]*hh,    eye[2]-up[2]*hh];
+    const tp: [number,number,number] = [eye[0]+up[0]*hh,    eye[1]+up[1]*hh,    eye[2]+up[2]*hh];
+    return [
+      planeFromPointNormal(ne[0],ne[1],ne[2],  forward[0], forward[1], forward[2]),
+      planeFromPointNormal(fe[0],fe[1],fe[2], -forward[0],-forward[1],-forward[2]),
+      planeFromPointNormal(lp[0],lp[1],lp[2],  right[0],   right[1],   right[2]),
+      planeFromPointNormal(rp[0],rp[1],rp[2], -right[0],  -right[1],  -right[2]),
+      planeFromPointNormal(bp[0],bp[1],bp[2],  up[0],      up[1],      up[2]),
+      planeFromPointNormal(tp[0],tp[1],tp[2], -up[0],     -up[1],     -up[2]),
+    ];
+  }
+  const hNear = near * proj.tanH, wNear = hNear * proj.aspect;
+  const lN: [number,number,number] = [ right[0]*near+forward[0]*wNear,  right[1]*near+forward[1]*wNear,  right[2]*near+forward[2]*wNear];
+  const rN: [number,number,number] = [-right[0]*near+forward[0]*wNear, -right[1]*near+forward[1]*wNear, -right[2]*near+forward[2]*wNear];
+  const bN: [number,number,number] = [   up[0]*near+forward[0]*hNear,     up[1]*near+forward[1]*hNear,     up[2]*near+forward[2]*hNear];
+  const tN: [number,number,number] = [  -up[0]*near+forward[0]*hNear,    -up[1]*near+forward[1]*hNear,    -up[2]*near+forward[2]*hNear];
   return [
-    planeFromPointNormal(ne[0], ne[1], ne[2],  forward[0],  forward[1],  forward[2]),
-    planeFromPointNormal(fe[0], fe[1], fe[2], -forward[0], -forward[1], -forward[2]),
-    planeFromPointNormal(eye[0], eye[1], eye[2], lN[0], lN[1], lN[2]),
-    planeFromPointNormal(eye[0], eye[1], eye[2], rN[0], rN[1], rN[2]),
-    planeFromPointNormal(eye[0], eye[1], eye[2], bN[0], bN[1], bN[2]),
-    planeFromPointNormal(eye[0], eye[1], eye[2], tN[0], tN[1], tN[2]),
+    planeFromPointNormal(ne[0],ne[1],ne[2],   forward[0],  forward[1],  forward[2]),
+    planeFromPointNormal(fe[0],fe[1],fe[2],  -forward[0], -forward[1], -forward[2]),
+    planeFromPointNormal(eye[0],eye[1],eye[2], lN[0],lN[1],lN[2]),
+    planeFromPointNormal(eye[0],eye[1],eye[2], rN[0],rN[1],rN[2]),
+    planeFromPointNormal(eye[0],eye[1],eye[2], bN[0],bN[1],bN[2]),
+    planeFromPointNormal(eye[0],eye[1],eye[2], tN[0],tN[1],tN[2]),
   ];
 }
 
@@ -149,7 +168,7 @@ function collectLeaves(sc: ParsedStarcloud, rootBounds: Bounds, planes: Plane[])
   const out: { firstPoint: number; count: number }[] = [];
 
   function walk(nodeIdx: number, bounds: Bounds): void {
-    if (!frustumIntersectsBounds(planes, bounds)) return;
+    if (!viewIntersectsBounds(planes, bounds)) return;
     const cm     = sc.nodes.childMask[nodeIdx];
     const pCount = sc.nodes.pointCount[nodeIdx];
     const pFirst = sc.nodes.pointFirst[nodeIdx];
@@ -171,7 +190,7 @@ function collectLeaves(sc: ParsedStarcloud, rootBounds: Bounds, planes: Plane[])
   return out;
 }
 
-function pointInFrustum(planes: Plane[], px: number, py: number, pz: number): boolean {
+function pointInView(planes: Plane[], px: number, py: number, pz: number): boolean {
   for (const p of planes) {
     if (p.nx * px + p.ny * py + p.nz * pz + p.d < 0) return false;
   }
@@ -185,7 +204,7 @@ function* iterateStars(sc: ParsedStarcloud, ranges: { firstPoint: number; count:
     for (let i = r.firstPoint; i < end; i++) {
       const base = i * 5;
       const px = pf[base], py = pf[base + 1], pz = pf[base + 2];
-      if (!pointInFrustum(planes, px, py, pz)) continue;
+      if (!pointInView(planes, px, py, pz)) continue;
       yield { x: px, y: py, z: pz, lum: pf[base + 3], bprp: pf[base + 4] };
     }
   }
@@ -198,9 +217,25 @@ async function main(): Promise<void> {
   const sc  = parseStarcloud(buf);
   console.log(`starcloud: depth=${sc.depth} half_extent_pc=${sc.halfExtentPc} nodes=${sc.nodeCount} points=${sc.pointCount}`);
 
-  const camera = makeCamera(eyeStr, dirStr, upStr, FOV_DEG, WIDTH, HEIGHT);
-  const fovy   = (FOV_DEG * Math.PI) / 180;
-  const planes = buildFrustumPlanes(camera.eye, camera.forward, camera.right, camera.up, NEAR, DEPTH, fovy, camera.aspect);
+  const halfWidth = ORTHO ? getArgNum("half-width", sc.halfExtentPc) : 0;
+  const far       = hasArg("depth") ? DEPTH : ORTHO ? sc.halfExtentPc * 4 : DEPTH;
+  const exposure  = hasArg("exposure") ? getArgNum("exposure") : ORTHO ? halfWidth * halfWidth / 5000 : 500;
+
+  let eye: [number,number,number], dir: [number,number,number], up: [number,number,number];
+  if (ORTHO) {
+    eye = hasArg("eye") ? getArg("eye").split(",").map(Number) as [number,number,number] : [NGP[0]*sc.halfExtentPc*2, NGP[1]*sc.halfExtentPc*2, NGP[2]*sc.halfExtentPc*2];
+    dir = hasArg("dir") ? getArg("dir").split(",").map(Number) as [number,number,number] : [-NGP[0], -NGP[1], -NGP[2]];
+    up  = hasArg("up")  ? getArg("up").split(",").map(Number)  as [number,number,number] : [...GC];
+  } else {
+    eye = getArg("eye", "0,0,0").split(",").map(Number) as [number,number,number];
+    dir = getArg("dir", "0,0,-1").split(",").map(Number) as [number,number,number];
+    up  = getArg("up",  "0,1,0").split(",").map(Number) as [number,number,number];
+  }
+
+  const camera     = makeCamera(eye, dir, up, WIDTH, HEIGHT);
+  const projection = ORTHO ? orthographicProjection(halfWidth, WIDTH, HEIGHT)
+                           : perspectiveProjection(FOV_DEG, WIDTH, HEIGHT);
+  const planes     = buildCullingPlanes(camera, projection, NEAR, far);
   const rootBounds: Bounds = {
     min: [-sc.halfExtentPc, -sc.halfExtentPc, -sc.halfExtentPc],
     max: [ sc.halfExtentPc,  sc.halfExtentPc,  sc.halfExtentPc],
@@ -211,7 +246,7 @@ async function main(): Promise<void> {
   console.log(`leaves: ${ranges.length} node-ranges covering ${starCount} stars`);
 
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
-  rasterize(iterateStars(sc, ranges, planes), hdr, { camera, exposure: EXPOSURE });
+  rasterize(iterateStars(sc, ranges, planes), hdr, { camera, projection, exposure });
 
   const pixels = tonemapToBytes(hdr, WIDTH, HEIGHT);
   writePpm(OUT, WIDTH, HEIGHT, pixels);
