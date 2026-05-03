@@ -8,7 +8,6 @@
 
 set -euo pipefail
 
-command -v node >/dev/null 2>&1 || { echo "missing node" >&2; exit 1; }
 command -v sips >/dev/null 2>&1 || { echo "missing sips" >&2; exit 1; }
 command -v npx  >/dev/null 2>&1 || { echo "missing npx"  >&2; exit 1; }
 
@@ -42,27 +41,22 @@ if (( ! have_dataset )); then
 fi
 
 case "$mode" in
-  exact)   src="render-exact.ts"; js="render-exact.js" ;;
-  fast)    src="render-fast.ts";  js="render-fast.js" ;;
+  exact)   src="render-exact.ts" ;;
+  fast)    src="render-fast.ts" ;;
   *) echo "unknown --mode '$mode' (expected exact|fast)" >&2; exit 1 ;;
 esac
-
-# Rebuild JS if source is newer (or JS is missing).
-if [[ ! -f "$js" || "$src" -nt "$js" ]]; then
-  npx esbuild "$src" --bundle --platform=node --outfile="$js" >/dev/null
-fi
 
 ppm="$(mktemp -t stardump-render).ppm"
 trap 'rm -f "$ppm"' EXIT
 
 case "$mode" in
   exact)
-    node "$js" \
+    npx tsx "$src" \
       --starcloud "$repo_root/data/$dataset/starcloud.bin" \
       "${forward_args[@]}" --output "$ppm"
     ;;
   fast)
-    node "$js" \
+    npx tsx "$src" \
       --url "$url" --dataset "$dataset" \
       "${forward_args[@]}" --output "$ppm"
     ;;
