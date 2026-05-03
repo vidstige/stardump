@@ -17,7 +17,7 @@ use crate::formats::{
 };
 use crate::octree::{Bounds3, OctreeConfig};
 use crate::quality::{
-    DEFAULT_PARALLAX_QUALITY_THRESHOLD, maximum_distance_pc_for_quality, passes_parallax_quality,
+    DEFAULT_PARALLAX_QUALITY_THRESHOLD, PARALLAX_SYSTEMATIC_FLOOR_MAS, passes_parallax_quality,
 };
 use crate::starcloud::{
     STARCLOUD_FILENAME, StarcloudIndex, StarcloudNode, StarcloudPoint, encode_starcloud,
@@ -79,7 +79,7 @@ fn cartesian_coordinates(ra_deg: f32, dec_deg: f32, parallax_mas: f32) -> Vec3 {
 }
 
 fn bounds_for_quality_threshold(minimum_quality: f32) -> Bounds3 {
-    let bound = maximum_distance_pc_for_quality(minimum_quality);
+    let bound = 1_000.0 / (minimum_quality * PARALLAX_SYSTEMATIC_FLOOR_MAS);
     Bounds3 {
         min: Vec3 { x: -bound, y: -bound, z: -bound },
         max: Vec3 { x: bound, y: bound, z: bound },
@@ -132,7 +132,6 @@ fn load_points(
                 if !passes_parallax_quality(
                     row.parallax,
                     row.parallax_error,
-                    row.phot_g_mean_mag,
                     quality_threshold,
                 ) {
                     continue;
