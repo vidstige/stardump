@@ -51,16 +51,14 @@ def default_bucket_name(project_number: str) -> str:
     return f"star-dump-data-{project_number}"
 
 
-def run_name(urls: list[str]) -> str:
+def run_name() -> str:
     digest = hashlib.md5()
-    for url in sorted(urls):
-        digest.update(url.encode("utf-8"))
-        digest.update(b"\n")
-    return digest.hexdigest()
+    digest.update(str(int(time.time())).encode("utf-8"))
+    return digest.hexdigest()[:7]
 
 
-def default_data_root(mount_root: str, urls: list[str]) -> str:
-    return f"{mount_root}/{run_name(urls)}"
+def default_data_root(mount_root: str) -> str:
+    return f"{mount_root}/{run_name()}"
 
 
 def fetch_gaia_source_md5s() -> dict[str, str]:
@@ -368,8 +366,8 @@ def start_ingest(
         raise SystemExit("failed to fetch Gaia source URL list")
 
     checksums = fetch_gaia_source_md5s()
-    run_id = run_name(urls)
-    data_root = data_root or default_data_root(MOUNT_ROOT, urls)
+    run_id = run_name()
+    data_root = data_root or default_data_root(MOUNT_ROOT)
     input_manifest = upload_manifest(bucket_name, run_id, urls, checksums)
     task_count = len(urls)
     job_name = ingest_job_name
