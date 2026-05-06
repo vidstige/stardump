@@ -5,8 +5,6 @@
 
 import * as https from "https";
 import * as http from "http";
-import * as fs from "fs";
-import * as path from "path";
 
 import {
   makeCamera,
@@ -46,7 +44,7 @@ const WIDTH = getArgNum("width", 1920);
 const HEIGHT = getArgNum("height", 1080);
 const PIXEL_THRESHOLD = getArgNum("pixel-threshold", 4);
 const OUT = getArg("output", "stars.png");
-const CACHE_DIR = getArg("cache-dir", "/tmp");
+
 const ORTHO = hasArg("orthographic");
 
 // Galactic north pole and galactic center direction in equatorial J2000 cartesian.
@@ -77,16 +75,7 @@ const NODE_SIZE = 20;
 const POINT_SIZE = 20;
 const MAGIC = "STRCLD\0\0";
 
-function cacheKey(apiRoot: string, dataset: string): string {
-  const safe = (apiRoot + "|" + dataset).replace(/[^a-zA-Z0-9._-]/g, "_");
-  return path.join(CACHE_DIR, `starcloud-${safe}.bin`);
-}
-
 function fetchStarcloud(apiRoot: string, dataset: string): Promise<Buffer> {
-  const cache = cacheKey(apiRoot, dataset);
-  if (fs.existsSync(cache)) {
-    return Promise.resolve(fs.readFileSync(cache));
-  }
   const url = `${apiRoot}/datasets/${dataset}/starcloud.bin`;
   console.log("Fetching:", url);
   return new Promise((resolve, reject) => {
@@ -99,15 +88,7 @@ function fetchStarcloud(apiRoot: string, dataset: string): Promise<Buffer> {
         }
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => {
-          const buf = Buffer.concat(chunks);
-          try {
-            fs.writeFileSync(cache, buf);
-          } catch (e) {
-            console.warn("cache write failed:", e);
-          }
-          resolve(buf);
-        });
+        res.on("end", () => resolve(Buffer.concat(chunks)));
         res.on("error", reject);
       })
       .on("error", reject);
