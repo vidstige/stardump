@@ -16,7 +16,7 @@ import {
   normalize,
   rasterize,
   tonemapToBytes,
-  writePpm,
+  writePng,
   type Camera,
   type Plane,
   type Star,
@@ -45,7 +45,7 @@ const NEAR = getArgNum("near", 0.1);
 const WIDTH = getArgNum("width", 1920);
 const HEIGHT = getArgNum("height", 1080);
 const PIXEL_THRESHOLD = getArgNum("pixel-threshold", 4);
-const OUT = getArg("output", "stars.ppm");
+const OUT = getArg("output", "stars.png");
 const CACHE_DIR = getArg("cache-dir", "/tmp");
 const ORTHO = hasArg("orthographic");
 
@@ -305,7 +305,7 @@ async function main(): Promise<void> {
   rasterize(iterateStars(sc, ranges, planes), hdr, { camera, projection, exposure });
 
   const pixels = tonemapToBytes(hdr, WIDTH, HEIGHT);
-  writePpm(OUT, WIDTH, HEIGHT, pixels);
+  writePng(OUT, WIDTH, HEIGHT, pixels);
   console.log(`Saved ${OUT} in ${((Date.now() - started) / 1000).toFixed(2)}s`);
 }
 

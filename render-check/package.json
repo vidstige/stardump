@@ -3,5 +3,8 @@
   "private": true,
   "devDependencies": {
     "@types/node": "^22.0.0"
+  },
+  "dependencies": {
+    "fast-png": "^8.0.0"
   }
 }

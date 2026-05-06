@@ -1,3 +1,6 @@
+import * as fs from "fs";
+import { encode as encodePng } from "fast-png";
+
 export type Vec3 = [number, number, number];
 
 export type Camera = {
@@ -227,8 +230,7 @@ export function tonemapToBytes(hdr: Float32Array, width: number, height: number)
   return pixels;
 }
 
-export function writePpm(path: string, width: number, height: number, pixels: Buffer): void {
-  const fs = require("fs");
-  const header = `P6\n${width} ${height}\n255\n`;
-  fs.writeFileSync(path, Buffer.concat([Buffer.from(header), pixels]));
+export function writePng(path: string, width: number, height: number, pixels: Buffer): void {
+  const data = encodePng({ width, height, data: new Uint8Array(pixels), depth: 8, channels: 3 });
+  fs.writeFileSync(path, Buffer.from(data));
 }
