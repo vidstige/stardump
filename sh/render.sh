@@ -27,7 +27,7 @@ while (( $# > 0 )); do
   esac
 done
 
-tsx="$repo_root/render-check/node_modules/.bin/tsx"
+tsx=(npx tsx)
 
 if (( ! have_dataset )); then
   dataset="$(ls "$repo_root/data" 2>/dev/null | head -n1 || true)"
@@ -39,12 +39,12 @@ fi
 
 case "$mode" in
   exact)
-    "$tsx" "$repo_root/render-check/render-exact.ts" \
+    "${tsx[@]}" "$repo_root/render-check/render-exact.ts" \
       --starcloud "$repo_root/data/$dataset/starcloud.bin" \
       "${forward_args[@]}" --output "$output_png"
     ;;
   fast)
-    "$tsx" "$repo_root/render-check/render-fast.ts" \
+    "${tsx[@]}" "$repo_root/render-check/render-fast.ts" \
       --url "$url" --dataset "$dataset" \
       "${forward_args[@]}" --output "$output_png"
     ;;
