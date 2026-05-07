@@ -136,6 +136,13 @@ function rotateVector(q: Quaternion, v: Vec3): Vec3 {
   return add(v, add(scale(uv, 2 * q[3]), scale(uuv, 2)));
 }
 
+// Galactic coordinate axes for minimap projection (equatorial J2000 cartesian).
+const NGP_RAW: Vec3 = [-0.86703, -0.20006,  0.45673];
+const GC_RAW:  Vec3 = [-0.05487, -0.87344, -0.48384];
+const MM_FORWARD: Vec3 = normalize([-NGP_RAW[0], -NGP_RAW[1], -NGP_RAW[2]]);
+const MM_RIGHT:   Vec3 = normalize(cross(MM_FORWARD, GC_RAW));
+const MM_UP:      Vec3 = normalize(cross(MM_RIGHT, MM_FORWARD));
+
 function cameraBasis(camera: Camera): { forward: Vec3; right: Vec3; up: Vec3 } {
   return {
     forward: rotateVector(camera.orientation, [0, 0, -1]),
@@ -243,6 +250,10 @@ const hudMaxRadiusValue      = maxRadiusValueElement;
 const hudPixelThresholdSlider = pixelThresholdSliderElement;
 const hudPixelThresholdValue  = pixelThresholdValueElement;
 
+const minimapWrap   = document.getElementById("minimap-wrap")   as HTMLDivElement    | null;
+const minimapCanvas = document.getElementById("minimap-canvas") as HTMLCanvasElement | null;
+const minimapCtx    = minimapCanvas?.getContext("2d") ?? null;
+
 const canvas = document.createElement("canvas");
 app.prepend(canvas);
 const labelCanvas = document.createElement("canvas");
@@ -339,6 +350,66 @@ function computeSubtreePointCounts(nt: Omit<NodeTable, "subtreePointCount">): Ui
   }
   if (nt.nodeCount > 0) walk(0);
   return counts;
+}
+
+let minimapImage: HTMLImageElement | null = null;
+let minimapHalfExtent = 1;
+
+async function loadMinimap(apiRoot: string, dataset: string, halfExtentPc: number): Promise<void> {
+  minimapHalfExtent = halfExtentPc;
+  minimapImage = null;
+  if (minimapWrap) minimapWrap.style.display = "none";
+  try {
+    const resp = await fetch(`${apiRoot}/datasets/${dataset}/minimap.png`);
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => { img.onload = () => resolve(); img.onerror = reject; img.src = url; });
+    URL.revokeObjectURL(url);
+    minimapImage = img;
+    if (minimapCanvas) {
+      const MAX = 240;
+      const s = Math.min(MAX / img.naturalWidth, MAX / img.naturalHeight);
+      minimapCanvas.width  = Math.round(img.naturalWidth  * s);
+      minimapCanvas.height = Math.round(img.naturalHeight * s);
+    }
+    if (minimapWrap) minimapWrap.style.display = "block";
+  } catch {
+    // no minimap available
+  }
+}
+
+function drawMinimap(): void {
+  if (!minimapCanvas || !minimapCtx || !minimapImage) return;
+  const W = minimapCanvas.width;
+  const H = minimapCanvas.height;
+  minimapCtx.drawImage(minimapImage, 0, 0, W, H);
+
+  const pos = camera.position;
+  const gx = pos[0]*MM_RIGHT[0] + pos[1]*MM_RIGHT[1] + pos[2]*MM_RIGHT[2];
+  const gy = pos[0]*MM_UP[0]    + pos[1]*MM_UP[1]    + pos[2]*MM_UP[2];
+  const px = (gx / minimapHalfExtent + 1) * 0.5 * W;
+  const py = (1 - (gy / minimapHalfExtent + 1) * 0.5) * H;
+
+  const { forward } = cameraBasis(camera);
+  const fdx = forward[0]*MM_RIGHT[0] + forward[1]*MM_RIGHT[1] + forward[2]*MM_RIGHT[2];
+  const fdy = forward[0]*MM_UP[0]    + forward[1]*MM_UP[1]    + forward[2]*MM_UP[2];
+  const fLen = Math.hypot(fdx, fdy) || 1;
+  const nx = fdx / fLen;
+  const ny = fdy / fLen;
+
+  const SIZE = 9, BASE = 4;
+  minimapCtx.beginPath();
+  minimapCtx.moveTo(px + nx * SIZE,      py - ny * SIZE);
+  minimapCtx.lineTo(px + ny * BASE,      py + nx * BASE);
+  minimapCtx.lineTo(px - ny * BASE,      py - nx * BASE);
+  minimapCtx.closePath();
+  minimapCtx.fillStyle   = "rgba(255, 220, 100, 0.9)";
+  minimapCtx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+  minimapCtx.lineWidth   = 1.5;
+  minimapCtx.fill();
+  minimapCtx.stroke();
 }
 
 async function fetchLabels(apiRoot: string, dataset: string): Promise<Label[]> {
@@ -439,6 +510,7 @@ async function loadDataset(): Promise<void> {
     const name = await ensureDatasetName();
     const nt = await fetchNodeTable(API_ROOT, name);
     labels = await fetchLabels(API_ROOT, name);
+    void loadMinimap(API_ROOT, name, nt.halfExtentPc);
     lodWorker.postMessage(
       { type: 'init', nodeTable: nt, apiRoot: API_ROOT, dataset: name },
       [nt.childMask.buffer, nt.firstChild.buffer, nt.pointFirst.buffer,
@@ -797,6 +869,7 @@ regl.frame(({ time }) => {
   regl.clear({ color: [0, 0, 0, 1] });
   toneMap();
   drawLabels();
+  drawMinimap();
 });
 
 void loadDataset();

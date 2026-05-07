@@ -14,6 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::starcloud::{LABELS_FILENAME, STARCLOUD_FILENAME};
+
+const MINIMAP_FILENAME: &str = "minimap.png";
 use crate::storage::local_path;
 
 pub struct QueryCatalog {
@@ -177,12 +179,35 @@ async fn serve_labels(
     Ok(([("content-type", "application/json")], body))
 }
 
+async fn serve_minimap(
+    State(catalog): State<Arc<QueryCatalog>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Response, (StatusCode, String)> {
+    if !valid_dataset_name(&name) {
+        return Err(bad_request("dataset name contains invalid characters"));
+    }
+    let path = dataset_root(&catalog.data_root, &name).join(MINIMAP_FILENAME);
+    let body = tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            not_found(format!("no minimap for dataset {name}"))
+        } else {
+            internal_error(e.into())
+        }
+    })?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "image/png")
+        .body(Body::from(body))
+        .unwrap())
+}
+
 pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/indices", get(list_indices))
         .route("/datasets/{name}/starcloud.bin", get(serve_starcloud))
         .route("/datasets/{name}/labels.json", get(serve_labels))
+        .route("/datasets/{name}/minimap.png", get(serve_minimap))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
         .with_state(catalog)
 }

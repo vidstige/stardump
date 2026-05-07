@@ -327,10 +327,28 @@
       }
 
       .tip:hover::after { display: block; }
+
+      #minimap-wrap {
+        position: absolute;
+        bottom: 14px;
+        right: 14px;
+        border: 1px solid rgba(159, 184, 222, 0.2);
+        border-radius: 10px;
+        overflow: hidden;
+        pointer-events: none;
+        display: none;
+      }
+
+      #minimap-canvas {
+        display: block !important;
+        width: auto !important;
+        height: auto !important;
+      }
     </style>
   </head>
   <body>
     <div id="app">
+      <div id="minimap-wrap"><canvas id="minimap-canvas"></canvas></div>
       <div id="corner-info">
         <div class="info-row">
           <span class="lbl">FPS</span>
