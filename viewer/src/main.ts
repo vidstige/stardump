@@ -380,18 +380,30 @@ async function loadMinimap(apiRoot: string, dataset: string, halfExtentPc: numbe
   }
 }
 
+const MINIMAP_ZOOM = 10;
+
 function drawMinimap(): void {
   if (!minimapCanvas || !minimapCtx || !minimapImage) return;
   const W = minimapCanvas.width;
   const H = minimapCanvas.height;
-  minimapCtx.drawImage(minimapImage, 0, 0, W, H);
+  const iW = minimapImage.naturalWidth;
+  const iH = minimapImage.naturalHeight;
 
+  // Camera position in image-pixel space
   const pos = camera.position;
   const gx = pos[0]*MM_RIGHT[0] + pos[1]*MM_RIGHT[1] + pos[2]*MM_RIGHT[2];
   const gy = pos[0]*MM_UP[0]    + pos[1]*MM_UP[1]    + pos[2]*MM_UP[2];
-  const px = (gx / minimapHalfExtent + 1) * 0.5 * W;
-  const py = (1 - (gy / minimapHalfExtent + 1) * 0.5) * H;
+  const imgCX = (gx / minimapHalfExtent + 1) * 0.5 * iW;
+  const imgCY = (1 - (gy / minimapHalfExtent + 1) * 0.5) * iH;
 
+  // Crop a 1/ZOOM window centered on the camera, clamped to image bounds
+  const srcW = iW / MINIMAP_ZOOM;
+  const srcH = iH / MINIMAP_ZOOM;
+  const srcX = Math.max(0, Math.min(iW - srcW, imgCX - srcW * 0.5));
+  const srcY = Math.max(0, Math.min(iH - srcH, imgCY - srcH * 0.5));
+  minimapCtx.drawImage(minimapImage, srcX, srcY, srcW, srcH, 0, 0, W, H);
+
+  // Triangle always at canvas center
   const { forward } = cameraBasis(camera);
   const fdx = forward[0]*MM_RIGHT[0] + forward[1]*MM_RIGHT[1] + forward[2]*MM_RIGHT[2];
   const fdy = forward[0]*MM_UP[0]    + forward[1]*MM_UP[1]    + forward[2]*MM_UP[2];
@@ -399,11 +411,12 @@ function drawMinimap(): void {
   const nx = fdx / fLen;
   const ny = fdy / fLen;
 
+  const cx = W * 0.5, cy = H * 0.5;
   const SIZE = 9, BASE = 4;
   minimapCtx.beginPath();
-  minimapCtx.moveTo(px + nx * SIZE,      py - ny * SIZE);
-  minimapCtx.lineTo(px + ny * BASE,      py + nx * BASE);
-  minimapCtx.lineTo(px - ny * BASE,      py - nx * BASE);
+  minimapCtx.moveTo(cx + nx * SIZE, cy - ny * SIZE);
+  minimapCtx.lineTo(cx + ny * BASE, cy + nx * BASE);
+  minimapCtx.lineTo(cx - ny * BASE, cy - nx * BASE);
   minimapCtx.closePath();
   minimapCtx.fillStyle   = "rgba(255, 220, 100, 0.9)";
   minimapCtx.strokeStyle = "rgba(0, 0, 0, 0.6)";
