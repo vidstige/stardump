@@ -56,7 +56,7 @@ const API_URLS   = [REMOTE_API, LOCAL_API];
 const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 let API_ROOT = searchParams.get("api") ?? (isLocal ? LOCAL_API : REMOTE_API);
 const DATASET_OVERRIDE = searchParams.get("dataset");
-let pixelThreshold = 8;
+let pixelThreshold = 16;
 
 function add(a: Vec3, b: Vec3): Vec3 {
   return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -316,7 +316,7 @@ const camera: Camera = {
   orientation: [0, 0, 0, 1],
   fovY:  Math.PI / 3,
   near:  0.1,
-  far:   500,
+  far:   640,
 };
 
 const keyState = new Set<string>();
@@ -326,9 +326,9 @@ let prevPosition: Vec3 = [0, 0, 0];
 let labels: Label[] = [];
 let datasetName: string | null = null;
 let datasetNames: string[] | null = null;
-let exposure   = 500.0;
-let sizeScale  = 1.0;
-let maxRadius  = 1.0;
+let exposure   = 2000.0;
+let sizeScale  = 2.0;
+let maxRadius  = 1.5;
 
 window.starDump = {
   getCamera: () => camera,

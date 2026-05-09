@@ -394,7 +394,7 @@
         <div class="tab-content" id="tab-display">
           <div class="slider-row">
             <label for="far-slider">Far<span class="tip" data-tip="Maximum render distance in parsecs. Stars beyond this are clipped from the view frustum.">i</span></label>
-            <input type="range" id="far-slider" min="5" max="5000" step="5" value="500">
+            <input type="range" id="far-slider" min="5" max="5000" step="5" value="640">
             <code id="far-value">500 pc</code>
           </div>
           <div class="slider-row">
@@ -409,12 +409,12 @@
           </div>
           <div class="slider-row">
             <label for="max-radius-slider">Max radius<span class="tip" data-tip="Maximum star radius in pixels. Caps the brightest stars so they don't grow too large.">i</span></label>
-            <input type="range" id="max-radius-slider" min="1" max="16" step="0.5" value="8">
+            <input type="range" id="max-radius-slider" min="1" max="16" step="0.5" value="1.5">
             <code id="max-radius-value">8.0 px</code>
           </div>
           <div class="slider-row">
             <label for="pixel-threshold-slider">Pixel thr<span class="tip" data-tip="LOD cut-off in pixels. When a node's sky footprint is smaller than this, its precomputed subsample is used instead of descending. Higher = faster but coarser detail.">i</span></label>
-            <input type="range" id="pixel-threshold-slider" min="1" max="16" step="1" value="8">
+            <input type="range" id="pixel-threshold-slider" min="1" max="32" step="1" value="16">
             <code id="pixel-threshold-value">8 px</code>
           </div>
         </div>
