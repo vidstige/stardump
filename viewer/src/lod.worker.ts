@@ -25,6 +25,7 @@ export type LodWorkerMsg = FrameMsg | ChunkMsg | ProgressMsg;
 
 const MAX_CONCURRENT_FETCHES = 16;
 const MAX_BATCH_BYTES        = 1024 * 1024;
+const MAX_CHUNK_POINTS       = 65536;
 const MERGE_FOOTPRINT_FACTOR = 8;
 const CAMERA_MOVE_FACTOR     = 0.02; // re-walk when eye moves > 2% of scene half-extent
 const CAMERA_ZOOM_FACTOR     = 1.05; // re-walk when zoom changes by 5%
@@ -211,6 +212,11 @@ function emitFrame(): void {
     if (allComplete) {
       const merged: number[] = [];
       for (const r of childResults) if (r) merged.push(...r);
+      const totalPts = merged.reduce((s, n) => s + nt.pointCount[n], 0);
+      if (totalPts > MAX_CHUNK_POINTS) {
+        emitChunk(nodeIdx, merged);
+        return null;
+      }
       return merged;
     }
     for (let i = 0; i < childResults.length; i++) {
@@ -242,11 +248,19 @@ function runLodUpdate(): void {
   rebuildWanted();
 }
 
+function evictCache(): void {
+  const wantedSet = new Set(wantedNodes.map(w => w.nodeIdx));
+  for (const nodeIdx of nodePointCache.keys()) {
+    if (!wantedSet.has(nodeIdx)) nodePointCache.delete(nodeIdx);
+  }
+}
+
 function rebuildWanted(): void {
   if (!nodeTable) return;
   const { wanted, cachedCount } = collectWanted(nodeTable, latestEye, latestPixelsPerRadian, latestPixelThreshold);
   wantedNodes    = wanted;
   lodCachedCount = cachedCount;
+  evictCache();
   scheduleFetches();
   postProgress();
 }
