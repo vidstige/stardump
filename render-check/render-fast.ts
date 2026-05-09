@@ -43,7 +43,8 @@ const NEAR = getArgNum("near", 0.1);
 const WIDTH = getArgNum("width", 1920);
 const HEIGHT = getArgNum("height", 1080);
 const PIXEL_THRESHOLD = getArgNum("pixel-threshold", 4);
-const OUT = getArg("output", "stars.png");
+const OUT        = getArg("output", "stars.png");
+const MAX_RADIUS = getArgNum("max-radius", 1.0);
 
 const ORTHO = hasArg("orthographic");
 
@@ -283,7 +284,7 @@ async function main(): Promise<void> {
   console.log(`cut: ${ranges.length} node-ranges covering ${starCount} stars (M=${PIXEL_THRESHOLD}px)`);
 
   const hdr = new Float32Array(WIDTH * HEIGHT * 3);
-  rasterize(iterateStars(sc, ranges, planes), hdr, { camera, projection, exposure });
+  rasterize(iterateStars(sc, ranges, planes), hdr, { camera, projection, exposure, maxRadius: MAX_RADIUS });
 
   const pixels = tonemapToBytes(hdr, WIDTH, HEIGHT);
   writePng(OUT, WIDTH, HEIGHT, pixels);

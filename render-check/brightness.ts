@@ -16,6 +16,7 @@ export type RasterConfig = {
   camera: Camera;
   projection: Projection;
   exposure: number;
+  maxRadius?: number;
 };
 
 export type Star = { x: number; y: number; z: number; lum: number; bprp: number };
@@ -202,7 +203,7 @@ export function rasterize(stars: Iterable<Star>, hdr: Float32Array, cfg: RasterC
     const brightness = flux * exposure;
     const [cr, cg, cb] = bprpToColor(s.bprp);
 
-    const rPx = Math.min(Math.max(brightness, 0.8), 1.0);
+    const rPx = Math.min(Math.max(brightness, 0.8), cfg.maxRadius ?? 1.0);
     const ir = Math.ceil(rPx);
     for (let dy = -ir; dy <= ir; dy++) {
       for (let dx = -ir; dx <= ir; dx++) {
