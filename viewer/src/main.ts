@@ -369,7 +369,7 @@ async function loadMinimap(apiRoot: string, dataset: string, halfExtentPc: numbe
     URL.revokeObjectURL(url);
     minimapImage = img;
     if (minimapCanvas) {
-      const MAX = 240;
+      const MAX = 120;
       const s = Math.min(MAX / img.naturalWidth, MAX / img.naturalHeight);
       minimapCanvas.width  = Math.round(img.naturalWidth  * s);
       minimapCanvas.height = Math.round(img.naturalHeight * s);
