@@ -1,4 +1,8 @@
 import createRegl from "regl";
+import tonemapVert from "./tonemap.vert.glsl";
+import tonemapFrag from "./tonemap.frag.glsl";
+import starsVert from "./stars.vert.glsl";
+import starsFrag from "./stars.frag.glsl";
 
 type DrawRange = { chunkId: number; byteOffset: number; count: number };
 type LodWorkerMsg =
@@ -287,24 +291,8 @@ const quadBuffer = regl.buffer(new Float32Array([
 ]));
 
 const toneMap = regl({
-  vert: `
-    precision highp float;
-    attribute vec2 position;
-    varying vec2 vUv;
-    void main() {
-      vUv = position * 0.5 + 0.5;
-      gl_Position = vec4(position, 0.0, 1.0);
-    }
-  `,
-  frag: `
-    precision highp float;
-    uniform sampler2D uHdr;
-    varying vec2 vUv;
-    void main() {
-      vec3 hdr = texture2D(uHdr, vUv).rgb;
-      gl_FragColor = vec4(pow(hdr / (1.0 + hdr), vec3(1.0 / 2.2)), 1.0);
-    }
-  `,
+  vert: tonemapVert,
+  frag: tonemapFrag,
   attributes: { position: { buffer: quadBuffer, size: 2 } },
   uniforms:   { uHdr: () => (hdrBuffer as any).color[0] },
   count: 6,
@@ -735,66 +723,8 @@ window.addEventListener("keyup", (event) => {
 });
 
 const drawStars = regl({
-  vert: `
-    precision highp float;
-
-    attribute vec3 position;
-    attribute float luminosity;
-    attribute float bpRp;
-
-    uniform mat4 projection;
-    uniform mat4 view;
-    uniform vec3 cameraPosition;
-    uniform float exposure;
-    uniform float uSizeScale;
-    uniform float uMaxRadius;
-
-    varying vec3 vColor;
-    varying float vBrightness;
-    varying float vGaussCoeff;
-
-    vec3 bpRpToColor(float t) {
-      vec3 blue   = vec3(0.6, 0.7, 1.0);
-      vec3 white  = vec3(1.0, 0.95, 0.9);
-      vec3 yellow = vec3(1.0, 0.85, 0.4);
-      vec3 red    = vec3(1.0, 0.3,  0.1);
-      if (t < 0.33) return mix(blue,   white,  t / 0.33);
-      if (t < 0.66) return mix(white,  yellow, (t - 0.33) / 0.33);
-                    return mix(yellow, red,    (t - 0.66) / 0.34);
-    }
-
-    void main() {
-      gl_Position = projection * view * vec4(position, 1.0);
-      float dist = length(position - cameraPosition);
-      float flux = luminosity / max(dist * dist, 0.01);
-      float brightness = flux * exposure;
-      float t = clamp((bpRp + 0.5) / 3.5, 0.0, 1.0);
-      vColor = (bpRp != bpRp) ? vec3(1.0) : bpRpToColor(t);
-
-      // Match render-fast.ts: radius scales with brightness, clamped to [0.8, uMaxRadius]
-      float rPx = clamp(brightness * uSizeScale, 0.8, uMaxRadius);
-      float spriteSizePx = ceil(rPx) * 2.0 + 1.0;
-      gl_PointSize = spriteSizePx;
-      vBrightness = brightness;
-      // Convert Gaussian coeff from pixel² to gl_PointCoord² space
-      vGaussCoeff = 4.0 * spriteSizePx * spriteSizePx / (rPx * rPx);
-    }
-  `,
-  frag: `
-    precision highp float;
-
-    varying vec3 vColor;
-    varying float vBrightness;
-    varying float vGaussCoeff;
-
-    void main() {
-      vec2 d = gl_PointCoord - 0.5;
-      float r2 = dot(d, d);
-      float val = vBrightness * exp(-r2 * vGaussCoeff);
-      if (val < 1e-6) discard;
-      gl_FragColor = vec4(vColor * val, 1.0);
-    }
-  `,
+  vert: starsVert,
+  frag: starsFrag,
   attributes: {
     position:   (_: any, p: any) => ({ buffer: p.buf, size: 3, stride: 20, offset: p.byteOffset }),
     luminosity: (_: any, p: any) => ({ buffer: p.buf, size: 1, stride: 20, offset: p.byteOffset + 12 }),
