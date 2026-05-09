@@ -290,15 +290,15 @@ function collectWanted(
 
     if (cm === 0 || (footprintPx < pixelThreshold && pCount > 0)) {
       if (pCount > 0) {
+        wanted.push({ nodeIdx, priority: footprintPx });
         if (nodePointCache.has(nodeIdx)) cachedCount++;
-        else wanted.push({ nodeIdx, priority: footprintPx });
       }
       return;
     }
 
     if (pCount > 0) {
+      wanted.push({ nodeIdx, priority: footprintPx });
       if (nodePointCache.has(nodeIdx)) cachedCount++;
-      else wanted.push({ nodeIdx, priority: footprintPx });
     }
 
     const mx = cx, my = cy, mz = cz;
