@@ -16,6 +16,8 @@ let cache: Cache;
 let state: Uint8Array;
 
 let stale = true;
+// Buffers the page must drop, held back until the draw list stops naming them.
+const freed: number[] = [];
 let selectedFrustum: Frustum = new Float32Array(24);
 let selectedThreshold = 0;
 let selectedAt = 0;
@@ -30,7 +32,7 @@ async function init(url: string): Promise<void> {
   cache = createCache(
     sc, url,
     (batch, data) => { post({ type: "upload", batch, data }, [data]); stale = true; },
-    (batch) => post({ type: "free", batch }),
+    (batch) => freed.push(batch),
   );
   starcloud = sc;
   stale = true;
@@ -44,6 +46,8 @@ function refresh(sc: Starcloud, view: View, pixelThreshold: number): void {
   let stars = 0;
   for (let i = 2; i < ranges.length; i += 3) stars += ranges[i];
   post({ type: "draws", ranges, stars }, [ranges.buffer]);
+  for (const batch of freed) post({ type: "free", batch });
+  freed.length = 0;
 }
 
 function changed(view: View, pixelThreshold: number): boolean {
