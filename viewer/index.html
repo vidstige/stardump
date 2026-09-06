@@ -14,7 +14,14 @@
         font: 11px "IBM Plex Sans", system-ui, sans-serif;
       }
 
-      #view { display: block; width: 100%; height: 100%; }
+      #view, #overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      #overlay { pointer-events: none; }
 
       #minimap {
         position: absolute;
@@ -92,6 +99,7 @@
   </head>
   <body>
     <canvas id="view"></canvas>
+    <canvas id="overlay"></canvas>
     <canvas id="minimap"></canvas>
     <script src="dist/main.js"></script>
   </body>

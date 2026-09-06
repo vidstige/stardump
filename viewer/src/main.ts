@@ -4,6 +4,7 @@ import { Camera, pixelsPerRadian, projectionMatrix, viewMatrix } from "./camera"
 import { attachControls } from "./controls";
 import { fromViewProjection } from "./frustum";
 import { Endpoint, createHud } from "./hud";
+import { Label, drawLabels, fetchLabels } from "./labels";
 import { multiply } from "./mat4";
 import { Minimap, loadMinimap } from "./minimap";
 import { FromWorker, ToWorker } from "./protocol";
@@ -27,6 +28,8 @@ async function fetchDatasetNames(): Promise<string[]> {
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>("#view")!;
+const overlay = document.querySelector<HTMLCanvasElement>("#overlay")!;
+const overlayContext = overlay.getContext("2d")!;
 const minimapCanvas = document.querySelector<HTMLCanvasElement>("#minimap")!;
 
 const settings = { ...DEFAULT_SETTINGS };
@@ -39,6 +42,7 @@ const worker = new Worker("dist/loader.worker.js", { type: "module" });
 let ranges: Int32Array = new Int32Array(0);
 let stars = 0;
 let dataset = "";
+let labels: Label[] = [];
 let minimap: Minimap | null = null;
 
 worker.addEventListener("message", (event: MessageEvent<FromWorker>) => {
@@ -62,6 +66,7 @@ async function start(): Promise<void> {
     type: "init",
     url: `${api}/datasets/${dataset}/starcloud.bin`,
   } as ToWorker);
+  labels = await fetchLabels(`${api}/datasets/${dataset}/labels.json`);
 }
 
 let previous = performance.now();
@@ -79,6 +84,8 @@ function frame(now: number): void {
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
+    overlay.width = width;
+    overlay.height = height;
     renderer.resize(width, height);
   }
 
@@ -92,6 +99,7 @@ function frame(now: number): void {
     pixelThreshold: settings.pixelThreshold,
   } as ToWorker);
   renderer.render(projection, view, camera.position, ranges, settings);
+  drawLabels(overlayContext, labels, camera.position, view, projection);
   minimap?.draw(camera);
 
   const [dx, dy, dz] = subtract(camera.position, before);
