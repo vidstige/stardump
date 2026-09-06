@@ -27,6 +27,16 @@ async function fetchDatasetNames(): Promise<string[]> {
   return (await response.text()).split("\n").map((name) => name.trim()).filter(Boolean);
 }
 
+/** Restores a view shared from the HUD's copy button. */
+function cameraFromParams(): Camera {
+  const shared = params.get("camera")?.split(",").map(Number) ?? [];
+  if (shared.length !== 7 || shared.some(isNaN)) {
+    return { position: [0, 0, 0], orientation: [0, 0, 0, 1] };
+  }
+  const [x, y, z, qx, qy, qz, qw] = shared;
+  return { position: [x, y, z], orientation: [qx, qy, qz, qw] };
+}
+
 const canvas = document.querySelector<HTMLCanvasElement>("#view")!;
 const overlay = document.querySelector<HTMLCanvasElement>("#overlay")!;
 const overlayContext = overlay.getContext("2d")!;
@@ -34,9 +44,9 @@ const minimapCanvas = document.querySelector<HTMLCanvasElement>("#minimap")!;
 
 const settings = { ...DEFAULT_SETTINGS };
 const renderer = createRenderer(canvas);
-const camera: Camera = { position: [0, 0, 0], orientation: [0, 0, 0, 1] };
+const camera = cameraFromParams();
 const control = attachControls(canvas, camera);
-const hud = createHud(settings, ENDPOINTS, api);
+const hud = createHud(settings, ENDPOINTS, api, camera);
 
 const worker = new Worker("dist/loader.worker.js", { type: "module" });
 let ranges: Int32Array = new Int32Array(0);
@@ -105,12 +115,7 @@ function frame(now: number): void {
   const [dx, dy, dz] = subtract(camera.position, before);
   before = camera.position;
   smoothFps += (1 / dt - smoothFps) * 0.1;
-  hud.show({
-    fps: smoothFps,
-    stars,
-    position: camera.position,
-    speed: Math.hypot(dx, dy, dz) / dt,
-  });
+  hud.show({ fps: smoothFps, stars, speed: Math.hypot(dx, dy, dz) / dt });
 }
 
 void start();

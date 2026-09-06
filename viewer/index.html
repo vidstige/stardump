@@ -45,7 +45,7 @@
       }
 
       #controls { left: 14px; width: 270px; }
-      #stats { right: 14px; width: 190px; pointer-events: none; }
+      #stats { right: 14px; width: 200px; pointer-events: none; }
 
       .title {
         margin: 0 0 2px;
@@ -78,6 +78,21 @@
       }
 
       #controls .value { width: 56px; }
+
+      .copy {
+        pointer-events: auto;
+        margin-left: 6px;
+        padding: 0 3px;
+        border: 1px solid rgba(159, 184, 222, 0.25);
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.06);
+        color: inherit;
+        font: inherit;
+        line-height: 1.2;
+        cursor: pointer;
+      }
+
+      .copy:hover { background: rgba(255, 255, 255, 0.16); }
 
       .slider {
         width: 100%;

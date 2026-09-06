@@ -2,12 +2,12 @@
 // left, live readouts on the right. Switching endpoint or dataset reloads the
 // page with new query parameters rather than tearing the worker down.
 
+import { Camera } from "./camera";
 import { Settings } from "./settings";
-import { Vec3 } from "./vec3";
 
 export type Endpoint = { label: string; url: string };
 
-export type Stats = { fps: number; stars: number; position: Vec3; speed: number };
+export type Stats = { fps: number; stars: number; speed: number };
 
 export type Hud = {
   setDatasets(names: string[], selected: string): void;
@@ -39,6 +39,10 @@ const SLIDERS: Slider[] = [
   { key: "far", label: "Far plane", min: 100, max: 8000, step: 100, log: false,
     format: (v) => `${v} pc` },
 ];
+
+const COPY_ICON = "\u29C9";
+const COPIED_ICON = "\u2713";
+const COPIED_MS = 1200;
 
 const C_PC_PER_S = 9.716e-9;
 
@@ -86,6 +90,28 @@ function addReadout(parent: HTMLElement, label: string): HTMLSpanElement {
   return element("span", "value", addRow(parent, label));
 }
 
+/** A link back to exactly this view, for reporting what it looks like. */
+function viewLink(camera: Camera): string {
+  const url = new URL(window.location.href);
+  const numbers = [...camera.position, ...camera.orientation];
+  url.searchParams.set("camera", numbers.map((value) => value.toFixed(4)).join(","));
+  return url.toString();
+}
+
+function addCameraRow(parent: HTMLElement, camera: Camera): HTMLSpanElement {
+  const value = element("span", "value", addRow(parent, "Position"));
+  const text = element("span", "", value);
+  const copy = element("button", "copy", value);
+  copy.textContent = COPY_ICON;
+  copy.title = "Copy a link to this view";
+  copy.addEventListener("click", () => {
+    void navigator.clipboard.writeText(viewLink(camera));
+    copy.textContent = COPIED_ICON;
+    setTimeout(() => { copy.textContent = COPY_ICON; }, COPIED_MS);
+  });
+  return text;
+}
+
 function addSlider(parent: HTMLElement, spec: Slider, settings: Settings): void {
   const row = addRow(parent, spec.label);
   const input = element("input", "slider", row);
@@ -125,7 +151,12 @@ function fill(select: HTMLSelectElement, options: Endpoint[], selected: string):
   select.disabled = options.length <= 1;
 }
 
-export function createHud(settings: Settings, endpoints: Endpoint[], api: string): Hud {
+export function createHud(
+  settings: Settings,
+  endpoints: Endpoint[],
+  api: string,
+  camera: Camera,
+): Hud {
   const controls = element("div", "panel", document.body);
   controls.id = "controls";
   element("h1", "title", controls).textContent = "star-dump";
@@ -137,7 +168,7 @@ export function createHud(settings: Settings, endpoints: Endpoint[], api: string
   panel.id = "stats";
   const fps = addReadout(panel, "FPS");
   const stars = addReadout(panel, "Stars");
-  const position = addReadout(panel, "Position");
+  const position = addCameraRow(panel, camera);
   const speed = addReadout(panel, "Speed");
 
   return {
@@ -148,7 +179,7 @@ export function createHud(settings: Settings, endpoints: Endpoint[], api: string
     show(status) {
       fps.textContent = status.fps.toFixed(0);
       stars.textContent = formatStars(status.stars);
-      position.textContent = status.position.map((v) => v.toFixed(1)).join(", ");
+      position.textContent = camera.position.map((value) => value.toFixed(1)).join(", ");
       speed.textContent = formatSpeed(status.speed);
     },
   };
