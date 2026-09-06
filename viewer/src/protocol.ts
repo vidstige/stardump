@@ -1,0 +1,12 @@
+// Messages between the page and the streaming worker.
+
+import { View } from "./lod";
+
+export type ToWorker =
+  | { type: "init"; url: string }
+  | ({ type: "view" } & View);
+
+export type FromWorker =
+  | { type: "upload"; batch: number; data: ArrayBuffer }
+  | { type: "free";   batch: number }
+  | { type: "draws";  ranges: Int32Array; stars: number };
