@@ -1,8 +1,8 @@
 // Owns the octree, the level-of-detail cut and the streaming cache, so the
 // page thread only ever binds buffers and draws.
 
-import { View, collectDraws, selectCut } from "./lod";
 import { Frustum } from "./frustum";
+import { Cut, Limits, View, collectDraws, emptyCut, selectCut } from "./lod";
 import { FromWorker, ToWorker } from "./protocol";
 import { Cache, createCache } from "./residency";
 import { Starcloud } from "./starcloud";
@@ -10,13 +10,13 @@ import { fetchStarcloud } from "./starcloud_io";
 
 const PIXEL_THRESHOLD = 16;
 const POINT_BUDGET    = 4_000_000;
+const BASE_BUDGET     = 1_500_000;
 const SELECT_INTERVAL_MS = 100;
 
 let starcloud: Starcloud | null = null;
 let cache: Cache;
-let state: Uint8Array;
+let cut: Cut;
 
-let view: View | null = null;
 let stale = true;
 let selectedFrustum: Frustum = new Float32Array(24);
 let selectedAt = 0;
@@ -27,7 +27,7 @@ function post(message: FromWorker, transfer: Transferable[] = []): void {
 
 async function init(url: string): Promise<void> {
   const sc = await fetchStarcloud(url);
-  state = new Uint8Array(sc.childMask.length);
+  cut = emptyCut(sc);
   cache = createCache(
     sc, url,
     (batch, data) => { post({ type: "upload", batch, data }, [data]); stale = true; },
@@ -37,8 +37,13 @@ async function init(url: string): Promise<void> {
   stale = true;
 }
 
-function refresh(sc: Starcloud, at: View): void {
-  const cut = selectCut(sc, at, PIXEL_THRESHOLD, POINT_BUDGET, state);
+function refresh(sc: Starcloud, view: View): void {
+  const limits: Limits = {
+    pixelThreshold: PIXEL_THRESHOLD,
+    pointBudget: POINT_BUDGET,
+    baseBudget: BASE_BUDGET,
+  };
+  selectCut(sc, view, limits, cut);
   cache.update(cut.wanted);
   const ranges = collectDraws(sc, cut, cache.locate);
   let stars = 0;
@@ -46,8 +51,8 @@ function refresh(sc: Starcloud, at: View): void {
   post({ type: "draws", ranges, stars }, [ranges.buffer]);
 }
 
-function moved(frustum: Frustum): boolean {
-  return frustum.some((value, i) => value !== selectedFrustum[i]);
+function changed(view: View): boolean {
+  return view.frustum.some((value, i) => value !== selectedFrustum[i]);
 }
 
 self.addEventListener("message", (event: MessageEvent<ToWorker>) => {
@@ -56,13 +61,13 @@ self.addEventListener("message", (event: MessageEvent<ToWorker>) => {
     void init(message.url);
     return;
   }
-  view = message;
   if (!starcloud) return;
 
   const now = performance.now();
-  if (!(stale || moved(view.frustum)) || now - selectedAt < SELECT_INTERVAL_MS) return;
+  if (!(stale || changed(message))) return;
+  if (now - selectedAt < SELECT_INTERVAL_MS) return;
   stale = false;
-  selectedFrustum = view.frustum;
   selectedAt = now;
-  refresh(starcloud, view);
+  selectedFrustum = message.frustum;
+  refresh(starcloud, message);
 });
