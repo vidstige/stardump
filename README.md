@@ -130,7 +130,25 @@ npm -C viewer/ install
 npm -C viewer/ run dev
 ```
 
-Open [http://localhost:8000](http://localhost:8000) in a browser. The viewer streams octree nodes from the query API on demand, selecting LOD levels based on camera distance and screen-space coverage. By default it connects to `http://127.0.0.1:3000`; a running query API is required.
+Open [http://localhost:8000](http://localhost:8000) in a browser. By default it
+connects to `http://127.0.0.1:3000`; a running query API is required.
+`?api=<url>` and `?dataset=<name>` override the endpoint and the dataset.
+
+Fly with **W/A/S/D**, hold **shift** to accelerate, roll with **Q/E**, and
+click the canvas to capture the mouse for looking around.
+
+A worker owns the octree and does the level-of-detail work off the render
+thread. Each pass refines the tree greedily, largest screen footprint first,
+skipping anything outside the view frustum and stopping once the point budget
+is spent, so how much reaches the GPU does not depend on where the camera is.
+Wanted nodes that are already adjacent in the point table are fetched as one
+byte range and uploaded verbatim as one vertex buffer, which keeps streaming
+free of any repacking. Buffers nobody wants any more are freed
+least-recently-wanted first once the memory budget is exceeded. Where a
+refined subtree has not arrived yet the ancestor's own subsample is drawn in
+its place, so moving through space fills detail in rather than punching holes.
+
+![Viewer](screenshots/viewer.png)
 
 ## Offline renderer
 
