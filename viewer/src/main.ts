@@ -5,6 +5,7 @@ import { attachControls } from "./controls";
 import { fromViewProjection } from "./frustum";
 import { Endpoint, createHud } from "./hud";
 import { multiply } from "./mat4";
+import { Minimap, loadMinimap } from "./minimap";
 import { FromWorker, ToWorker } from "./protocol";
 import { createRenderer } from "./renderer";
 import { DEFAULT_SETTINGS } from "./settings";
@@ -26,6 +27,7 @@ async function fetchDatasetNames(): Promise<string[]> {
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>("#view")!;
+const minimapCanvas = document.querySelector<HTMLCanvasElement>("#minimap")!;
 
 const settings = { ...DEFAULT_SETTINGS };
 const renderer = createRenderer(canvas);
@@ -36,20 +38,25 @@ const hud = createHud(settings, ENDPOINTS, api);
 const worker = new Worker("dist/loader.worker.js", { type: "module" });
 let ranges: Int32Array = new Int32Array(0);
 let stars = 0;
+let dataset = "";
+let minimap: Minimap | null = null;
 
 worker.addEventListener("message", (event: MessageEvent<FromWorker>) => {
   const message = event.data;
   if (message.type === "upload") renderer.upload(message.batch, message.data);
   else if (message.type === "free") renderer.free(message.batch);
-  else {
+  else if (message.type === "draws") {
     ranges = message.ranges;
     stars = message.stars;
+  } else {
+    const url = `${api}/datasets/${dataset}/minimap.png`;
+    void loadMinimap(minimapCanvas, url, message.halfExtentPc).then((it) => { minimap = it; });
   }
 });
 
 async function start(): Promise<void> {
   const names = await fetchDatasetNames();
-  const dataset = params.get("dataset") ?? names[0];
+  dataset = params.get("dataset") ?? names[0];
   hud.setDatasets(names, dataset);
   worker.postMessage({
     type: "init",
@@ -85,6 +92,7 @@ function frame(now: number): void {
     pixelThreshold: settings.pixelThreshold,
   } as ToWorker);
   renderer.render(projection, view, camera.position, ranges, settings);
+  minimap?.draw(camera);
 
   const [dx, dy, dz] = subtract(camera.position, before);
   before = camera.position;

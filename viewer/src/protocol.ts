@@ -7,6 +7,7 @@ export type ToWorker =
   | ({ type: "view"; pixelThreshold: number } & View);
 
 export type FromWorker =
+  | { type: "ready";  halfExtentPc: number }
   | { type: "upload"; batch: number; data: ArrayBuffer }
   | { type: "free";   batch: number }
   | { type: "draws";  ranges: Int32Array; stars: number };

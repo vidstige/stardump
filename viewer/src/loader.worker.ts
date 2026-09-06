@@ -35,6 +35,7 @@ async function init(url: string): Promise<void> {
   );
   starcloud = sc;
   stale = true;
+  post({ type: "ready", halfExtentPc: sc.halfExtentPc });
 }
 
 function refresh(sc: Starcloud, view: View, limits: Limits): void {
