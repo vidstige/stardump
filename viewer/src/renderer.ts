@@ -2,6 +2,7 @@
 // HDR target, then Reinhard tone mapped and gamma corrected to the screen.
 
 import { Mat4 } from "./mat4";
+import { Settings } from "./settings";
 import { POINT_BYTES } from "./starcloud";
 import { Vec3 } from "./vec3";
 import starsVert from "./stars.vert.glsl";
@@ -9,16 +10,14 @@ import starsFrag from "./stars.frag.glsl";
 import tonemapVert from "./tonemap.vert.glsl";
 import tonemapFrag from "./tonemap.frag.glsl";
 
-const EXPOSURE      = 2000;
-const SIZE_SCALE    = 2;
-const MAX_RADIUS_PX = 1.5;
-
 export type Renderer = {
   resize(width: number, height: number): void;
   upload(batch: number, data: ArrayBuffer): void;
   free(batch: number): void;
   /** `ranges` holds [batch, firstPoint, pointCount] triples. */
-  render(projection: Mat4, view: Mat4, eye: Vec3, ranges: Int32Array): void;
+  render(
+    projection: Mat4, view: Mat4, eye: Vec3, ranges: Int32Array, settings: Settings,
+  ): void;
 };
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
@@ -111,7 +110,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       buffers.delete(batch);
     },
 
-    render(projection, view, eye, ranges) {
+    render(projection, view, eye, ranges, settings) {
       gl.viewport(0, 0, width, height);
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.clearColor(0, 0, 0, 1);
@@ -121,9 +120,9 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       gl.uniformMatrix4fv(uProjection, false, projection);
       gl.uniformMatrix4fv(uView, false, view);
       gl.uniform3fv(uEye, eye);
-      gl.uniform1f(uExposure, EXPOSURE);
-      gl.uniform1f(uSizeScale, SIZE_SCALE);
-      gl.uniform1f(uMaxRadius, MAX_RADIUS_PX);
+      gl.uniform1f(uExposure, settings.exposure);
+      gl.uniform1f(uSizeScale, settings.sizeScale);
+      gl.uniform1f(uMaxRadius, settings.maxRadius);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.bindVertexArray(vao);

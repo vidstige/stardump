@@ -3,39 +3,39 @@
 import { Camera, pixelsPerRadian, projectionMatrix, viewMatrix } from "./camera";
 import { attachControls } from "./controls";
 import { fromViewProjection } from "./frustum";
+import { Endpoint, createHud } from "./hud";
 import { multiply } from "./mat4";
 import { FromWorker, ToWorker } from "./protocol";
 import { createRenderer } from "./renderer";
+import { DEFAULT_SETTINGS } from "./settings";
+import { Vec3, subtract } from "./vec3";
 
-const REMOTE_API = "https://star-dump-query-api-494247280614.europe-west1.run.app";
-const LOCAL_API  = "http://127.0.0.1:3000";
+const ENDPOINTS: Endpoint[] = [
+  { label: "Cloud Run", url: "https://star-dump-query-api-494247280614.europe-west1.run.app" },
+  { label: "Local", url: "http://127.0.0.1:3000" },
+];
 
 const params = new URLSearchParams(window.location.search);
 const onLoopback = ["localhost", "127.0.0.1"].includes(window.location.hostname);
-const api = params.get("api") ?? (onLoopback ? LOCAL_API : REMOTE_API);
+const api = params.get("api") ?? ENDPOINTS[onLoopback ? 1 : 0].url;
 
-async function starcloudUrl(): Promise<string> {
-  const named = params.get("dataset");
-  if (named) return `${api}/datasets/${named}/starcloud.bin`;
+async function fetchDatasetNames(): Promise<string[]> {
   const response = await fetch(`${api}/indices`);
   if (!response.ok) throw new Error(`cannot list datasets: ${response.status}`);
-  const [first] = (await response.text()).split("\n").map((name) => name.trim()).filter(Boolean);
-  return `${api}/datasets/${first}/starcloud.bin`;
+  return (await response.text()).split("\n").map((name) => name.trim()).filter(Boolean);
 }
 
-function formatStars(count: number): string {
-  if (count >= 1e6) return `${(count / 1e6).toFixed(1)}M`;
-  if (count >= 1e3) return `${(count / 1e3).toFixed(0)}k`;
-  return String(count);
-}
+const canvas = document.querySelector<HTMLCanvasElement>("#view")!;
 
-const canvas = document.querySelector("canvas")!;
+const settings = { ...DEFAULT_SETTINGS };
 const renderer = createRenderer(canvas);
 const camera: Camera = { position: [0, 0, 0], orientation: [0, 0, 0, 1] };
 const control = attachControls(canvas, camera);
+const hud = createHud(settings, ENDPOINTS, api);
 
 const worker = new Worker("dist/loader.worker.js", { type: "module" });
 let ranges: Int32Array = new Int32Array(0);
+let stars = 0;
 
 worker.addEventListener("message", (event: MessageEvent<FromWorker>) => {
   const message = event.data;
@@ -43,18 +43,29 @@ worker.addEventListener("message", (event: MessageEvent<FromWorker>) => {
   else if (message.type === "free") renderer.free(message.batch);
   else {
     ranges = message.ranges;
-    document.title = `star-dump — ${formatStars(message.stars)} stars`;
+    stars = message.stars;
   }
 });
 
-void starcloudUrl().then((url) => worker.postMessage({ type: "init", url } as ToWorker));
+async function start(): Promise<void> {
+  const names = await fetchDatasetNames();
+  const dataset = params.get("dataset") ?? names[0];
+  hud.setDatasets(names, dataset);
+  worker.postMessage({
+    type: "init",
+    url: `${api}/datasets/${dataset}/starcloud.bin`,
+  } as ToWorker);
+}
 
 let previous = performance.now();
+let smoothFps = 0;
+let before: Vec3 = [0, 0, 0];
 
 function frame(now: number): void {
   requestAnimationFrame(frame);
-  control(Math.min((now - previous) / 1000, 0.1));
+  const dt = Math.min((now - previous) / 1000, 0.1);
   previous = now;
+  control(dt);
 
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -64,15 +75,27 @@ function frame(now: number): void {
     renderer.resize(width, height);
   }
 
-  const projection = projectionMatrix(width / height);
+  const projection = projectionMatrix(width / height, settings.far);
   const view = viewMatrix(camera);
   worker.postMessage({
     type: "view",
     eye: camera.position,
     frustum: fromViewProjection(multiply(projection, view)),
     pixelsPerRadian: pixelsPerRadian(height),
+    pixelThreshold: settings.pixelThreshold,
   } as ToWorker);
-  renderer.render(projection, view, camera.position, ranges);
+  renderer.render(projection, view, camera.position, ranges, settings);
+
+  const [dx, dy, dz] = subtract(camera.position, before);
+  before = camera.position;
+  smoothFps += (1 / dt - smoothFps) * 0.1;
+  hud.show({
+    fps: smoothFps,
+    stars,
+    position: camera.position,
+    speed: Math.hypot(dx, dy, dz) / dt,
+  });
 }
 
+void start();
 requestAnimationFrame(frame);

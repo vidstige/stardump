@@ -4,7 +4,7 @@ import { View } from "./lod";
 
 export type ToWorker =
   | { type: "init"; url: string }
-  | ({ type: "view" } & View);
+  | ({ type: "view"; pixelThreshold: number } & View);
 
 export type FromWorker =
   | { type: "upload"; batch: number; data: ArrayBuffer }

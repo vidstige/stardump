@@ -8,9 +8,8 @@ import { Cache, createCache } from "./residency";
 import { Starcloud } from "./starcloud";
 import { fetchStarcloud } from "./starcloud_io";
 
-const PIXEL_THRESHOLD = 16;
-const POINT_BUDGET    = 4_000_000;
-const BASE_BUDGET     = 1_500_000;
+const POINT_BUDGET = 4_000_000;
+const BASE_BUDGET  = 1_500_000;
 const SELECT_INTERVAL_MS = 100;
 
 let starcloud: Starcloud | null = null;
@@ -19,6 +18,7 @@ let cut: Cut;
 
 let stale = true;
 let selectedFrustum: Frustum = new Float32Array(24);
+let selectedThreshold = 0;
 let selectedAt = 0;
 
 function post(message: FromWorker, transfer: Transferable[] = []): void {
@@ -37,12 +37,7 @@ async function init(url: string): Promise<void> {
   stale = true;
 }
 
-function refresh(sc: Starcloud, view: View): void {
-  const limits: Limits = {
-    pixelThreshold: PIXEL_THRESHOLD,
-    pointBudget: POINT_BUDGET,
-    baseBudget: BASE_BUDGET,
-  };
+function refresh(sc: Starcloud, view: View, limits: Limits): void {
   selectCut(sc, view, limits, cut);
   cache.update(cut.wanted);
   const ranges = collectDraws(sc, cut, cache.locate);
@@ -51,8 +46,9 @@ function refresh(sc: Starcloud, view: View): void {
   post({ type: "draws", ranges, stars }, [ranges.buffer]);
 }
 
-function changed(view: View): boolean {
-  return view.frustum.some((value, i) => value !== selectedFrustum[i]);
+function changed(view: View, pixelThreshold: number): boolean {
+  return pixelThreshold !== selectedThreshold ||
+    view.frustum.some((value, i) => value !== selectedFrustum[i]);
 }
 
 self.addEventListener("message", (event: MessageEvent<ToWorker>) => {
@@ -64,10 +60,15 @@ self.addEventListener("message", (event: MessageEvent<ToWorker>) => {
   if (!starcloud) return;
 
   const now = performance.now();
-  if (!(stale || changed(message))) return;
+  if (!(stale || changed(message, message.pixelThreshold))) return;
   if (now - selectedAt < SELECT_INTERVAL_MS) return;
   stale = false;
   selectedAt = now;
   selectedFrustum = message.frustum;
-  refresh(starcloud, message);
+  selectedThreshold = message.pixelThreshold;
+  refresh(starcloud, message, {
+    pixelThreshold: message.pixelThreshold,
+    pointBudget: POINT_BUDGET,
+    baseBudget: BASE_BUDGET,
+  });
 });
