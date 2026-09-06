@@ -16,6 +16,9 @@ out vec3 vColor;
 out float vBrightness;
 out float vGaussCoeff;
 
+/** Colour of a star with no measured bp_rp: the white point of the ramp. */
+const float UNKNOWN_COLOR = 1.0 / 3.0;
+
 vec3 bpRpToColor(float t) {
   float s = t * 3.0;
   vec3 blue   = vec3(0.6, 0.7, 1.0);
@@ -33,7 +36,11 @@ void main() {
   vec3 delta = position - eye;
   float brightness = luminosity * exposure / max(dot(delta, delta), 0.01);
 
-  vColor = bpRpToColor(clamp((bpRp + 0.5) / 3.5, 0.0, 1.0));
+  // A small fraction of Gaia sources have no bp_rp at all. NaN would survive
+  // the clamp and spread through the additive buffer, blanking out every pixel
+  // the splat lands on, so those stars are drawn white instead.
+  float t = bpRp == bpRp ? clamp((bpRp + 0.5) / 3.5, 0.0, 1.0) : UNKNOWN_COLOR;
+  vColor = bpRpToColor(t);
 
   float rPx = clamp(brightness * sizeScale, 0.8, maxRadius);
   float spriteSizePx = rPx * 2.0 + 1.0;
