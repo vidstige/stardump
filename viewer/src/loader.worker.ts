@@ -2,19 +2,18 @@
 // page thread only ever binds buffers and draws.
 
 import { Frustum } from "./frustum";
-import { Cut, Limits, View, collectDraws, emptyCut, selectCut } from "./lod";
+import { View, collectDraws, selectCut } from "./lod";
 import { FromWorker, ToWorker } from "./protocol";
 import { Cache, createCache } from "./residency";
 import { Starcloud } from "./starcloud";
 import { fetchStarcloud } from "./starcloud_io";
 
 const POINT_BUDGET = 4_000_000;
-const BASE_BUDGET  = 1_500_000;
 const SELECT_INTERVAL_MS = 100;
 
 let starcloud: Starcloud | null = null;
 let cache: Cache;
-let cut: Cut;
+let state: Uint8Array;
 
 let stale = true;
 let selectedFrustum: Frustum = new Float32Array(24);
@@ -27,7 +26,7 @@ function post(message: FromWorker, transfer: Transferable[] = []): void {
 
 async function init(url: string): Promise<void> {
   const sc = await fetchStarcloud(url);
-  cut = emptyCut(sc);
+  state = new Uint8Array(sc.childMask.length);
   cache = createCache(
     sc, url,
     (batch, data) => { post({ type: "upload", batch, data }, [data]); stale = true; },
@@ -38,8 +37,8 @@ async function init(url: string): Promise<void> {
   post({ type: "ready", halfExtentPc: sc.halfExtentPc });
 }
 
-function refresh(sc: Starcloud, view: View, limits: Limits): void {
-  selectCut(sc, view, limits, cut);
+function refresh(sc: Starcloud, view: View, pixelThreshold: number): void {
+  const cut = selectCut(sc, view, pixelThreshold, POINT_BUDGET, state);
   cache.update(cut.wanted);
   const ranges = collectDraws(sc, cut, cache.locate);
   let stars = 0;
@@ -67,9 +66,5 @@ self.addEventListener("message", (event: MessageEvent<ToWorker>) => {
   selectedAt = now;
   selectedFrustum = message.frustum;
   selectedThreshold = message.pixelThreshold;
-  refresh(starcloud, message, {
-    pixelThreshold: message.pixelThreshold,
-    pointBudget: POINT_BUDGET,
-    baseBudget: BASE_BUDGET,
-  });
+  refresh(starcloud, message, message.pixelThreshold);
 });

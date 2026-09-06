@@ -150,9 +150,6 @@ free of any repacking. Buffers nobody wants any more are freed
 least-recently-wanted first once the memory budget is exceeded. Where a
 refined subtree has not arrived yet the ancestor's own subsample is drawn in
 its place, so moving through space fills detail in rather than punching holes.
-Nodes outside the frustum are refined too, four times coarser and never drawn,
-on a budget of their own: that shallow full-sky layer is what turning the
-camera lands on while the detail streams in.
 
 ![Viewer](screenshots/viewer.png)
 

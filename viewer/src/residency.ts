@@ -11,11 +11,11 @@ import { fetchRange } from "./starcloud_io";
 
 const MAX_BATCH_BYTES = 1 << 20;
 const MAX_REQUESTS    = 12;
-const MEMORY_BUDGET   = 256 << 20;
+const MEMORY_BUDGET   = 192 << 20;
 
 type Batch = { id: number; nodes: number[]; bytes: number; lastWanted: number };
 
-type Run = { nodes: number[]; priority: number; bytes: number };
+type Run = { nodes: number[]; footprint: number; bytes: number };
 
 export type Cache = {
   locate: Locate;
@@ -85,15 +85,15 @@ export function createCache(
       .sort((a, b) => sc.pointFirst[a.node] - sc.pointFirst[b.node]);
 
     const grouped: Run[] = [];
-    for (const { node, priority } of missing) {
+    for (const { node, footprint } of missing) {
       const bytes = sc.pointCount[node] * POINT_BYTES;
       const run = grouped[grouped.length - 1];
       if (run && adjacent(run, node) && run.bytes + bytes <= MAX_BATCH_BYTES) {
         run.nodes.push(node);
         run.bytes += bytes;
-        run.priority = Math.max(run.priority, priority);
+        run.footprint = Math.max(run.footprint, footprint);
       } else {
-        grouped.push({ nodes: [node], priority, bytes });
+        grouped.push({ nodes: [node], footprint, bytes });
       }
     }
     return grouped;
@@ -103,7 +103,7 @@ export function createCache(
     const slots = MAX_REQUESTS - requests;
     if (slots <= 0) return;
     // Biggest on screen first, which also means shallow nodes before deep ones.
-    const queue = runs(wanted).sort((a, b) => b.priority - a.priority);
+    const queue = runs(wanted).sort((a, b) => b.footprint - a.footprint);
     for (let i = 0; i < slots && i < queue.length; i++) void load(queue[i].nodes);
   }
 
