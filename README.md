@@ -135,7 +135,10 @@ connects to `http://127.0.0.1:3000`; a running query API is required.
 `?api=<url>` and `?dataset=<name>` override the endpoint and the dataset.
 
 Fly with **W/A/S/D**, hold **shift** to accelerate, roll with **Q/E**, and
-click the canvas to capture the mouse for looking around.
+click the canvas to capture the mouse for looking around. The panel on the
+left tweaks exposure, splat size and radius, the level-of-detail threshold and
+the far plane; the minimap shows where in the galactic plane the camera sits,
+and named stars from the dataset's `labels.json` are drawn as they come close.
 
 A worker owns the octree and does the level-of-detail work off the render
 thread. Each pass refines the tree greedily, largest screen footprint first,
@@ -147,6 +150,9 @@ free of any repacking. Buffers nobody wants any more are freed
 least-recently-wanted first once the memory budget is exceeded. Where a
 refined subtree has not arrived yet the ancestor's own subsample is drawn in
 its place, so moving through space fills detail in rather than punching holes.
+Nodes outside the frustum are refined too, four times coarser and never drawn,
+on a budget of their own: that shallow full-sky layer is what turning the
+camera lands on while the detail streams in.
 
 ![Viewer](screenshots/viewer.png)
 
