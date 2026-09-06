@@ -1,7 +1,9 @@
+#version 300 es
 precision highp float;
-attribute vec2 position;
-varying vec2 vUv;
+
+out vec2 vUv;
+
 void main() {
-  vUv = position * 0.5 + 0.5;
-  gl_Position = vec4(position, 0.0, 1.0);
+  vUv = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(vUv * 2.0 - 1.0, 0.0, 1.0);
 }

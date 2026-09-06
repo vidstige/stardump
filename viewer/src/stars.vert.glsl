@@ -1,19 +1,20 @@
+#version 300 es
 precision highp float;
 
-attribute vec3 position;
-attribute float luminosity;
-attribute float bpRp;
+in vec3 position;
+in float luminosity;
+in float bpRp;
 
 uniform mat4 projection;
 uniform mat4 view;
-uniform vec3 cameraPosition;
+uniform vec3 eye;
 uniform float exposure;
-uniform float uSizeScale;
-uniform float uMaxRadius;
+uniform float sizeScale;
+uniform float maxRadius;
 
-varying vec3 vColor;
-varying float vBrightness;
-varying float vGaussCoeff;
+out vec3 vColor;
+out float vBrightness;
+out float vGaussCoeff;
 
 vec3 bpRpToColor(float t) {
   float s = t * 3.0;
@@ -29,13 +30,12 @@ vec3 bpRpToColor(float t) {
 
 void main() {
   gl_Position = projection * view * vec4(position, 1.0);
-  vec3 delta = position - cameraPosition;
+  vec3 delta = position - eye;
   float brightness = luminosity * exposure / max(dot(delta, delta), 0.01);
 
-  float t = clamp((bpRp + 0.5) / 3.5, 0.0, 1.0);
-  vColor = bpRpToColor(t);
+  vColor = bpRpToColor(clamp((bpRp + 0.5) / 3.5, 0.0, 1.0));
 
-  float rPx = clamp(brightness * uSizeScale, 0.8, uMaxRadius);
+  float rPx = clamp(brightness * sizeScale, 0.8, maxRadius);
   float spriteSizePx = rPx * 2.0 + 1.0;
   gl_PointSize = spriteSizePx;
   vBrightness = brightness;

@@ -13,6 +13,6 @@
     "src/**/*.ts"
   ],
   "exclude": [
-    "src/lod.worker.ts"
+    "src/loader.worker.ts"
   ]
 }

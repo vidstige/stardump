@@ -1,7 +1,11 @@
+#version 300 es
 precision highp float;
-uniform sampler2D uHdr;
-varying vec2 vUv;
+
+uniform sampler2D hdr;
+in vec2 vUv;
+out vec4 fragColor;
+
 void main() {
-  vec3 hdr = texture2D(uHdr, vUv).rgb;
-  gl_FragColor = vec4(pow(hdr / (1.0 + hdr), vec3(1.0 / 2.2)), 1.0);
+  vec3 color = texture(hdr, vUv).rgb;
+  fragColor = vec4(pow(color / (1.0 + color), vec3(1.0 / 2.2)), 1.0);
 }

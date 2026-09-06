@@ -6,9 +6,6 @@
     "check": "tsc --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "dev": "esbuild src/main.ts src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --loader:.glsl=text --outdir=dist --watch --serve=8000 --servedir=."
   },
-  "dependencies": {
-    "regl": "^2.1.1"
-  },
   "devDependencies": {
     "esbuild": "^0.25.3",
     "typescript": "^5.8.3"

@@ -8,9 +8,12 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "lib": ["ES2020", "WebWorker"]
+    "lib": [
+      "ES2020",
+      "WebWorker"
+    ]
   },
   "include": [
-    "src/lod.worker.ts"
+    "src/loader.worker.ts"
   ]
 }

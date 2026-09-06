@@ -1,13 +1,15 @@
+#version 300 es
 precision highp float;
 
-varying vec3 vColor;
-varying float vBrightness;
-varying float vGaussCoeff;
+in vec3 vColor;
+in float vBrightness;
+in float vGaussCoeff;
+
+out vec4 fragColor;
 
 void main() {
   vec2 d = gl_PointCoord - 0.5;
-  float r2 = dot(d, d);
-  float val = vBrightness * exp(-r2 * vGaussCoeff);
+  float val = vBrightness * exp(-dot(d, d) * vGaussCoeff);
   if (val < 1e-6) discard;
-  gl_FragColor = vec4(vColor * val, 1.0);
+  fragColor = vec4(vColor * val, 1.0);
 }
