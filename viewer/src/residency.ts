@@ -32,6 +32,7 @@ export function createCache(
   const locations = new Map<number, Location>();
   const inFlight  = new Set<number>();
   let requests = 0;
+  let lastWanted: Wanted[] = [];
   let nextBatch = 0;
   let resident = 0;
   let tick = 0;
@@ -71,6 +72,8 @@ export function createCache(
       requests--;
       for (const node of nodes) inFlight.delete(node);
     }
+    // Keep the pipe full rather than waiting for the next selection pass.
+    schedule(lastWanted);
   }
 
   function adjacent(run: Run, node: number): boolean {
@@ -111,6 +114,7 @@ export function createCache(
     locate: (node) => locations.get(node),
     update(wanted, memoryBudget) {
       tick++;
+      lastWanted = wanted;
       const wantedNodes = new Set<number>();
       for (const { node } of wanted) {
         wantedNodes.add(node);
