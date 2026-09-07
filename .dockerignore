@@ -1,4 +1,5 @@
 .git
 .gitignore
 /target
+/viewer/node_modules
 /data

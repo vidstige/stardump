@@ -14,6 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::starcloud::{LABELS_FILENAME, STARCLOUD_FILENAME};
+use crate::viewer::build_viewer;
 
 const MINIMAP_FILENAME: &str = "minimap.png";
 use crate::storage::local_path;
@@ -201,13 +202,14 @@ async fn serve_minimap(
         .unwrap())
 }
 
-pub fn build_app(catalog: Arc<QueryCatalog>) -> Router {
-    Router::new()
+pub fn build_app(catalog: Arc<QueryCatalog>, viewer_root: PathBuf) -> Router {
+    let api = Router::new()
         .route("/health", get(health))
         .route("/indices", get(list_indices))
         .route("/datasets/{name}/starcloud.bin", get(serve_starcloud))
         .route("/datasets/{name}/labels.json", get(serve_labels))
         .route("/datasets/{name}/minimap.png", get(serve_minimap))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
-        .with_state(catalog)
+        .with_state(catalog);
+    api.merge(build_viewer(viewer_root))
 }

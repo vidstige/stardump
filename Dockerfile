@@ -21,6 +21,8 @@ RUN useradd --create-home --uid 10001 stardump
 COPY --from=build /app/target/release/ingest /usr/local/bin/ingest
 COPY --from=build /app/target/release/build-starcloud /usr/local/bin/build-starcloud
 COPY --from=build /app/target/release/query-api /usr/local/bin/query-api
+COPY viewer/index.html /usr/local/share/star-dump/viewer/index.html
+COPY viewer/dist /usr/local/share/star-dump/viewer/dist
 COPY sh/ingest-job-entrypoint.sh /usr/local/bin/ingest-job
 COPY sh/build-starcloud-job-entrypoint.sh /usr/local/bin/build-starcloud-job
 RUN chmod 755 /usr/local/bin/ingest-job /usr/local/bin/build-starcloud-job

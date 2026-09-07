@@ -34,7 +34,7 @@ gcloud run deploy "${service_name}" \
   --add-volume "name=gcs,type=cloud-storage,bucket=${bucket_name},readonly=true" \
   --add-volume-mount "volume=gcs,mount-path=${mount_root}" \
   --command /usr/local/bin/query-api \
-  --args="--data-root,${mount_root},--bind,0.0.0.0:8080" \
+  --args="--data-root,${mount_root},--bind,0.0.0.0:8080,--viewer-root,/usr/local/share/star-dump/viewer" \
   --allow-unauthenticated
 
 echo "image: ${image_uri}"

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -11,6 +12,10 @@ struct Args {
 
     #[arg(long, default_value = "127.0.0.1:3000")]
     bind: SocketAddr,
+
+    /// Directory holding the built viewer: index.html and dist/.
+    #[arg(long, default_value = "viewer")]
+    viewer_root: PathBuf,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -21,7 +26,7 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(args.bind).await?;
-        axum::serve(listener, build_app(catalog)).await?;
+        axum::serve(listener, build_app(catalog, args.viewer_root)).await?;
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())

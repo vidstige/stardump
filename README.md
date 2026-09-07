@@ -136,6 +136,12 @@ Open [http://localhost:8000](http://localhost:8000) in a browser. By default it
 connects to `http://127.0.0.1:3000`; a running query API is required.
 `?api=<url>` and `?dataset=<name>` override the endpoint and the dataset.
 
+The query API also serves the viewer itself, from `--viewer-root` (`viewer` by
+default), which is how the deployment runs: build the bundles with
+`npm -C viewer/ run build` and open the API's own root. Served that way the
+page is same-origin with the data it streams, so the byte-range requests need
+no cross-origin preflight.
+
 Fly with **W/A/S/D**, hold **shift** to accelerate, roll with **Q/E**, and
 click the canvas to capture the mouse for looking around. The panel on the
 left tweaks exposure, splat size and radius, the level-of-detail threshold, the

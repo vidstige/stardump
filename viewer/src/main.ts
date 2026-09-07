@@ -12,14 +12,19 @@ import { createRenderer } from "./renderer";
 import { DEFAULT_SETTINGS } from "./settings";
 import { Vec3, subtract } from "./vec3";
 
+/** Empty means the host serving the page, which is how the deployment runs. */
+const SAME_HOST = "";
+const LOCAL_API = "http://127.0.0.1:3000";
+
 const ENDPOINTS: Endpoint[] = [
+  { label: "This host", url: SAME_HOST },
+  { label: "Local", url: LOCAL_API },
   { label: "Cloud Run", url: "https://star-dump-query-api-494247280614.europe-west1.run.app" },
-  { label: "Local", url: "http://127.0.0.1:3000" },
 ];
 
 const params = new URLSearchParams(window.location.search);
 const onLoopback = ["localhost", "127.0.0.1"].includes(window.location.hostname);
-const api = params.get("api") ?? ENDPOINTS[onLoopback ? 1 : 0].url;
+const api = params.get("api") ?? (onLoopback ? LOCAL_API : SAME_HOST);
 
 async function fetchDatasetNames(): Promise<string[]> {
   const response = await fetch(`${api}/indices`);

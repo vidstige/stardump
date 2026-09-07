@@ -7,3 +7,4 @@ pub mod quality;
 pub mod query_api;
 pub mod starcloud;
 pub mod storage;
+pub mod viewer;
