@@ -5,6 +5,8 @@ export type Settings = {
   sizeScale: number;
   maxRadius: number;
   pixelThreshold: number;
+  /** Points the visible cut may use, and so how much lands on the GPU. */
+  pointBudget: number;
   far: number;
 };
 
@@ -13,5 +15,6 @@ export const DEFAULT_SETTINGS: Settings = {
   sizeScale: 2,
   maxRadius: 1.5,
   pixelThreshold: 16,
+  pointBudget: 16_000_000,
   far: 8000,
 };

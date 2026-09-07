@@ -107,6 +107,7 @@ function frame(now: number): void {
     frustum: fromViewProjection(multiply(projection, view)),
     pixelsPerRadian: pixelsPerRadian(height),
     pixelThreshold: settings.pixelThreshold,
+    pointBudget: settings.pointBudget,
   } as ToWorker);
   renderer.render(projection, view, camera.position, ranges, settings);
   drawLabels(overlayContext, labels, camera.position, view, projection);

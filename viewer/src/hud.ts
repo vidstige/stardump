@@ -36,6 +36,8 @@ const SLIDERS: Slider[] = [
     format: (v) => `${v.toFixed(1)} px` },
   { key: "pixelThreshold", label: "Detail", min: 4, max: 64, step: 1, log: false,
     format: (v) => `${v} px` },
+  { key: "pointBudget", label: "Budget", min: 1e6, max: 32e6, step: 1e6, log: false,
+    format: (v) => `${(v / 1e6).toFixed(0)}M` },
   { key: "far", label: "Far plane", min: 100, max: 8000, step: 100, log: false,
     format: (v) => `${v} pc` },
 ];

@@ -4,7 +4,7 @@ import { View } from "./lod";
 
 export type ToWorker =
   | { type: "init"; url: string }
-  | ({ type: "view"; pixelThreshold: number } & View);
+  | ({ type: "view"; pixelThreshold: number; pointBudget: number } & View);
 
 export type FromWorker =
   | { type: "ready";  halfExtentPc: number }

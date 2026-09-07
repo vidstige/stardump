@@ -11,7 +11,6 @@ import { fetchRange } from "./starcloud_io";
 
 const MAX_BATCH_BYTES = 1 << 20;
 const MAX_REQUESTS    = 12;
-const MEMORY_BUDGET   = 192 << 20;
 
 type Batch = { id: number; nodes: number[]; bytes: number; lastWanted: number };
 
@@ -19,7 +18,8 @@ type Run = { nodes: number[]; footprint: number; bytes: number };
 
 export type Cache = {
   locate: Locate;
-  update(wanted: Wanted[]): void;
+  /** `memoryBudget` caps what is kept beyond the nodes currently wanted. */
+  update(wanted: Wanted[], memoryBudget: number): void;
 };
 
 export function createCache(
@@ -43,12 +43,12 @@ export function createCache(
     onFree(batch.id);
   }
 
-  function evict(wantedNodes: Set<number>): void {
+  function evict(wantedNodes: Set<number>, memoryBudget: number): void {
     const idle = [...batches.values()]
       .filter((batch) => !batch.nodes.some((node) => wantedNodes.has(node)))
       .sort((a, b) => a.lastWanted - b.lastWanted);
     for (const batch of idle) {
-      if (resident <= MEMORY_BUDGET) return;
+      if (resident <= memoryBudget) return;
       drop(batch);
     }
   }
@@ -109,7 +109,7 @@ export function createCache(
 
   return {
     locate: (node) => locations.get(node),
-    update(wanted) {
+    update(wanted, memoryBudget) {
       tick++;
       const wantedNodes = new Set<number>();
       for (const { node } of wanted) {
@@ -117,7 +117,7 @@ export function createCache(
         const at = locations.get(node);
         if (at) batches.get(at.batch)!.lastWanted = tick;
       }
-      evict(wantedNodes);
+      evict(wantedNodes, memoryBudget);
       schedule(wanted);
     },
   };
