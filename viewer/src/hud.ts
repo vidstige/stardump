@@ -163,7 +163,7 @@ export function createHud(
   controls.id = "controls";
   element("h1", "title", controls).textContent = "star-dump";
   for (const spec of SLIDERS) addSlider(controls, spec, settings);
-  fill(addSelect(controls, "Endpoint", "api"), endpoints, api);
+  if (endpoints.length > 0) fill(addSelect(controls, "Query API", "api"), endpoints, api);
   const datasets = addSelect(controls, "Dataset", "dataset");
 
   const panel = element("div", "panel", document.body);
