@@ -149,9 +149,11 @@ is spent, so how much reaches the GPU does not depend on where the camera is.
 Wanted nodes that are already adjacent in the point table are fetched as one
 byte range and uploaded verbatim as one vertex buffer, which keeps streaming
 free of any repacking. Buffers nobody wants any more are freed
-least-recently-wanted first once the memory budget is exceeded. Where a
-refined subtree has not arrived yet the ancestor's own subsample is drawn in
-its place, so moving through space fills detail in rather than punching holes.
+least-recently-wanted first once the memory budget is exceeded. A node stands
+in for its subtree only where the subtree has nothing to show yet, which is
+what makes a region appear coarse and then sharpen; a subtree that is merely
+incomplete keeps the detail it has, because standing in for it would throw
+away every sibling that had already arrived.
 
 ![Viewer](screenshots/viewer.png)
 

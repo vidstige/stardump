@@ -113,33 +113,36 @@ function merge(ranges: number[]): Int32Array {
 }
 
 /**
- * Draw ranges as `[batch, firstPoint, pointCount]` triples. Where a refined
- * subtree is not fully resident yet the ancestor's own subsample is drawn
- * instead, so streaming fills detail in rather than punching holes.
+ * Draw ranges as `[batch, firstPoint, pointCount]` triples.
+ *
+ * A node stands in for its subtree only where the subtree has nothing to show
+ * yet, which is what makes a region appear coarse first and then sharpen. A
+ * subtree that is merely incomplete keeps the detail it has and leaves the
+ * gap: standing in for it would throw away every resident sibling, and since
+ * one node can carry tens of thousands of stars where the subsample carries
+ * 256, a residency gap of a few thousand points used to cost more than a
+ * million drawn ones.
  */
 export function collectDraws(sc: Starcloud, cut: Cut, locate: Locate): Int32Array {
   const ranges: number[] = [];
 
-  function drawSelf(node: number): boolean {
+  function drawSelf(node: number): void {
     const count = sc.pointCount[node];
     const at = count > 0 ? locate(node) : undefined;
-    if (!at) return false;
-    ranges.push(at.batch, at.first, count);
-    return true;
+    if (at) ranges.push(at.batch, at.first, count);
   }
 
-  function emit(node: number): boolean {
-    if (cut.state[node] === CULLED) return true;
-    if (cut.state[node] === CUT) return sc.pointCount[node] === 0 || drawSelf(node);
+  function emit(node: number): void {
+    if (cut.state[node] === CULLED) return;
+    if (cut.state[node] !== EXPANDED) {
+      drawSelf(node);
+      return;
+    }
     const mark = ranges.length;
     const first = sc.firstChild[node];
     const children = childCount(sc.childMask[node]);
-    for (let i = 0; i < children; i++) {
-      if (emit(first + i)) continue;
-      ranges.length = mark;
-      return drawSelf(node);
-    }
-    return true;
+    for (let i = 0; i < children; i++) emit(first + i);
+    if (ranges.length === mark) drawSelf(node);
   }
 
   emit(0);
