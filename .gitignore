@@ -5,3 +5,4 @@ __pycache__/
 /viewer/dist
 /viewer/node_modules
 /.env
+/docs

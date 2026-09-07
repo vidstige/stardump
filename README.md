@@ -13,7 +13,6 @@ The pipeline consists of:
 Data references:
 - [Gaia DR3 overview](https://www.cosmos.esa.int/web/gaia/dr3)
 - [Gaia source table schema](https://gea.esac.esa.int/archive/documentation/GDR3/Gaia_archive/chap_datamodel/sec_dm_main_source_catalogue/ssec_dm_gaia_source.html)
-- Architecture details: [docs/gaia-3d-storage.md](docs/gaia-3d-storage.md)
 
 ## Technical notes
 
