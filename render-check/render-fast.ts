@@ -10,15 +10,20 @@ import {
   makeCamera,
   PerspectiveProjection,
   OrthographicProjection,
-  Projection,
   normalize,
   rasterize,
   tonemapToBytes,
   writePng,
-  type Camera,
   type Plane,
   type Star,
 } from "./brightness";
+import {
+  collectCut,
+  cubeBounds,
+  pointInView,
+  type Nodes,
+  type Range,
+} from "./cut";
 
 const args = process.argv.slice(2);
 function getArg(name: string, def?: string): string {
@@ -53,19 +58,12 @@ const ORTHO = hasArg("orthographic");
 const NGP = normalize([-0.86703, -0.20006, 0.45673] as [number,number,number]);
 const GC  = normalize([-0.05487, -0.87344, -0.48384] as [number,number,number]);
 
-type Bounds = { min: [number, number, number]; max: [number, number, number] };
-
 type ParsedStarcloud = {
   depth: number;
   halfExtentPc: number;
   nodeCount: number;
   pointCount: number;
-  nodes: {
-    childMask: Uint8Array;
-    firstChild: Uint32Array;
-    pointFirst: Uint32Array;
-    pointCount: Uint32Array;
-  };
+  nodes: Nodes;
   // Interleaved Float32Array: [x, y, z, lum, bprp, x, y, z, lum, bprp, ...]
   // Access: pointFloats[i*5+0]=x, +1=y, +2=z, +3=lum, +4=bprp
   pointFloats: Float32Array;
@@ -143,96 +141,9 @@ function parseStarcloud(buf: Buffer): ParsedStarcloud {
   };
 }
 
-// Bit ordering matches octree.rs: child & 1 → x, child & 2 → y, child & 4 → z.
-function childBounds(parent: Bounds, child: number): Bounds {
-  const mx = (parent.min[0] + parent.max[0]) * 0.5;
-  const my = (parent.min[1] + parent.max[1]) * 0.5;
-  const mz = (parent.min[2] + parent.max[2]) * 0.5;
-  return {
-    min: [
-      (child & 1) === 0 ? parent.min[0] : mx,
-      (child & 2) === 0 ? parent.min[1] : my,
-      (child & 4) === 0 ? parent.min[2] : mz,
-    ],
-    max: [
-      (child & 1) === 0 ? mx : parent.max[0],
-      (child & 2) === 0 ? my : parent.max[1],
-      (child & 4) === 0 ? mz : parent.max[2],
-    ],
-  };
-}
-
-function viewIntersectsBounds(planes: Plane[], b: Bounds): boolean {
-  for (const p of planes) {
-    const cx = p.nx >= 0 ? b.max[0] : b.min[0];
-    const cy = p.ny >= 0 ? b.max[1] : b.min[1];
-    const cz = p.nz >= 0 ? b.max[2] : b.min[2];
-    if (p.nx * cx + p.ny * cy + p.nz * cz + p.d < 0) return false;
-  }
-  return true;
-}
-
-function boundsCenterAndHalf(b: Bounds): { cx: number; cy: number; cz: number; half: number } {
-  const cx = (b.min[0] + b.max[0]) * 0.5;
-  const cy = (b.min[1] + b.max[1]) * 0.5;
-  const cz = (b.min[2] + b.max[2]) * 0.5;
-  const half = (b.max[0] - b.min[0]) * 0.5;
-  return { cx, cy, cz, half };
-}
-
-function collectCut(
-  sc: ParsedStarcloud,
-  rootBounds: Bounds,
-  camera: Camera,
-  planes: Plane[],
-  proj: Projection,
-  pixelThreshold: number,
-): { firstPoint: number; count: number }[] {
-  const out: { firstPoint: number; count: number }[] = [];
-
-  function walk(nodeIdx: number, bounds: Bounds): void {
-    if (!viewIntersectsBounds(planes, bounds)) return;
-    const cm = sc.nodes.childMask[nodeIdx];
-    const pCount = sc.nodes.pointCount[nodeIdx];
-    const pFirst = sc.nodes.pointFirst[nodeIdx];
-
-    if (cm === 0) {
-      if (pCount > 0) out.push({ firstPoint: pFirst, count: pCount });
-      return;
-    }
-
-    const { cx, cy, cz, half } = boundsCenterAndHalf(bounds);
-    const dx = cx - camera.eye[0], dy = cy - camera.eye[1], dz = cz - camera.eye[2];
-    const dist = Math.max(Math.hypot(dx, dy, dz), half);
-    const footprintPx = proj.footprintPx(half, dist, camera);
-
-    if (footprintPx < pixelThreshold && pCount > 0) {
-      out.push({ firstPoint: pFirst, count: pCount });
-      return;
-    }
-
-    let childIdx = sc.nodes.firstChild[nodeIdx];
-    for (let c = 0; c < 8; c++) {
-      if ((cm & (1 << c)) === 0) continue;
-      walk(childIdx, childBounds(bounds, c));
-      childIdx++;
-    }
-  }
-
-  if (sc.nodeCount > 0) walk(0, rootBounds);
-  return out;
-}
-
-function pointInView(planes: Plane[], px: number, py: number, pz: number): boolean {
-  for (const p of planes) {
-    if (p.nx * px + p.ny * py + p.nz * pz + p.d < 0) return false;
-  }
-  return true;
-}
-
 function* iterateStars(
   sc: ParsedStarcloud,
-  ranges: { firstPoint: number; count: number }[],
+  ranges: Range[],
   planes: Plane[],
 ): IterableIterator<Star> {
   const pf = sc.pointFloats;
@@ -274,12 +185,9 @@ async function main(): Promise<void> {
   const projection = ORTHO ? new OrthographicProjection(halfWidth, WIDTH, HEIGHT)
                            : new PerspectiveProjection(FOV_DEG, WIDTH, HEIGHT);
   const planes     = projection.buildCullingPlanes(camera, NEAR, far);
-  const rootBounds: Bounds = {
-    min: [-sc.halfExtentPc, -sc.halfExtentPc, -sc.halfExtentPc],
-    max: [sc.halfExtentPc, sc.halfExtentPc, sc.halfExtentPc],
-  };
+  const rootBounds = cubeBounds(sc.halfExtentPc);
 
-  const ranges = collectCut(sc, rootBounds, camera, planes, projection, PIXEL_THRESHOLD);
+  const ranges = collectCut(sc.nodes, rootBounds, camera, planes, projection, PIXEL_THRESHOLD);
   const starCount = ranges.reduce((a, r) => a + r.count, 0);
   console.log(`cut: ${ranges.length} node-ranges covering ${starCount} stars (M=${PIXEL_THRESHOLD}px)`);
 
