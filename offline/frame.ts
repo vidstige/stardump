@@ -72,8 +72,8 @@ export async function openFrames(
     for (const { node } of wanted) bytes += sc.pointCount[node] * POINT_BYTES;
     for (;;) {
       cache.update(wanted, bytes * CACHE_FACTOR);
+      while (cache.busy()) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
       if (!pending(wanted)) return;
-      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
   }
 

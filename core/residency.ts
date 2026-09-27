@@ -18,6 +18,8 @@ type Run = { nodes: number[]; footprint: number; bytes: number };
 
 export type Cache = {
   locate: Locate;
+  /** Whether anything is still queued or in flight from the last update. */
+  busy(): boolean;
   /** `memoryBudget` caps what is kept beyond the nodes currently wanted. */
   update(wanted: Wanted[], memoryBudget: number): void;
 };
@@ -32,7 +34,8 @@ export function createCache(
   const locations = new Map<number, Location>();
   const inFlight  = new Set<number>();
   let requests = 0;
-  let lastWanted: Wanted[] = [];
+  // Smallest footprint first, so pump takes the biggest off the end.
+  let queue: Run[] = [];
   let nextBatch = 0;
   let resident = 0;
   let tick = 0;
@@ -73,7 +76,7 @@ export function createCache(
       for (const node of nodes) inFlight.delete(node);
     }
     // Keep the pipe full rather than waiting for the next selection pass.
-    schedule(lastWanted);
+    pump();
   }
 
   function adjacent(run: Run, node: number): boolean {
@@ -102,19 +105,21 @@ export function createCache(
     return grouped;
   }
 
-  function schedule(wanted: Wanted[]): void {
-    const slots = MAX_REQUESTS - requests;
-    if (slots <= 0) return;
-    // Biggest on screen first, which also means shallow nodes before deep ones.
-    const queue = runs(wanted).sort((a, b) => b.footprint - a.footprint);
-    for (let i = 0; i < slots && i < queue.length; i++) void load(queue[i].nodes);
+  /**
+   * The queue is built once per selection pass and drained as requests
+   * complete. Rebuilding it per completed batch means sorting every wanted
+   * node again, which at a cut of tens of thousands of nodes costs far more
+   * than the reads it schedules.
+   */
+  function pump(): void {
+    while (requests < MAX_REQUESTS && queue.length > 0) void load(queue.pop()!.nodes);
   }
 
   return {
     locate: (node) => locations.get(node),
+    busy: () => requests > 0 || queue.length > 0,
     update(wanted, memoryBudget) {
       tick++;
-      lastWanted = wanted;
       const wantedNodes = new Set<number>();
       for (const { node } of wanted) {
         wantedNodes.add(node);
@@ -122,7 +127,9 @@ export function createCache(
         if (at) batches.get(at.batch)!.lastWanted = tick;
       }
       evict(wantedNodes, memoryBudget);
-      schedule(wanted);
+      // Biggest on screen first, which also means shallow nodes before deep ones.
+      queue = runs(wanted).sort((a, b) => a.footprint - b.footprint);
+      pump();
     },
   };
 }
