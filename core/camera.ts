@@ -1,4 +1,4 @@
-import { Mat4, lookAt, perspective } from "./mat4";
+import { Mat4, lookAt, perspective, transform } from "./mat4";
 import { Quaternion, rotate } from "./quaternion";
 import { Vec3, add } from "./vec3";
 
@@ -31,4 +31,13 @@ export function projectionMatrix(fovY: number, aspect: number, far: number): Mat
 /** Screen pixels spanned by one radian of vertical field of view. */
 export function pixelsPerRadian(heightPx: number, fovY: number): number {
   return heightPx / fovY;
+}
+
+/** Pixel position of a world point, or null when it is behind the camera. */
+export function toScreen(
+  position: Vec3, view: Mat4, projection: Mat4, width: number, height: number,
+): [number, number] | null {
+  const clip = transform(projection, transform(view, [...position, 1]));
+  if (clip[3] <= 0) return null;
+  return [(clip[0] / clip[3] + 1) * 0.5 * width, (1 - clip[1] / clip[3]) * 0.5 * height];
 }

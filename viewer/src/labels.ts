@@ -1,6 +1,7 @@
 // Named points of interest, drawn on a 2D overlay above the star field.
 
-import { Mat4, transform } from "../../core/mat4";
+import { toScreen } from "../../core/camera";
+import { Mat4 } from "../../core/mat4";
 import { Vec3, subtract } from "../../core/vec3";
 
 export type Label = { name: string; position: Vec3 };
@@ -16,15 +17,6 @@ export async function fetchLabels(url: string): Promise<Label[]> {
   if (!response.ok) return [];
   const named: Record<string, Vec3> = await response.json();
   return Object.entries(named).map(([name, position]) => ({ name, position }));
-}
-
-function toScreen(
-  position: Vec3, view: Mat4, projection: Mat4, width: number, height: number,
-): [number, number] | null {
-  const [x, y, z, w] = transform(view, [...position, 1]);
-  const clip = transform(projection, [x, y, z, w]);
-  if (clip[3] <= 0) return null;
-  return [(clip[0] / clip[3] + 1) * 0.5 * width, (1 - clip[1] / clip[3]) * 0.5 * height];
 }
 
 export function drawLabels(
