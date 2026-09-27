@@ -38,6 +38,8 @@ const SLIDERS: Slider[] = [
     format: (v) => `${v} px` },
   { key: "pointBudget", label: "Budget", min: 1e6, max: 32e6, step: 1e6, log: false,
     format: (v) => `${(v / 1e6).toFixed(0)}M` },
+  { key: "fovDeg", label: "Field of view", min: 15, max: 110, step: 1, log: false,
+    format: (v) => `${v}\u00b0` },
   { key: "far", label: "Far plane", min: 100, max: 8000, step: 100, log: false,
     format: (v) => `${v} pc` },
 ];

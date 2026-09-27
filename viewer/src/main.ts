@@ -10,7 +10,7 @@ import { Minimap, loadMinimap } from "./minimap";
 import { FromWorker, ToWorker } from "./protocol";
 import { createRenderer } from "../../core/renderer";
 import { SOURCES } from "./shaders";
-import { DEFAULT_SETTINGS } from "../../core/settings";
+import { DEFAULT_SETTINGS, fovY } from "../../core/settings";
 import { Vec3, subtract } from "../../core/vec3";
 
 /** Empty means the host serving the page, which is how the deployment runs. */
@@ -108,13 +108,14 @@ function frame(now: number): void {
     renderer.resize(width, height);
   }
 
-  const projection = projectionMatrix(width / height, settings.far);
+  const fov = fovY(settings);
+  const projection = projectionMatrix(fov, width / height, settings.far);
   const view = viewMatrix(camera);
   worker.postMessage({
     type: "view",
     eye: camera.position,
     frustum: fromViewProjection(multiply(projection, view)),
-    pixelsPerRadian: pixelsPerRadian(height),
+    pixelsPerRadian: pixelsPerRadian(height, fov),
     pixelThreshold: settings.pixelThreshold,
     pointBudget: settings.pointBudget,
   } as ToWorker);

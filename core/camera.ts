@@ -2,7 +2,6 @@ import { Mat4, lookAt, perspective } from "./mat4";
 import { Quaternion, rotate } from "./quaternion";
 import { Vec3, add } from "./vec3";
 
-export const FOV_Y = Math.PI / 3;
 export const NEAR_PC = 0.1;
 
 export type Camera = {
@@ -25,11 +24,11 @@ export function viewMatrix(camera: Camera): Mat4 {
   return lookAt(camera.position, add(camera.position, forward), up);
 }
 
-export function projectionMatrix(aspect: number, far: number): Mat4 {
-  return perspective(FOV_Y, aspect, NEAR_PC, far);
+export function projectionMatrix(fovY: number, aspect: number, far: number): Mat4 {
+  return perspective(fovY, aspect, NEAR_PC, far);
 }
 
 /** Screen pixels spanned by one radian of vertical field of view. */
-export function pixelsPerRadian(heightPx: number): number {
-  return heightPx / FOV_Y;
+export function pixelsPerRadian(heightPx: number, fovY: number): number {
+  return heightPx / fovY;
 }
