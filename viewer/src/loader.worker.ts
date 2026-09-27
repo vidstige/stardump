@@ -6,7 +6,8 @@ import { View, collectDraws, selectCut } from "../../core/lod";
 import { FromWorker, ToWorker } from "./protocol";
 import { Cache, createCache } from "../../core/residency";
 import { POINT_BYTES, Starcloud } from "../../core/starcloud";
-import { fetchStarcloud } from "../../core/starcloud_io";
+import { loadStarcloud } from "../../core/starcloud_io";
+import { httpRange } from "./http_range";
 
 const SELECT_INTERVAL_MS = 100;
 /** Room kept for nodes that have dropped out of view, over the cut itself. */
@@ -29,10 +30,11 @@ function post(message: FromWorker, transfer: Transferable[] = []): void {
 }
 
 async function init(url: string): Promise<void> {
-  const sc = await fetchStarcloud(url);
+  const read = httpRange(url);
+  const sc = await loadStarcloud(read);
   state = new Uint8Array(sc.childMask.length);
   cache = createCache(
-    sc, url,
+    sc, read,
     (batch, data) => { post({ type: "upload", batch, data }, [data]); stale = true; },
     (batch) => freed.push(batch),
   );

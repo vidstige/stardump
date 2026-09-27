@@ -7,7 +7,7 @@
 
 import { Locate, Location, Wanted } from "./lod";
 import { POINT_BYTES, Starcloud } from "./starcloud";
-import { fetchRange } from "./starcloud_io";
+import { ReadRange } from "./starcloud_io";
 
 const MAX_BATCH_BYTES = 1 << 20;
 const MAX_REQUESTS    = 12;
@@ -24,7 +24,7 @@ export type Cache = {
 
 export function createCache(
   sc: Starcloud,
-  url: string,
+  read: ReadRange,
   onUpload: (batch: number, data: ArrayBuffer) => void,
   onFree: (batch: number) => void,
 ): Cache {
@@ -62,7 +62,7 @@ export function createCache(
       const last = nodes[nodes.length - 1];
       const start = sc.pointsOffset + first * POINT_BYTES;
       const end = sc.pointsOffset + (sc.pointFirst[last] + sc.pointCount[last]) * POINT_BYTES - 1;
-      const data = await fetchRange(url, start, end);
+      const data = await read(start, end);
       const id = nextBatch++;
       batches.set(id, { id, nodes, bytes: data.byteLength, lastWanted: tick });
       for (const node of nodes) locations.set(node, { batch: id, first: sc.pointFirst[node] - first });
