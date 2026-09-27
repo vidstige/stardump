@@ -2,5 +2,6 @@
 .gitignore
 /target
 /viewer/node_modules
+/offline/node_modules
 /data
 /.env

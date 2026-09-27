@@ -1,8 +1,8 @@
 // Free-flight camera controls: WASD to move, mouse to look, Q/E to roll.
 
-import { Camera, basis } from "./camera";
-import { Quaternion, fromAxisAngle, multiply, normalize as normalizeQuaternion } from "./quaternion";
-import { Vec3, add, normalize, scale, subtract } from "./vec3";
+import { Camera, basis } from "../../core/camera";
+import { Quaternion, fromAxisAngle, multiply, normalize as normalizeQuaternion } from "../../core/quaternion";
+import { Vec3, add, normalize, scale, subtract } from "../../core/vec3";
 
 const SPEED_PC_PER_S = 2;
 const BOOST          = 20;

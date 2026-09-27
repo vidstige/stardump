@@ -6,3 +6,5 @@ __pycache__/
 /viewer/node_modules
 /.env
 /docs
+/offline/node_modules
+/renders

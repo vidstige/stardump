@@ -1,6 +1,6 @@
 // Messages between the page and the streaming worker.
 
-import { View } from "./lod";
+import { View } from "../../core/lod";
 
 export type ToWorker =
   | { type: "init"; url: string }

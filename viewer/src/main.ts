@@ -1,16 +1,16 @@
 // Page entry point: canvas, camera, and the pipe between worker and renderer.
 
-import { Camera, pixelsPerRadian, projectionMatrix, viewMatrix } from "./camera";
+import { Camera, pixelsPerRadian, projectionMatrix, viewMatrix } from "../../core/camera";
 import { attachControls } from "./controls";
-import { fromViewProjection } from "./frustum";
+import { fromViewProjection } from "../../core/frustum";
 import { Endpoint, createHud } from "./hud";
 import { Label, drawLabels, fetchLabels } from "./labels";
-import { multiply } from "./mat4";
+import { multiply } from "../../core/mat4";
 import { Minimap, loadMinimap } from "./minimap";
 import { FromWorker, ToWorker } from "./protocol";
-import { createRenderer } from "./renderer";
-import { DEFAULT_SETTINGS } from "./settings";
-import { Vec3, subtract } from "./vec3";
+import { createRenderer } from "../../core/renderer";
+import { DEFAULT_SETTINGS } from "../../core/settings";
+import { Vec3, subtract } from "../../core/vec3";
 
 /** Empty means the host serving the page, which is how the deployment runs. */
 const SAME_HOST = "";

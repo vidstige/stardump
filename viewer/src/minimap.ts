@@ -4,8 +4,8 @@
 // galactic axes: looking down the north pole, with the galactic centre to one
 // side. The camera sits at the centre of the crop and the arrow shows heading.
 
-import { Camera, basis } from "./camera";
-import { Vec3, cross, normalize, scale } from "./vec3";
+import { Camera, basis } from "../../core/camera";
+import { Vec3, cross, normalize, scale } from "../../core/vec3";
 
 /** Galactic north pole and galactic centre, equatorial J2000 cartesian. */
 const NORTH_POLE: Vec3 = [-0.86703, -0.20006, 0.45673];

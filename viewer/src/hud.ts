@@ -2,8 +2,8 @@
 // left, live readouts on the right. Switching endpoint or dataset reloads the
 // page with new query parameters rather than tearing the worker down.
 
-import { Camera } from "./camera";
-import { Settings } from "./settings";
+import { Camera } from "../../core/camera";
+import { Settings } from "../../core/settings";
 
 export type Endpoint = { label: string; url: string };
 

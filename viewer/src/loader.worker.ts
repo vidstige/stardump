@@ -1,12 +1,12 @@
 // Owns the octree, the level-of-detail cut and the streaming cache, so the
 // page thread only ever binds buffers and draws.
 
-import { Frustum } from "./frustum";
-import { View, collectDraws, selectCut } from "./lod";
+import { Frustum } from "../../core/frustum";
+import { View, collectDraws, selectCut } from "../../core/lod";
 import { FromWorker, ToWorker } from "./protocol";
-import { Cache, createCache } from "./residency";
-import { POINT_BYTES, Starcloud } from "./starcloud";
-import { fetchStarcloud } from "./starcloud_io";
+import { Cache, createCache } from "../../core/residency";
+import { POINT_BYTES, Starcloud } from "../../core/starcloud";
+import { fetchStarcloud } from "../../core/starcloud_io";
 
 const SELECT_INTERVAL_MS = 100;
 /** Room kept for nodes that have dropped out of view, over the cut itself. */

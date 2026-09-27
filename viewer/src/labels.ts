@@ -1,7 +1,7 @@
 // Named points of interest, drawn on a 2D overlay above the star field.
 
-import { Mat4, transform } from "./mat4";
-import { Vec3, subtract } from "./vec3";
+import { Mat4, transform } from "../../core/mat4";
+import { Vec3, subtract } from "../../core/vec3";
 
 export type Label = { name: string; position: Vec3 };
 
