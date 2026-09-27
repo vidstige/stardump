@@ -16,8 +16,7 @@ import { createRenderer } from "../core/renderer";
 import { createCache } from "../core/residency";
 import { Settings, fovY } from "../core/settings";
 import { POINT_BYTES } from "../core/starcloud";
-import { loadStarcloud } from "../core/starcloud_io";
-import { fileRange } from "./file_range";
+import { ReadRange, loadStarcloud } from "../core/starcloud_io";
 import { SOURCES } from "./shaders";
 
 /** Room kept for nodes the previous frame wanted, over the current cut. */
@@ -49,9 +48,8 @@ function flipToRgb(rgba: Uint8Array, width: number, height: number): Uint8Array 
 }
 
 export async function openFrames(
-  path: string, width: number, height: number,
+  read: ReadRange, width: number, height: number,
 ): Promise<Frames> {
-  const read = await fileRange(path);
   const sc = await loadStarcloud(read);
   const gl = createContext(width, height, { preserveDrawingBuffer: true });
   const renderer = createRenderer(gl, SOURCES);

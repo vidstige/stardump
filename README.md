@@ -8,7 +8,13 @@ The pipeline consists of:
 2. **Index build** — pack canonical data into a spatially indexed `starcloud.bin` octree with precomputed LOD subsamples
 3. **Query API** — serve the index over HTTP with radius queries and byte-range streaming
 4. **Viewer** — WebGL interactive star viewer that streams LOD nodes on demand
-5. **Offline renderer** — produce high-resolution PNG renders from a local or remote dataset
+5. **Offline renderer** — render stills and video from a local dataset, with no browser
+
+The viewer and the offline renderer are one renderer. `core/` holds everything
+both need — the octree, the level-of-detail cut, the streaming cache, the
+camera, the splat shaders — and the two sides differ only in how they reach the
+point table and how they decide a frame is finished. `viewer/src/` is the page
+around it; `offline/` is the Node side and the tour.
 
 Data references:
 - [Gaia DR3 overview](https://www.cosmos.esa.int/web/gaia/dr3)
@@ -34,11 +40,13 @@ Leaves have no subsample: they are drawn whole or not at all. At the default dep
 
 **Rendering** — Each star is projected onto the image plane and splatted as a Gaussian with radius proportional to its screen-space brightness. Flux falls off with distance squared. Colors are derived from the Gaia BP−RP color index. The HDR accumulation buffer is tone-mapped with a Reinhard curve and gamma-corrected (γ = 2.2) before writing to PNG.
 
+The shaders are GLSL ES 1.00 on WebGL 1.0, which is not the browser's ceiling but Node's: headless-gl is WebGL 1.0 and the WebGL2 bindings for Node are unmaintained, so the viewer came down to meet the offline renderer rather than keeping a second copy of the splat maths. The accumulation target picks half float where the context offers it, which browsers do and headless-gl does not, and full float otherwise.
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (Cargo) for the backend binaries
-- [Node.js](https://nodejs.org/) and npm for the viewer and offline renderers
-- `sips` (macOS built-in) or `convert` (ImageMagick) for PPM → PNG conversion
+- [Node.js](https://nodejs.org/) 18 or newer for the viewer and offline renderers
+- [ffmpeg](https://ffmpeg.org/) for image conversion, captions and video encoding
 
 ## Generating the data
 
@@ -144,7 +152,8 @@ no cross-origin preflight.
 Fly with **W/A/S/D**, hold **shift** to accelerate, roll with **Q/E**, and
 click the canvas to capture the mouse for looking around. The panel on the
 left tweaks exposure, splat size and radius, the level-of-detail threshold, the
-point budget and the far plane; the minimap shows where in the galactic plane the camera sits,
+point budget, the field of view and the far plane; the minimap shows where in
+the galactic plane the camera sits,
 and named stars from the dataset's `labels.json` are drawn as they come close.
 
 A worker owns the octree and does the level-of-detail work off the render
@@ -164,26 +173,66 @@ away every sibling that had already arrived.
 
 ## Offline renderer
 
-The offline renderers produce a PNG image of the sky without a running browser. Two modes are available:
-
-- **exact** — reads a local `starcloud.bin` and raycasts exact star positions
-- **fast** — queries a live HTTP API, caches downloaded nodes, and renders LOD subsamples
+`offline/` runs the viewer's renderer under Node, with no browser and no
+display. It needs one dependency, [headless-gl](https://github.com/stackgl/headless-gl):
 
 ```bash
-# Exact mode (requires local starcloud.bin under ./data/<dataset>/)
-sh sh/render.sh --mode exact --output /tmp/render.png
-
-# Fast mode (requires a running query API)
-sh sh/render.sh --mode fast --url http://127.0.0.1:3000 --output /tmp/render.png
-
-# Override dataset and output resolution
-sh sh/render.sh --mode exact \
-  --dataset 8fbfbc19d3f4d71f76b76fef607d4dfb \
-  --output /tmp/render.png \
-  --width 3840 --height 2160
+npm -C offline/ install
 ```
 
-The script auto-detects the first dataset in `./data/` if `--dataset` is omitted. Additional flags are forwarded to the renderer.
+What it changes about the viewer is two things and nothing else: the GL context
+comes from headless-gl instead of a canvas, and the shaders are read off disk
+instead of inlined by the bundler. Even the transport is shared — `fetch` is
+global in Node 18, so `--url` streams byte ranges from a query API exactly as
+the browser does, and a local dataset is the same `ReadRange` backed by a
+positioned file read.
+
+Everything that makes the picture is shared, which is why the shaders are GLSL
+ES 1.00: headless-gl is WebGL 1.0 and there is no usable WebGL2 in Node, so the
+viewer came down to meet it rather than keeping a second copy of the splat
+maths. Settings come from the viewer's own `DEFAULT_SETTINGS`, so a render and
+the page agree without anything being tuned twice.
+
+The third difference is not code but policy: the offline renderer blocks until
+every node of the cut is resident and then draws once, where the viewer draws
+what has arrived and refines over later frames. Same cut, same cache, opposite
+scheduling.
+
+```bash
+# The shared renderer, local index, 1920x1080
+sh sh/render.sh --mode fast --dir -0.055,-0.873,-0.484 --output renders/still.png
+
+# Same, streaming from a running query API
+sh sh/render.sh --mode fast --url http://127.0.0.1:3000 --output renders/still.png
+
+# Aimed at a labelled star, from 1.1 pc away, at a 35 degree field of view
+sh sh/render.sh --mode fast --at "Barnard's Star" --eye 0,-1.1,0.1 --fov 35 \
+  --output renders/barnard.png
+
+# The CPU reference: every leaf, no level of detail, no GPU
+sh sh/render.sh --mode exact --width 960 --height 540 --output renders/exact.png
+```
+
+`--output` writes P6 directly, which is what `render-check/compare.ts` reads,
+and hands anything else to ffmpeg. `--exposure`, `--size`, `--radius`,
+`--detail`, `--budget`, `--fov` and `--far` override the defaults; the dataset
+defaults to the first one under `./data/`.
+
+### Checking it against the viewer
+
+Since both sides run the same shaders on the same cut, the offline renderer can
+be measured against a browser screenshot of the viewer at the same camera. At
+960x540 on the defaults, all 135 tiles come in under an RMSE of 0.05 and the
+worst is 0.036. Total flux runs about 9% high, which is point sprite coverage
+rounding between the two GL implementations rather than anything shared: at a
+splat radius of 6 px, where a sprite spans 13 px instead of 4, the same
+measurement falls to 1.9%.
+
+`render-check/` holds the CPU reference that measurement is anchored to:
+`brightness.ts` rasterizes the same splat in TypeScript and `render-exact.ts`
+draws every leaf with no level of detail at all. That duplication is deliberate.
+Its LOD renderer is gone, though — it walked the octree a second time on the CPU
+to produce the same picture the shared renderer now produces on the GPU.
 
 ## Author
 Samuel Carlsson & Claude

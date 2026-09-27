@@ -1,35 +1,37 @@
 #!/usr/bin/env bash
-# Run the offline renderer and write a PNG.
+# Run an offline renderer and write an image.
 # Usage:
-#   sh/render.sh [--mode exact|fast] [--output FILE.png] [renderer args...]
-# Defaults: --mode exact, --output /tmp/stars.png,
+#   sh/render.sh [--mode fast|exact] [--output FILE.png] [renderer args...]
+# Defaults: --mode fast, --output renders/still.png,
 #           --dataset <first local dataset>.
+#
+#   fast  — the shared renderer: the viewer's octree, level-of-detail cut and
+#           shaders on the GPU, reading a local index or, with --url, a running
+#           query API. This is what the video renders with.
+#   exact — the CPU reference: every leaf, no level of detail, no GPU. Slow,
+#           and the thing the fast path is measured against.
+#
 # Extra flags are forwarded to the selected renderer.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
-output_png="/tmp/stars.png"
-mode="exact"
+output="renders/still.png"
+mode="fast"
 dataset=""
-have_dataset=0
-url="http://127.0.0.1:3000"
 forward_args=()
 
 while (( $# > 0 )); do
   case "$1" in
-    --output)  output_png="$2"; shift 2 ;;
+    --output)  output="$2"; shift 2 ;;
     --mode)    mode="$2"; shift 2 ;;
-    --dataset) dataset="$2"; have_dataset=1; shift 2 ;;
-    --url)     url="$2"; shift 2 ;;
+    --dataset) dataset="$2"; shift 2 ;;
     *)         forward_args+=("$1"); shift ;;
   esac
 done
 
-tsx=(npx tsx)
-
-if (( ! have_dataset )); then
+if [[ -z "$dataset" ]]; then
   dataset="$(ls "$repo_root/data" 2>/dev/null | head -n1 || true)"
   if [[ -z "$dataset" ]]; then
     echo "no dataset in $repo_root/data; pass --dataset" >&2
@@ -37,19 +39,18 @@ if (( ! have_dataset )); then
   fi
 fi
 
+mkdir -p "$(dirname "$output")"
+
 case "$mode" in
-  exact)
-    "${tsx[@]}" "$repo_root/render-check/render-exact.ts" \
-      --starcloud "$repo_root/data/$dataset/starcloud.bin" \
-      "${forward_args[@]}" --output "$output_png"
-    ;;
   fast)
-    "${tsx[@]}" "$repo_root/render-check/render-fast.ts" \
-      --url "$url" --dataset "$dataset" \
-      "${forward_args[@]}" --output "$output_png"
+    npx tsx "$repo_root/offline/still.ts" \
+      --dataset "$dataset" "${forward_args[@]}" --output "$output"
+    ;;
+  exact)
+    npx tsx "$repo_root/render-check/render-exact.ts" \
+      --starcloud "$repo_root/data/$dataset/starcloud.bin" \
+      "${forward_args[@]}" --output "$output"
     ;;
   *)
-    echo "unknown --mode '$mode' (expected exact|fast)" >&2; exit 1 ;;
+    echo "unknown --mode '$mode' (expected fast|exact)" >&2; exit 1 ;;
 esac
-
-echo "Saved $output_png"

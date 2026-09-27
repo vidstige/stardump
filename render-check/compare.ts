@@ -1,6 +1,7 @@
 import * as fs from "fs";
 
-// Compare two PPM P6 images produced by render-exact.ts and render-fast.ts.
+// Compare two PPM P6 images: the exact CPU reference against the shared
+// renderer, or any two renders of the same view.
 // Metrics:
 //   - flux ratio: sum(fast) / sum(exact) over all channels (target 0.9–1.1)
 //   - bright-pixel count: pixels where any channel > threshold (target within 5%)
