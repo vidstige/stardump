@@ -9,6 +9,7 @@ import { multiply } from "../../core/mat4";
 import { Minimap, loadMinimap } from "./minimap";
 import { FromWorker, ToWorker } from "./protocol";
 import { createRenderer } from "../../core/renderer";
+import { SOURCES } from "./shaders";
 import { DEFAULT_SETTINGS } from "../../core/settings";
 import { Vec3, subtract } from "../../core/vec3";
 
@@ -49,7 +50,9 @@ const overlayContext = overlay.getContext("2d")!;
 const minimapCanvas = document.querySelector<HTMLCanvasElement>("#minimap")!;
 
 const settings = { ...DEFAULT_SETTINGS };
-const renderer = createRenderer(canvas);
+const gl = canvas.getContext("webgl", { antialias: false, alpha: false, depth: false });
+if (!gl) throw new Error("WebGL is required");
+const renderer = createRenderer(gl, SOURCES);
 const camera = cameraFromParams();
 const control = attachControls(canvas, camera);
 const hud = createHud(settings, ENDPOINTS, api, camera);

@@ -1,9 +1,8 @@
-#version 300 es
 precision highp float;
 
-in vec3 position;
-in float luminosity;
-in float bpRp;
+attribute vec3 position;
+attribute float luminosity;
+attribute float bpRp;
 
 uniform mat4 projection;
 uniform mat4 view;
@@ -12,9 +11,9 @@ uniform float exposure;
 uniform float sizeScale;
 uniform float maxRadius;
 
-out vec3 vColor;
-out float vBrightness;
-out float vGaussCoeff;
+varying vec3 vColor;
+varying float vBrightness;
+varying float vGaussCoeff;
 
 /** Colour of a star with no measured bp_rp: the white point of the ramp. */
 const float UNKNOWN_COLOR = 1.0 / 3.0;

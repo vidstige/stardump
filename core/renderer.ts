@@ -1,14 +1,20 @@
-// WebGL2 star renderer: additive Gaussian splats accumulated into a half-float
-// HDR target, then Reinhard tone mapped and gamma corrected to the screen.
+// Star renderer: additive Gaussian splats accumulated into a floating point
+// HDR target, then Reinhard tone mapped and gamma corrected to the drawing
+// buffer. WebGL 1.0 / GLSL ES 1.00, which is the ceiling headless-gl offers,
+// so the browser and Node run the same shaders.
 
 import { Mat4 } from "./mat4";
 import { Settings } from "./settings";
 import { POINT_BYTES } from "./starcloud";
 import { Vec3 } from "./vec3";
-import starsVert from "./stars.vert.glsl";
-import starsFrag from "./stars.frag.glsl";
-import tonemapVert from "./tonemap.vert.glsl";
-import tonemapFrag from "./tonemap.frag.glsl";
+
+/** The four shader sources, however the host happens to obtain them. */
+export type Sources = {
+  starsVert: string;
+  starsFrag: string;
+  tonemapVert: string;
+  tonemapFrag: string;
+};
 
 export type Renderer = {
   resize(width: number, height: number): void;
@@ -20,7 +26,14 @@ export type Renderer = {
   ): void;
 };
 
-function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
+// Explicit and disjoint, so the two programs never fight over a slot and each
+// pass can simply enable its own attributes and disable the others.
+const POSITION   = 0;
+const LUMINOSITY = 1;
+const BP_RP      = 2;
+const QUAD       = 3;
+
+function compile(gl: WebGLRenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type)!;
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
@@ -30,10 +43,15 @@ function compile(gl: WebGL2RenderingContext, type: number, source: string): WebG
   return shader;
 }
 
-function link(gl: WebGL2RenderingContext, vert: string, frag: string): WebGLProgram {
+function link(
+  gl: WebGLRenderingContext, vert: string, frag: string, locations: Record<string, number>,
+): WebGLProgram {
   const program = gl.createProgram()!;
   gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vert));
   gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, frag));
+  for (const [name, slot] of Object.entries(locations)) {
+    gl.bindAttribLocation(program, slot, name);
+  }
   gl.linkProgram(program);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw new Error(gl.getProgramInfoLog(program) ?? "program link failed");
@@ -41,15 +59,29 @@ function link(gl: WebGL2RenderingContext, vert: string, frag: string): WebGLProg
   return program;
 }
 
-export function createRenderer(canvas: HTMLCanvasElement): Renderer {
-  const gl = canvas.getContext("webgl2", { antialias: false, alpha: false, depth: false });
-  if (!gl) throw new Error("WebGL2 is required");
-  if (!gl.getExtension("EXT_color_buffer_half_float") && !gl.getExtension("EXT_color_buffer_float")) {
-    throw new Error("half float render targets are required");
-  }
+const HALF_FLOAT_OES = 0x8d61;
 
-  const stars = link(gl, starsVert, starsFrag);
-  const tonemap = link(gl, tonemapVert, tonemapFrag);
+/**
+ * Pixel type for the accumulation buffer. Half float is half the memory and
+ * bandwidth and is what browsers, phones especially, are happiest rendering
+ * to; headless-gl offers no half float at all but does render to full float,
+ * despite advertising none of the colour buffer extensions.
+ */
+function hdrType(gl: WebGLRenderingContext): number {
+  const half = gl.getExtension("OES_texture_half_float") &&
+    gl.getExtension("EXT_color_buffer_half_float");
+  if (half) return HALF_FLOAT_OES;
+  if (gl.getExtension("OES_texture_float")) return gl.FLOAT;
+  throw new Error("floating point render targets are required");
+}
+
+export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Renderer {
+  const type = hdrType(gl);
+  const stars = link(gl, sources.starsVert, sources.starsFrag, {
+    position: POSITION, luminosity: LUMINOSITY, bpRp: BP_RP,
+  });
+  const tonemap = link(gl, sources.tonemapVert, sources.tonemapFrag, { position: QUAD });
+
   const uniform = (program: WebGLProgram, name: string) => gl.getUniformLocation(program, name);
   const uProjection = uniform(stars, "projection");
   const uView       = uniform(stars, "view");
@@ -58,13 +90,11 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
   const uSizeScale  = uniform(stars, "sizeScale");
   const uMaxRadius  = uniform(stars, "maxRadius");
 
-  const aPosition   = gl.getAttribLocation(stars, "position");
-  const aLuminosity = gl.getAttribLocation(stars, "luminosity");
-  const aBpRp       = gl.getAttribLocation(stars, "bpRp");
-
-  const vao = gl.createVertexArray();
-  gl.bindVertexArray(vao);
-  for (const attribute of [aPosition, aLuminosity, aBpRp]) gl.enableVertexAttribArray(attribute);
+  // One triangle large enough to cover the viewport, so the tone map pass
+  // needs no index buffer and no second draw.
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
 
   const hdr = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, hdr);
@@ -85,9 +115,9 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
 
   const bind = (batch: number) => {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(batch)!);
-    gl.vertexAttribPointer(aPosition,   3, gl.FLOAT, false, POINT_BYTES, 0);
-    gl.vertexAttribPointer(aLuminosity, 1, gl.FLOAT, false, POINT_BYTES, 12);
-    gl.vertexAttribPointer(aBpRp,       1, gl.FLOAT, false, POINT_BYTES, 16);
+    gl.vertexAttribPointer(POSITION,   3, gl.FLOAT, false, POINT_BYTES, 0);
+    gl.vertexAttribPointer(LUMINOSITY, 1, gl.FLOAT, false, POINT_BYTES, 12);
+    gl.vertexAttribPointer(BP_RP,      1, gl.FLOAT, false, POINT_BYTES, 16);
   };
 
   return {
@@ -95,7 +125,7 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       width = w;
       height = h;
       gl.bindTexture(gl.TEXTURE_2D, hdr);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, type, null);
     },
 
     upload(batch, data) {
@@ -125,7 +155,8 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       gl.uniform1f(uMaxRadius, settings.maxRadius);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE);
-      gl.bindVertexArray(vao);
+      gl.disableVertexAttribArray(QUAD);
+      for (const slot of [POSITION, LUMINOSITY, BP_RP]) gl.enableVertexAttribArray(slot);
 
       let bound = -1;
       for (let i = 0; i < ranges.length; i += 3) {
@@ -138,8 +169,11 @@ export function createRenderer(canvas: HTMLCanvasElement): Renderer {
       gl.disable(gl.BLEND);
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.bindVertexArray(null);
       gl.useProgram(tonemap);
+      for (const slot of [POSITION, LUMINOSITY, BP_RP]) gl.disableVertexAttribArray(slot);
+      gl.enableVertexAttribArray(QUAD);
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.vertexAttribPointer(QUAD, 2, gl.FLOAT, false, 0, 0);
       gl.bindTexture(gl.TEXTURE_2D, hdr);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
