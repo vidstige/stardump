@@ -234,5 +234,58 @@ draws every leaf with no level of detail at all. That duplication is deliberate.
 Its LOD renderer is gone, though — it walked the octree a second time on the CPU
 to produce the same picture the shared renderer now produces on the GPU.
 
+## Rendering a tour
+
+`offline/render.ts` renders a contiguous run of frames of a camera tour into
+one H.264 segment, and `offline/video.ts` splits a whole film across processes
+and joins the segments without re-encoding.
+
+```bash
+# Sketch: 640x360, coarse, a couple of minutes
+npx tsx offline/video.ts --dataset f236745 --sketch
+
+# Full size
+npx tsx offline/video.ts --dataset f236745 --width 1920 --height 1080 --jobs 4
+```
+
+Contiguous is what matters. Starting Node, opening the index and compiling the
+shaders costs about a second, and consecutive frames want almost the same
+nodes, so a process that keeps its streaming cache warm across a thousand
+frames is far ahead of one that renders a frame and exits. A three minute
+sketch takes about a minute across three jobs.
+
+`offline/caption.ts` draws a star's name with ffmpeg — which has to be here for
+the video anyway, and brings a real typeface with it — and adds it to the
+picture rather than blending it over, so no alpha channel has to survive the
+round trip.
+
+`offline/rotation.ts` is what makes a camera move read as one flow rather than
+as a sequence of moves. Holding a star while orbiting it turns the camera at
+the orbit rate; swinging onto the next star turns it at whatever the swing
+asks. Slerping between the two leaves at whatever rate its endpoints imply, so
+the join jolts however smoothly the orientations are interpolated. A cubic on
+the quaternion sphere, control points one third of the span along each end
+tangent, matches angular velocity as well as orientation, and the join
+disappears.
+
+**The tour itself is not in the repo.** Which stars, in what order, and how the
+camera moves between them is the film rather than the machinery, so
+`offline/tour.ts` ships as a placeholder that drifts a parsec in a straight
+line; drop your own `buildTour` in its place. Everything around it is
+indifferent to what the camera does.
+
+The film look is the viewer's own `DEFAULT_SETTINGS`, at full size, so a render
+and the page agree without anything being tuned twice. A sketch is the one
+thing that cannot: a ninth of the pixels means nine times as many stars land in
+each, and its coarser level-of-detail threshold takes some of that back by
+drawing a third as many. It carries an exposure of its own for that, in
+`video.ts`, chosen by matching a sketch frame against the full size render of
+the same view. It is the one way a sketch does not preview the final.
+
+```bash
+npx tsx offline/rotation.test.ts
+npm -C offline/ run check    # typecheck
+```
+
 ## Author
 Samuel Carlsson & Claude
