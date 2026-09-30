@@ -6,6 +6,7 @@
 // least-recently-wanted first once the memory budget is exceeded.
 
 import { Locate, Location, Wanted } from "./lod";
+import { Run, groupRuns, runBytes } from "./runs";
 import { POINT_BYTES, Starcloud } from "./starcloud";
 import { ReadRange } from "./starcloud_io";
 
@@ -13,8 +14,6 @@ const MAX_BATCH_BYTES = 1 << 20;
 const MAX_REQUESTS    = 12;
 
 type Batch = { id: number; nodes: number[]; bytes: number; lastWanted: number };
-
-type Run = { nodes: number[]; footprint: number; bytes: number };
 
 export type Cache = {
   locate: Locate;
@@ -62,9 +61,7 @@ export function createCache(
     requests++;
     try {
       const first = sc.pointFirst[nodes[0]];
-      const last = nodes[nodes.length - 1];
-      const start = sc.pointsOffset + first * POINT_BYTES;
-      const end = sc.pointsOffset + (sc.pointFirst[last] + sc.pointCount[last]) * POINT_BYTES - 1;
+      const [start, end] = runBytes(sc, { nodes, footprint: 0, bytes: 0 });
       const data = await read(start, end);
       const id = nextBatch++;
       batches.set(id, { id, nodes, bytes: data.byteLength, lastWanted: tick });
@@ -79,30 +76,12 @@ export function createCache(
     pump();
   }
 
-  function adjacent(run: Run, node: number): boolean {
-    const tail = run.nodes[run.nodes.length - 1];
-    return sc.pointFirst[node] === sc.pointFirst[tail] + sc.pointCount[tail];
-  }
-
   /** Groups the missing nodes into runs that are contiguous on the server. */
   function runs(wanted: Wanted[]): Run[] {
     const missing = wanted
       .filter((w) => sc.pointCount[w.node] > 0 && !locations.has(w.node) && !inFlight.has(w.node))
       .sort((a, b) => sc.pointFirst[a.node] - sc.pointFirst[b.node]);
-
-    const grouped: Run[] = [];
-    for (const { node, footprint } of missing) {
-      const bytes = sc.pointCount[node] * POINT_BYTES;
-      const run = grouped[grouped.length - 1];
-      if (run && adjacent(run, node) && run.bytes + bytes <= MAX_BATCH_BYTES) {
-        run.nodes.push(node);
-        run.bytes += bytes;
-        run.footprint = Math.max(run.footprint, footprint);
-      } else {
-        grouped.push({ nodes: [node], footprint, bytes });
-      }
-    }
-    return grouped;
+    return groupRuns(sc, missing, MAX_BATCH_BYTES);
   }
 
   /**

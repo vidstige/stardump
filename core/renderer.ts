@@ -20,7 +20,18 @@ export type Renderer = {
   resize(width: number, height: number): void;
   upload(batch: number, data: ArrayBuffer): void;
   free(batch: number): void;
+  /**
+   * A pass is begin, any number of draws, end. Splats accumulate additively
+   * with no depth test, so the draws are order independent and may be split
+   * however the caller likes — which is what lets an offline frame upload its
+   * stars a chunk at a time and free each one before the next, instead of
+   * holding the whole cut on the GPU at once.
+   */
+  begin(projection: Mat4, view: Mat4, eye: Vec3, settings: Settings): void;
   /** `ranges` holds [batch, firstPoint, pointCount] triples. */
+  draw(ranges: Int32Array): void;
+  end(): void;
+  /** The whole pass at once, for a caller that already has everything. */
   render(
     projection: Mat4, view: Mat4, eye: Vec3, ranges: Int32Array, settings: Settings,
   ): void;
@@ -128,8 +139,13 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, type, null);
     },
 
+    // Uploading over a batch reuses its buffer rather than making a new one.
+    // Deleting a buffer and immediately creating another loses the draws that
+    // used it under headless-gl, so a caller that streams the same slot over
+    // and over — an offline frame drawing its cut a chunk at a time — must be
+    // able to re-specify one rather than churn through names.
     upload(batch, data) {
-      const buffer = gl.createBuffer()!;
+      const buffer = buffers.get(batch) ?? gl.createBuffer()!;
       gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
       gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
       buffers.set(batch, buffer);
@@ -140,7 +156,7 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       buffers.delete(batch);
     },
 
-    render(projection, view, eye, ranges, settings) {
+    begin(projection, view, eye, settings) {
       gl.viewport(0, 0, width, height);
       gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
       gl.clearColor(0, 0, 0, 1);
@@ -157,7 +173,9 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.disableVertexAttribArray(QUAD);
       for (const slot of [POSITION, LUMINOSITY, BP_RP]) gl.enableVertexAttribArray(slot);
+    },
 
+    draw(ranges) {
       let bound = -1;
       for (let i = 0; i < ranges.length; i += 3) {
         if (ranges[i] !== bound) {
@@ -166,8 +184,10 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
         }
         gl.drawArrays(gl.POINTS, ranges[i + 1], ranges[i + 2]);
       }
-      gl.disable(gl.BLEND);
+    },
 
+    end() {
+      gl.disable(gl.BLEND);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.useProgram(tonemap);
       for (const slot of [POSITION, LUMINOSITY, BP_RP]) gl.disableVertexAttribArray(slot);
@@ -176,6 +196,12 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.vertexAttribPointer(QUAD, 2, gl.FLOAT, false, 0, 0);
       gl.bindTexture(gl.TEXTURE_2D, hdr);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+    },
+
+    render(projection, view, eye, ranges, settings) {
+      this.begin(projection, view, eye, settings);
+      this.draw(ranges);
+      this.end();
     },
   };
 }

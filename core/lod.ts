@@ -31,6 +31,13 @@ export type Cut = {
   state: Uint8Array;
 };
 
+/** The nodes a cut actually draws: the ones it did not refine past. */
+export function drawn(sc: Starcloud, cut: Cut): Wanted[] {
+  return cut.wanted.filter(
+    (w) => cut.state[w.node] === CUT && sc.pointCount[w.node] > 0,
+  );
+}
+
 const SQRT3 = Math.sqrt(3);
 
 function footprint(sc: Starcloud, node: number, view: View): number {

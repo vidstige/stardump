@@ -1,32 +1,41 @@
 // Offline frame rendering: the viewer core, fulfilled the other way round.
 //
-// The viewer asks for a cut, draws whatever has arrived and refines over
-// later frames. Here we block until every wanted node is resident and then
-// draw once, so a frame is deterministic and never half loaded. Everything
-// else — the octree, the cut, the streaming cache, the shaders — is the
-// viewer's, unchanged.
+// The viewer asks for a cut, draws whatever has arrived and refines over later
+// frames, keeping it all on the GPU because the next frame wants most of it
+// again. An offline frame has the opposite problem. Nothing is interactive, but
+// the cut is enormous — at 1080p it is very nearly every star in the frustum,
+// since a leaf carries no subsample to stand in for it and so is always taken
+// whole, and that runs to a gigabyte of vertex buffers. Holding it took this
+// machine into swap and stalled it.
+//
+// So it is not held. Splats accumulate additively with no depth test, which
+// makes the draws order independent and splittable: the cut is read, uploaded,
+// drawn and freed a chunk at a time, and the peak is CHUNK_BYTES rather than
+// the whole cut. The picture is identical — addition commutes.
+//
+// Each frame re-reads its own cut rather than caching it across frames. That
+// costs a sequential pass over the wanted bytes, which the page cache largely
+// absorbs since consecutive frames want nearly the same ones, and it puts the
+// memory somewhere the operating system can reclaim under pressure instead of
+// in GPU allocations it cannot touch.
 
 import createContext from "gl";
 
 import { Camera, pixelsPerRadian, projectionMatrix, viewMatrix } from "../core/camera";
 import { fromViewProjection } from "../core/frustum";
-import { Wanted, collectDraws, selectCut } from "../core/lod";
+import { drawn, selectCut } from "../core/lod";
 import { multiply } from "../core/mat4";
 import { createRenderer } from "../core/renderer";
-import { createCache } from "../core/residency";
+import { Run, groupRuns, runBytes } from "../core/runs";
 import { Settings, fovY } from "../core/settings";
 import { POINT_BYTES } from "../core/starcloud";
 import { ReadRange, loadStarcloud } from "../core/starcloud_io";
 import { SOURCES } from "./shaders";
 
-/**
- * Room kept for nodes the previous frame wanted, over the current cut. Nodes
- * the current frame wants are never evicted whatever this is, so it only sets
- * how much history is held — and at a 1080p cut of 50M points, a full frame of
- * history is a gigabyte the machine may not have.
- */
-const CACHE_FACTOR = 1.25;
-const POLL_MS = 1;
+/** How much of the cut is on the GPU at once. */
+const CHUNK_BYTES = 64 << 20;
+/** The single buffer every chunk is uploaded over. */
+const CHUNK = 0;
 
 export type Frame = { rgb: Uint8Array; stars: number };
 
@@ -36,8 +45,7 @@ export type Frames = {
 };
 
 /** Bottom-up RGBA as readPixels gives it, to top-down RGB as everyone wants it. */
-function flipToRgb(rgba: Uint8Array, width: number, height: number): Uint8Array {
-  const rgb = new Uint8Array(width * height * 3);
+function flipToRgb(rgba: Uint8Array, rgb: Uint8Array, width: number, height: number): void {
   for (let y = 0; y < height; y++) {
     let from = (height - 1 - y) * width * 4;
     let to = y * width * 3;
@@ -49,7 +57,6 @@ function flipToRgb(rgba: Uint8Array, width: number, height: number): Uint8Array 
       to += 3;
     }
   }
-  return rgb;
 }
 
 export async function openFrames(
@@ -59,26 +66,17 @@ export async function openFrames(
   const gl = createContext(width, height, { preserveDrawingBuffer: true });
   const renderer = createRenderer(gl, SOURCES);
   renderer.resize(width, height);
-  const cache = createCache(sc, read, renderer.upload, renderer.free);
   const state = new Uint8Array(sc.childMask.length);
   const rgba = new Uint8Array(width * height * 4);
+  const rgb = new Uint8Array(width * height * 3);
 
-  const pending = (wanted: Wanted[]) =>
-    wanted.some((w) => sc.pointCount[w.node] > 0 && !cache.locate(w.node));
-
-  /**
-   * The budget follows the cut rather than capping it, so the cache can never
-   * be asked to hold less than the frame needs and evict what it just read.
-   */
-  async function fill(wanted: Wanted[]): Promise<void> {
-    let bytes = 0;
-    for (const { node } of wanted) bytes += sc.pointCount[node] * POINT_BYTES;
-    for (;;) {
-      cache.update(wanted, bytes * CACHE_FACTOR);
-      while (cache.busy()) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-      if (!pending(wanted)) return;
-    }
-  }
+  // A run is contiguous in the point table by construction, so the whole of it
+  // is one span of one buffer and one draw call.
+  const span = (run: Run) => {
+    let points = 0;
+    for (const node of run.nodes) points += sc.pointCount[node];
+    return Int32Array.of(0, 0, points);
+  };
 
   return {
     halfExtentPc: sc.halfExtentPc,
@@ -98,15 +96,29 @@ export async function openFrames(
         settings.pointBudget,
         state,
       );
-      await fill(cut.wanted);
 
-      const ranges = collectDraws(sc, cut, cache.locate);
-      renderer.render(projection, view, camera.position, ranges, settings);
-      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      const wanted = drawn(sc, cut)
+        .sort((a, b) => sc.pointFirst[a.node] - sc.pointFirst[b.node]);
+      const runs = groupRuns(sc, wanted, CHUNK_BYTES);
 
+      renderer.begin(projection, view, camera.position, settings);
+      // One chunk ahead, so the next read overlaps the current draw.
+      let pending = runs.length > 0 ? read(...runBytes(sc, runs[0])) : null;
       let stars = 0;
-      for (let i = 2; i < ranges.length; i += 3) stars += ranges[i];
-      return { rgb: flipToRgb(rgba, width, height), stars };
+      for (let i = 0; i < runs.length; i++) {
+        const data = await pending!;
+        pending = i + 1 < runs.length ? read(...runBytes(sc, runs[i + 1])) : null;
+        // One buffer, re-specified per chunk. The read for the next chunk is
+        // already in flight while this one uploads and draws.
+        renderer.upload(CHUNK, data);
+        renderer.draw(span(runs[i]));
+        stars += runs[i].bytes / POINT_BYTES;
+      }
+      renderer.end();
+
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      flipToRgb(rgba, rgb, width, height);
+      return { rgb, stars };
     },
   };
 }
