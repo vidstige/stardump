@@ -41,14 +41,32 @@ const fps = args.number("fps", 30);
 // buffers, and a second job alongside it put this 8 GB machine into swap hard
 // enough to stall both. Sketch frames are a ninth the size and parallelise.
 const jobs = args.number("jobs", sketch ? 3 : 1);
+
+/**
+ * Frames per process, at full size. A long render slows to a crawl on a machine
+ * this size — a 4 GiB index streamed through the page cache leaves nothing for
+ * the vertex buffers, and the same frames that take 0.7 s from a fresh process
+ * were taking 25 s by frame 121 of one long one. Ending the process every few
+ * hundred frames hands all of it back. A sketch touches a fraction of the index
+ * and just splits the film one way per job.
+ */
+const SEGMENT_FRAMES = 250;
 const output = args.text("output", sketch ? "renders/tour-sketch.mp4" : "renders/tour.mp4");
 
-/** Contiguous, near equal frame ranges, one per process. */
-function ranges(total: number, count: number): [number, number][] {
-  const size = Math.ceil(total / count);
+/** Contiguous frame ranges of at most `size` frames each. */
+function ranges(total: number, size: number): [number, number][] {
   const out: [number, number][] = [];
   for (let at = 0; at < total; at += size) out.push([at, Math.min(at + size, total)]);
   return out;
+}
+
+/** Runs `work` with at most `width` of them going at once, in order. */
+async function pool<T>(work: (() => Promise<T>)[], width: number): Promise<void> {
+  const queue = [...work];
+  const run = async (): Promise<void> => {
+    for (let next = queue.shift(); next; next = queue.shift()) await next();
+  };
+  await Promise.all(Array.from({ length: Math.min(width, work.length) }, run));
 }
 
 function renderSegment(segment: string, [first, last]: [number, number]): Promise<void> {
@@ -87,15 +105,18 @@ async function main(): Promise<void> {
   const started = Date.now();
   const tour = buildTour(labels(dataset));
   const total = Math.round(tour.duration * fps);
-  const work = ranges(total, jobs);
+  const size = args.number(
+    "segment", sketch ? Math.ceil(total / jobs) : SEGMENT_FRAMES,
+  );
+  const work = ranges(total, size);
   console.log(
     `${output}: ${tour.duration.toFixed(1)}s, ${total} frames at ${width}x${height}, ` +
-    `${work.length} jobs`,
+    `${work.length} segments, ${jobs} at a time`,
   );
 
   fs.mkdirSync(path.dirname(output), { recursive: true });
   const segments = work.map((_, i) => `${output.replace(/\.mp4$/, "")}.part${i}.mp4`);
-  await Promise.all(work.map((range, i) => renderSegment(segments[i], range)));
+  await pool(work.map((range, i) => () => renderSegment(segments[i], range)), jobs);
   join(segments);
   for (const segment of segments) fs.unlinkSync(segment);
   console.log(`${output} in ${((Date.now() - started) / 1000 / 60).toFixed(1)} min`);
