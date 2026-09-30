@@ -43,14 +43,15 @@ const fps = args.number("fps", 30);
 const jobs = args.number("jobs", sketch ? 3 : 1);
 
 /**
- * Frames per process, at full size. A long render slows to a crawl on a machine
- * this size — a 4 GiB index streamed through the page cache leaves nothing for
- * the vertex buffers, and the same frames that take 0.7 s from a fresh process
- * were taking 25 s by frame 121 of one long one. Ending the process every few
- * hundred frames hands all of it back. A sketch touches a fraction of the index
- * and just splits the film one way per job.
+ * Frames per process, at full size. A render slows to a crawl on a machine this
+ * size: a frame streams most of a gigabyte out of a 4 GiB index, and however
+ * little the process itself holds, something accumulates until everything
+ * crawls. The same frames that run at 1.1 a second from a fresh process were
+ * taking 14 s each by frame 121 of a long one. Ending the process often hands
+ * it all back, and the measured safe life is under a hundred frames. A sketch
+ * touches a fraction of the index and just splits the film one way per job.
  */
-const SEGMENT_FRAMES = 250;
+const SEGMENT_FRAMES = 60;
 const output = args.text("output", sketch ? "renders/tour-sketch.mp4" : "renders/tour.mp4");
 
 /** Contiguous frame ranges of at most `size` frames each. */
