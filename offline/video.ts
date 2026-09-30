@@ -18,14 +18,22 @@ import { buildTour } from "./tour";
 // again.
 const SKETCH = {
   width: 640, height: 360, budget: 5_000_000, detail: 22, crf: 25, exposure: 330,
+  preset: "medium",
 };
+
+// Above the largest cut a 1080p frame asks for, measured at 53.9M looking into
+// the galactic centre, so the budget never truncates one: every node the level
+// of detail selects is waited for and drawn.
+const FULL_BUDGET = 64_000_000;
 
 const sketch = args.flag("sketch");
 const width = args.number("width", sketch ? SKETCH.width : 1920);
 const height = args.number("height", sketch ? SKETCH.height : 1080);
-const budget = args.number("budget", sketch ? SKETCH.budget : 16_000_000);
+const budget = args.number("budget", sketch ? SKETCH.budget : FULL_BUDGET);
 const detail = args.number("detail", sketch ? SKETCH.detail : 16);
-const crf = args.number("crf", sketch ? SKETCH.crf : 19);
+const crf = args.number("crf", sketch ? SKETCH.crf : 12);
+const preset = args.text("preset", sketch ? SKETCH.preset : "slow");
+const pixelFormat = args.text("pix-fmt", "yuv420p");
 const exposure = args.number("exposure", sketch ? SKETCH.exposure : 0);
 const url = args.text("url", "");
 const fps = args.number("fps", 30);
@@ -46,7 +54,7 @@ function renderSegment(segment: string, [first, last]: [number, number]): Promis
     "--dataset", dataset,
     "--width", String(width), "--height", String(height),
     "--fps", String(fps), "--budget", String(budget), "--detail", String(detail),
-    "--crf", String(crf),
+    "--crf", String(crf), "--preset", preset, "--pix-fmt", pixelFormat,
     ...(exposure > 0 ? ["--exposure", String(exposure)] : []),
     ...(url ? ["--url", url] : []),
     "--from", String(first), "--to", String(last),

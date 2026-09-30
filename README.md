@@ -245,8 +245,35 @@ and joins the segments without re-encoding.
 npx tsx offline/video.ts --dataset f236745 --sketch
 
 # Full size
-npx tsx offline/video.ts --dataset f236745 --width 1920 --height 1080 --jobs 4
+npx tsx offline/video.ts --dataset f236745 --jobs 2
 ```
+
+A full render draws every node the level of detail asks for and waits for all
+of it: the point budget is set above the largest cut a 1080p frame wants, which
+is 53.9M points looking into the galactic centre, so it never truncates one.
+That runs at about 2 frames a second, half an hour for the film across two
+jobs.
+
+Encoding a star field is its own problem — it is nearly all fine detail, so it
+compresses badly and artefacts show. The setting that matters is not the
+obvious one. A star is one pixel and its colour is the whole of what it
+carries, so 4:2:0 chroma, which averages colour over 2x2, costs real fidelity;
+meanwhile the chroma planes of a mostly black frame are almost free to code at
+full resolution. Measured over 60 frames of the rush against the raw renderer
+output:
+
+| | size | PSNR |
+|---|---|---|
+| crf 19, medium, 4:2:0 | 11.7 MB | 37.6 dB |
+| crf 12, slow, 4:2:0 | 27.4 MB | 44.2 dB |
+| crf 12, slow, 4:4:4 | 27.2 MB | 45.1 dB |
+| crf 12, slow, 4:4:4 10-bit | 26.9 MB | 45.4 dB |
+| HEVC crf 12, slow | 30.6 MB | 45.5 dB |
+
+4:4:4 is both smaller and better, twice over, and HEVC does not make the
+difference back. The default is still 4:2:0 because 4:4:4 will not open in
+QuickTime, Safari or Chrome; `--pix-fmt yuv444p10le` is the master if you are
+watching in VLC or mpv. `--crf` and `--preset` are there too.
 
 Contiguous is what matters. Starting Node, opening the index and compiling the
 shaders costs about a second, and consecutive frames want almost the same
@@ -291,18 +318,30 @@ visiting the neighbours nearest first, the obvious route, is the worst of all
 which is what this uses. Insisting on the 51 Pegasi finale costs almost
 nothing: the best ordering ignoring the ending manages 26.
 
-The two ends are not orbits, which is the other thing matching angular velocity
-across a join buys. It **opens** at the Sun with the sky turning about the
-celestial pole — the frame is equatorial, so that axis is simply z — through 40
-degrees, unwinding to nothing by the end. The film therefore leaves from a
-camera that has just come to rest, and sets off for the first star without
-having to stop the spin first.
+The two ends obey different rules again, which is the other thing matching
+angular velocity across a join buys — it lets three unlike things read as one
+flow.
 
-It **closes** by accelerating out along the line to the galactic centre, cubic
-in time, 200 pc in thirteen seconds ending at 46 pc/s with the stars streaming
-past. It runs towards the centre rather than away from anything, so the field
-ahead only thickens: the view from where it stops is as full as the view from
-the Sun, and no edge of the catalogue ever comes into frame.
+The **intro** only turns. The camera stands at the Sun and spins at 2 degrees a
+second with no translation whatsoever, while the picture comes up from black on
+the exposure, so the stars emerge brightest first rather than the whole frame
+being turned up. The axis is derived rather than chosen, because two things
+have to land at once: it sits 9 degrees below the direction the camera ends up
+aimed, which puts the one point of sky a turn leaves alone just below the
+middle of the frame — without that on screen there is nothing to see the turn
+against and the shot reads as a drift — and the turn is wound backwards from
+its end, so it finishes pointing exactly where the tour sets off whatever its
+rate or duration. The Sun is where the intro stands, not something it shows, so
+the tour proper starts at the first star.
+
+The **outro** only accelerates, and has no transition into it at all. It picks
+the last showcase up exactly where that leaves off — same place, same velocity,
+same orientation still turning at the same rate — and opens the throttle, cubic
+in time, 800 pc in thirteen seconds. Which way it runs is free, since the swing
+onto a heading costs nothing, and it matters: the line the camera happens to be
+looking down leaves the galactic disc, and 800 pc along it the field has visibly
+thinned. Flattening that line into the plane costs 22 degrees of swing and buys
+a field that never thins, so no edge of the catalogue is ever in frame.
 
 The picture comes up and goes down on the **exposure** rather than on the
 finished frame, so stars come out of the black brightest first, the way they do

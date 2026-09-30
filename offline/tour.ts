@@ -1,22 +1,27 @@
 // The tour: which stars, in what order, and how the camera moves between them.
 //
-// Two phases, and one flow through both. In a showcase the camera orbits a
-// star with the star pinned dead centre, so the star is the one thing in the
-// picture that does not move while everything within a few parsecs slides
-// behind it. In a transition it flies to the next star and swings onto it.
+// Three parts under three rules.
 //
-// What holds the two together is the join, not a single pace. A showcase pans
-// at ORBIT and a transition is free to swing harder, but a transition leaves
-// and arrives at exactly the rate whatever is either side of it is turning, so
-// nothing jolts on the way in or out. Matching that takes more than matching
-// orientation, since slerp leaves at whatever rate its endpoints imply; that is
-// what rotation.ts is for. It is also what lets the two ends of the film be
-// something other than an orbit and still belong to the same flow.
+// The **intro** only turns. The camera stands still at the Sun, no translation
+// at all, and spins about an axis picked so two things come out right at once:
+// the point of sky the turn pins lands just below the middle of the frame, and
+// the turn finishes aimed at the first star.
 //
-// Both phases move and turn at once. Turning on the spot and then flying in a
+// The **tour** alternates showcase and transition. In a showcase the camera
+// orbits a star with the star pinned dead centre, so the star is the one thing
+// in the picture that does not move while everything within a few parsecs
+// slides behind it; in a transition it flies to the next star and swings onto
+// it. Both move and turn at once. Turning on the spot and then flying in a
 // straight stare is what an earlier cut of this did, and it looked anxious: no
 // parallax while turning, no turning while moving, and the rate swinging
 // twentyfold between the two.
+//
+// The **outro** only accelerates. It picks the last showcase up exactly where
+// that leaves off and opens the throttle, with no transition in between.
+//
+// What lets three such different rules read as one flow is that every join
+// matches angular velocity, not just orientation. Slerp leaves at whatever
+// rate its endpoints imply, so it cannot do that; rotation.ts can.
 //
 // Transitions are paced by speed rather than by duration: a transition lasts as
 // long as its distance needs, so short hops are over quickly. Where the turn is
@@ -29,7 +34,7 @@
 
 import { Camera } from "../core/camera";
 import { Quaternion, fromAxisAngle, lookRotation, multiply, rotate } from "../core/quaternion";
-import { Vec3, add, cross, normalize, scale, subtract } from "../core/vec3";
+import { Vec3, add, cross, dot, normalize, scale, subtract } from "../core/vec3";
 import { Labels } from "./dataset";
 import { angularVelocity, sweep, turnAngle } from "./rotation";
 
@@ -43,15 +48,19 @@ const MIN_TRANSIT = 3.5;
 
 const SHOWCASE = 9;
 
-/** The opening: seconds at the Sun, and degrees the sky turns in them. */
+/** The opening: seconds spent turning on the spot, and degrees a second. */
 const OPENING = 15;
-const SPIN_DEG = 40;
+const SPIN_RATE = 2;
+/**
+ * Degrees the camera aims above the axis it turns about. The axis is the one
+ * direction a turn leaves alone, so the point of sky it picks out is the only
+ * fixed thing in the frame; this is how far below the middle it sits.
+ */
+const TILT = 9;
 
 /** The closing rush: seconds, and the parsecs it covers in them. */
 const RUSH = 13;
-const RUSH_PC = 200;
-/** Where the rush starts, out beyond the last star along the way in. */
-const RUN_UP_PC = 4;
+const RUSH_PC = 800;
 
 const STANDOFF_PC = 0.3;
 
@@ -62,17 +71,14 @@ const OPEN_FOV_DEG = 65;
 /** Seconds a name takes to come up, and to go again. */
 const FADE = 1.4;
 
-/** Seconds the picture takes to come up from black, and to go back down. */
-const FADE_IN = 3;
+/** Seconds the picture takes to come up from black, and to go back down. The
+ *  way up runs most of the opening, so the stars arrive while the sky turns. */
+const FADE_IN = 8;
 const FADE_OUT = 5;
 
-// Galactic north pole and galactic centre, in the equatorial cartesian frame
-// the catalogue is stored in. North keeps the galactic plane level; the centre
-// is what the opening and closing shots look at. The frame is equatorial, so
-// the celestial pole the sky turns about is simply z.
+// The galactic north pole, in the equatorial cartesian frame the catalogue is
+// stored in, which keeps the galactic plane level.
 const NGP = normalize([-0.86703, -0.20006, 0.45673]);
-const GALACTIC_CENTRE = normalize([-0.05487, -0.87344, -0.48384]);
-const POLE: Vec3 = [0, 0, 1];
 
 // Ordered so that the turn each leg asks for is in proportion to the distance
 // it has to cover, since at a fixed speed the turn per parsec is exactly the
@@ -105,12 +111,17 @@ type Motion = { position: Vec3; velocity: Vec3 };
 /** A stretch of camera motion, and the flight from it to the next. */
 type Hold = {
   name: string | null;
-  fovDeg: number;
   dwell: number;
   /** Seconds spent flying to the next hold. */
   transit: number;
   at(seconds: number): Motion;
   facing(seconds: number): Quaternion;
+  /**
+   * A function of time and not a constant, because the outro has no transition
+   * in front of it to ease anything across. A hold that changes its framing has
+   * to do it itself.
+   */
+  fov(seconds: number): number;
 };
 
 function smootherstep(t: number): number {
@@ -148,55 +159,89 @@ function showcase(name: string, star: Vec3, from: Vec3, way: number): Hold {
   const at = orbit(star, from, way);
   return {
     name,
-    fovDeg: FOV_DEG,
     dwell: SHOWCASE,
     transit: 0,
     at,
     facing: (seconds) => lookRotation(subtract(star, at(seconds).position), NGP),
+    fov: () => FOV_DEG,
   };
 }
 
 /**
- * The opening: the Sun held while the sky turns about the celestial pole, the
- * turn unwinding to nothing by the end. The film therefore leaves from a camera
- * that has just come to rest, and the transition out of it can start straight
- * away towards the first star rather than having to stop the spin first.
+ * The opening: the camera stands still at the Sun and turns, and does nothing
+ * else. No path, no target, no orbit — position is hoisted out, so it cannot
+ * move even by accident.
+ *
+ * The axis is chosen rather than given, because two things have to come out
+ * right at once. It sits TILT degrees below the direction the camera ends up
+ * aimed, which puts the fixed point that far below the middle of the frame —
+ * without it on screen there is nothing to see the turn against, and the whole
+ * thing reads as a drift. And the turn is wound backwards from its end rather
+ * than forwards from its start, so however long it runs and however fast, it
+ * finishes pointing exactly where the tour sets off.
  */
-function opening(sun: Vec3, from: Vec3, way: number): Hold {
-  const held = showcase("The Sun", sun, from, way);
-  const spin = (SPIN_DEG * Math.PI) / 180;
-  return {
-    ...held,
-    fovDeg: OPEN_FOV_DEG,
-    dwell: OPENING,
-    facing(seconds) {
-      const left = 1 - smootherstep(seconds / OPENING);
-      return multiply(fromAxisAngle(POLE, -spin * left), held.facing(seconds));
-    },
-  };
-}
-
-/**
- * The closing rush: straight out along `heading` and accelerating, cubic in
- * time so it leaves at rest and is moving fastest as the picture goes. It runs
- * towards the galactic centre rather than away from anything, so the field
- * ahead only ever thickens and no edge of the catalogue comes into view.
- */
-function rush(from: Vec3, heading: Vec3): Hold {
-  const orientation = lookRotation(heading, NGP);
+function spinning(at: Vec3, towards: Vec3): Hold {
+  const rest: Motion = { position: at, velocity: [0, 0, 0] };
+  const forward = normalize(subtract(towards, at));
+  const overhead = normalize(subtract(NGP, scale(forward, dot(NGP, forward))));
+  const tilt = (TILT * Math.PI) / 180;
+  const axis = subtract(scale(forward, Math.cos(tilt)), scale(overhead, Math.sin(tilt)));
+  const arrived = lookRotation(forward, NGP);
+  const rate = (SPIN_RATE * Math.PI) / 180;
   return {
     name: null,
-    fovDeg: OPEN_FOV_DEG,
+    dwell: OPENING,
+    transit: 0,
+    at: () => rest,
+    facing: (seconds) =>
+      multiply(fromAxisAngle(axis, rate * (seconds - OPENING)), arrived),
+    fov: () => OPEN_FOV_DEG,
+  };
+}
+
+/**
+ * The closing rush: no transition into it, just the throttle. It picks up the
+ * last showcase exactly where that leaves off — same place, same velocity, same
+ * orientation turning at the same rate — and accelerates, cubic in time, so
+ * there is nothing to see happen at the join. The orbit it was on is still
+ * turning it, so the swing settles into a straight stare rather than stopping
+ * dead.
+ *
+ * Which way it runs is free, since the swing onto the heading costs nothing,
+ * and it matters: the line the camera happens to be looking down leaves the
+ * disc, and 800 pc along it the field has visibly thinned. Flattening that line
+ * into the galactic plane costs 22 degrees of swing and buys a field that never
+ * thins, so no edge of the catalogue is ever in frame.
+ */
+function rush(after: Hold, dwell: number): Hold {
+  const leaving = after.at(dwell);
+  const orientation = after.facing(dwell);
+  const spin = angularVelocity(after.facing, dwell);
+  const ahead = rotate(orientation, [0, 0, -1]);
+  const heading = normalize(subtract(ahead, scale(NGP, dot(ahead, NGP))));
+  const settled = lookRotation(heading, NGP);
+  const framing = after.fov(dwell);
+  return {
+    name: null,
     dwell: RUSH,
     transit: 0,
     at(seconds) {
       const u = seconds / RUSH;
       return {
-        position: add(from, scale(heading, RUSH_PC * u * u * u)),
-        velocity: scale(heading, (3 * RUSH_PC * u * u) / RUSH),
+        position: add(
+          add(leaving.position, scale(leaving.velocity, seconds)),
+          scale(heading, RUSH_PC * u * u * u),
+        ),
+        velocity: add(leaving.velocity, scale(heading, (3 * RUSH_PC * u * u) / RUSH)),
       };
     },
-    facing: () => orientation,
+    facing: (seconds) =>
+      sweep(orientation, spin, settled, [0, 0, 0], RUSH, seconds / RUSH),
+    // Opened out over the whole rush rather than at the start of it. Widening
+    // by 15 degrees in one frame nearly doubles the sky on screen, and a rim of
+    // stars appears all at once.
+    fov: (seconds) =>
+      framing + (OPEN_FOV_DEG - framing) * smootherstep(seconds / RUSH),
   };
 }
 
@@ -212,31 +257,29 @@ function standoff(target: Vec3, from: Vec3, distance: number): Vec3 {
 function holds(labels: Labels): Hold[] {
   const sun = labels["Sun"];
   const stars = ROUTE.map((name) => ({ name, position: labels[name] }));
-  const targets = [sun, ...stars.map((s) => s.position)];
 
-  // The opening stands off against the galactic centre, which puts the Sun in
-  // the middle of the frame with the whole Milky Way behind it.
   const build = (i: number, way: number): Hold =>
-    i === 0
-      ? opening(sun, subtract(sun, scale(GALACTIC_CENTRE, STANDOFF_PC)), way)
-      : showcase(
-          stars[i - 1].name, targets[i],
-          standoff(targets[i], targets[i - 1], STANDOFF_PC), way,
-        );
+    showcase(
+      stars[i].name, stars[i].position,
+      standoff(stars[i].position, i === 0 ? sun : stars[i - 1].position, STANDOFF_PC),
+      way,
+    );
 
-  const all = targets.map((_, i) => build(i, 1));
-  const last = targets[targets.length - 1];
-  const outward = normalize(subtract(last, targets[targets.length - 2]));
-  all.push(rush(add(last, scale(outward, RUN_UP_PC)), GALACTIC_CENTRE));
+  // Three parts under three rules: a spin that only turns, a tour that orbits
+  // and flies between stars, and a rush that only accelerates. Transitions
+  // join the first two and the stars to each other; the rush needs none,
+  // because it starts from exactly where the last showcase leaves off.
+  const all = [spinning(sun, stars[0].position), ...stars.map((_, i) => build(i, 1))];
 
   // An arc swings the camera as far as it drifts, so which way it goes decides
   // how much of the next turn is already done. Going the wrong way around adds
   // the whole arc back onto the transition.
   for (let i = 0; i < all.length - 1; i++) {
     const arrival = all[i + 1].facing(0);
-    const turn = (way: number) =>
-      turnAngle(build(i, way).facing(all[i].dwell), arrival);
-    all[i] = build(i, turn(-1) < turn(1) ? -1 : 1);
+    if (i > 0) {
+      const turn = (way: number) => turnAngle(build(i - 1, way).facing(SHOWCASE), arrival);
+      all[i] = build(i - 1, turn(-1) < turn(1) ? -1 : 1);
+    }
 
     const travel = Math.hypot(
       ...subtract(all[i + 1].at(0).position, all[i].at(all[i].dwell).position),
@@ -247,6 +290,8 @@ function holds(labels: Labels): Hold[] {
       travel / CRUISE_SPEED,
     );
   }
+
+  all.push(rush(all[all.length - 1], SHOWCASE));
   return all;
 }
 
@@ -285,7 +330,7 @@ export function buildTour(labels: Labels): Tour {
       return {
         position: hold.at(elapsed).position,
         orientation: hold.facing(elapsed),
-        fovDeg: hold.fovDeg,
+        fovDeg: hold.fov(elapsed),
       };
     }
 
@@ -302,7 +347,8 @@ export function buildTour(labels: Labels): Tour {
         arrives[i + 1].orientation, arrives[i + 1].spin,
         hold.transit, s,
       ),
-      fovDeg: hold.fovDeg + (next.fovDeg - hold.fovDeg) * smootherstep(s),
+      fovDeg: hold.fov(hold.dwell) +
+        (next.fov(0) - hold.fov(hold.dwell)) * smootherstep(s),
     };
   }
 

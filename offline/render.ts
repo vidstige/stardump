@@ -18,7 +18,11 @@ const width = args.number("width", 1920);
 const height = args.number("height", 1080);
 const fps = args.number("fps", 30);
 const output = args.text("output", "renders/tour.mp4");
-const crf = args.number("crf", 19);
+const quality = {
+  crf: args.number("crf", 12),
+  preset: args.text("preset", "slow"),
+  pixelFormat: args.text("pix-fmt", "yuv420p"),
+};
 
 const settings = {
   ...DEFAULT_SETTINGS,
@@ -35,7 +39,7 @@ async function main(): Promise<void> {
   const last = Math.min(args.number("to", total), total);
 
   const frames = await openFrames(await source(), width, height);
-  const encoder = openEncoder(output, width, height, fps, crf);
+  const encoder = openEncoder(output, width, height, fps, quality);
   const captions = new Map<string, Uint8Array>();
   const captionFor = (name: string) => {
     if (!captions.has(name)) captions.set(name, renderCaption(name, width, height));
