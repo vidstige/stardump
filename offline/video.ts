@@ -37,7 +37,10 @@ const pixelFormat = args.text("pix-fmt", "yuv420p");
 const exposure = args.number("exposure", sketch ? SKETCH.exposure : 0);
 const url = args.text("url", "");
 const fps = args.number("fps", 30);
-const jobs = args.number("jobs", 3);
+// One at full size. A 1080p cut runs to 50M points, a gigabyte of vertex
+// buffers, and a second job alongside it put this 8 GB machine into swap hard
+// enough to stall both. Sketch frames are a ninth the size and parallelise.
+const jobs = args.number("jobs", sketch ? 3 : 1);
 const output = args.text("output", sketch ? "renders/tour-sketch.mp4" : "renders/tour.mp4");
 
 /** Contiguous, near equal frame ranges, one per process. */

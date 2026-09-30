@@ -251,8 +251,15 @@ npx tsx offline/video.ts --dataset f236745 --jobs 2
 A full render draws every node the level of detail asks for and waits for all
 of it: the point budget is set above the largest cut a 1080p frame wants, which
 is 53.9M points looking into the galactic centre, so it never truncates one.
-That runs at about 2 frames a second, half an hour for the film across two
-jobs.
+Raising the level-of-detail threshold barely moves that — 50M at 28 px against
+54M at 16 px — because the cut is dominated by leaves, and a leaf has no
+subsample to stand in for it and so is always taken whole.
+
+50M points is a gigabyte of vertex buffers, which is why a full render runs one
+job by default: two alongside each other put an 8 GB machine into swap hard
+enough to stall both. One job holds steady at 1.3 frames a second on the
+densest frames, about 45 minutes for the film. Sketch frames are a ninth the
+size and parallelise happily.
 
 Encoding a star field is its own problem — it is nearly all fine detail, so it
 compresses badly and artefacts show. The setting that matters is not the

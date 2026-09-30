@@ -19,8 +19,13 @@ import { POINT_BYTES } from "../core/starcloud";
 import { ReadRange, loadStarcloud } from "../core/starcloud_io";
 import { SOURCES } from "./shaders";
 
-/** Room kept for nodes the previous frame wanted, over the current cut. */
-const CACHE_FACTOR = 2;
+/**
+ * Room kept for nodes the previous frame wanted, over the current cut. Nodes
+ * the current frame wants are never evicted whatever this is, so it only sets
+ * how much history is held — and at a 1080p cut of 50M points, a full frame of
+ * history is a gigabyte the machine may not have.
+ */
+const CACHE_FACTOR = 1.25;
 const POLL_MS = 1;
 
 export type Frame = { rgb: Uint8Array; stars: number };
