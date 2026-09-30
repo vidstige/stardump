@@ -8,6 +8,7 @@
     "@types/node": "^22.0.0"
   },
   "scripts": {
-    "check": "../viewer/node_modules/.bin/tsc --noEmit"
+    "check": "../viewer/node_modules/.bin/tsc --noEmit",
+    "test": "npx tsx rotation.test.ts && npx tsx tour.test.ts"
   }
 }

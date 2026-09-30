@@ -268,11 +268,28 @@ the quaternion sphere, control points one third of the span along each end
 tangent, matches angular velocity as well as orientation, and the join
 disappears.
 
-**The tour itself is not in the repo.** Which stars, in what order, and how the
-camera moves between them is the film rather than the machinery, so
-`offline/tour.ts` ships as a placeholder that drifts a parsec in a straight
-line; drop your own `buildTour` in its place. Everything around it is
-indifferent to what the camera does.
+`offline/tour.ts` is the film itself: a flight through the Sun's neighbourhood
+visiting every star in the dataset's `labels.json`, in two phases and one flow
+through both. In a **showcase** the camera orbits a star from 0.3 pc at 3
+degrees a second with the star pinned dead centre, so it becomes the one thing
+in the frame that does not move while everything within a few parsecs slides
+behind it. In a **transition** it flies to the next star and swings onto it.
+Both phases move and turn at once, so there is parallax throughout, and a
+transition leaves and arrives at exactly the rate the orbits either side of it
+are turning, so nothing jolts on the way in or out.
+
+Transitions are paced by speed rather than by duration — a transition lasts as
+long as its distance needs — and the route is chosen so that the turns fall
+where there is room to make them. At a fixed speed the turn a leg asks for per
+parsec *is* the turn rate it demands, so ordering the stars is the whole game:
+visiting the neighbours nearest first, the obvious route, is the worst of all
+720 orderings on that measure, asking 79 degrees per parsec against the 28 of
+
+    Sun, Barnard's Star, Tau Ceti, 61 Cygni A, Proxima Centauri,
+    Epsilon Eridani, 51 Pegasi
+
+which is what this uses. Insisting on the 51 Pegasi finale costs almost
+nothing: the best ordering ignoring the ending manages 26.
 
 The film look is the viewer's own `DEFAULT_SETTINGS`, at full size, so a render
 and the page agree without anything being tuned twice. A sketch is the one
@@ -283,7 +300,7 @@ drawing a third as many. It carries an exposure of its own for that, in
 the same view. It is the one way a sketch does not preview the final.
 
 ```bash
-npx tsx offline/rotation.test.ts
+npm -C offline/ test
 npm -C offline/ run check    # typecheck
 ```
 
