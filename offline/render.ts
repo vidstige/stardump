@@ -27,12 +27,6 @@ const settings = {
   pointBudget: args.number("budget", DEFAULT_SETTINGS.pointBudget),
 };
 
-/** Applied after tone mapping, which is where a fade to black belongs. */
-function fade(rgb: Uint8Array, amount: number): void {
-  if (amount > 0.999) return;
-  for (let i = 0; i < rgb.length; i++) rgb[i] *= amount;
-}
-
 async function main(): Promise<void> {
   const started = Date.now();
   const tour = buildTour(labels(dataset));
@@ -48,15 +42,19 @@ async function main(): Promise<void> {
     return captions.get(name)!;
   };
 
+  const exposure = settings.exposure;
   for (let f = first; f < last; f++) {
     const shot = tour.shotAt(f / fps);
+    // Fading on the exposure rather than on the finished frame: stars come out
+    // of the black brightest first, the way they do at dusk, instead of the
+    // whole picture being turned down at once.
+    const up = tour.fadeAt(f / fps);
     settings.fovDeg = shot.fovDeg;
+    settings.exposure = exposure * up;
     const frame = await frames.render(shot.camera, settings);
     if (shot.focus) {
-      composite(frame.rgb, captionFor(shot.focus.name), shot.focus.emphasis);
+      composite(frame.rgb, captionFor(shot.focus.name), shot.focus.emphasis * up);
     }
-    // After the caption, so the name comes up with the picture.
-    fade(frame.rgb, tour.fadeAt(f / fps));
     await encoder.write(frame.rgb);
     if ((f - first) % 60 === 0) {
       const rate = (f - first + 1) / ((Date.now() - started) / 1000);

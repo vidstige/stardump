@@ -291,6 +291,23 @@ visiting the neighbours nearest first, the obvious route, is the worst of all
 which is what this uses. Insisting on the 51 Pegasi finale costs almost
 nothing: the best ordering ignoring the ending manages 26.
 
+The two ends are not orbits, which is the other thing matching angular velocity
+across a join buys. It **opens** at the Sun with the sky turning about the
+celestial pole — the frame is equatorial, so that axis is simply z — through 40
+degrees, unwinding to nothing by the end. The film therefore leaves from a
+camera that has just come to rest, and sets off for the first star without
+having to stop the spin first.
+
+It **closes** by accelerating out along the line to the galactic centre, cubic
+in time, 200 pc in thirteen seconds ending at 46 pc/s with the stars streaming
+past. It runs towards the centre rather than away from anything, so the field
+ahead only thickens: the view from where it stops is as full as the view from
+the Sun, and no edge of the catalogue ever comes into frame.
+
+The picture comes up and goes down on the **exposure** rather than on the
+finished frame, so stars come out of the black brightest first, the way they do
+at dusk, instead of the whole image being turned down at once.
+
 The film look is the viewer's own `DEFAULT_SETTINGS`, at full size, so a render
 and the page agree without anything being tuned twice. A sketch is the one
 thing that cannot: a ninth of the pixels means nine times as many stars land in

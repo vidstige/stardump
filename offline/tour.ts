@@ -7,10 +7,11 @@
 //
 // What holds the two together is the join, not a single pace. A showcase pans
 // at ORBIT and a transition is free to swing harder, but a transition leaves
-// and arrives at exactly the rate the orbits either side of it are turning, so
+// and arrives at exactly the rate whatever is either side of it is turning, so
 // nothing jolts on the way in or out. Matching that takes more than matching
 // orientation, since slerp leaves at whatever rate its endpoints imply; that is
-// what rotation.ts is for.
+// what rotation.ts is for. It is also what lets the two ends of the film be
+// something other than an orbit and still belong to the same flow.
 //
 // Both phases move and turn at once. Turning on the spot and then flying in a
 // straight stare is what an earlier cut of this did, and it looked anxious: no
@@ -27,7 +28,7 @@
 // whichever order they are visited in, against 27 pc of travel.
 
 import { Camera } from "../core/camera";
-import { Quaternion, fromAxisAngle, lookRotation, rotate } from "../core/quaternion";
+import { Quaternion, fromAxisAngle, lookRotation, multiply, rotate } from "../core/quaternion";
 import { Vec3, add, cross, normalize, scale, subtract } from "../core/vec3";
 import { Labels } from "./dataset";
 import { angularVelocity, sweep, turnAngle } from "./rotation";
@@ -41,15 +42,18 @@ const TURN_RATE = 14;
 const MIN_TRANSIT = 3.5;
 
 const SHOWCASE = 9;
-const OPENING = 13;
-/** Seconds of sky after the last star. */
-const CODA = 14;
+
+/** The opening: seconds at the Sun, and degrees the sky turns in them. */
+const OPENING = 15;
+const SPIN_DEG = 40;
+
+/** The closing rush: seconds, and the parsecs it covers in them. */
+const RUSH = 13;
+const RUSH_PC = 200;
+/** Where the rush starts, out beyond the last star along the way in. */
+const RUN_UP_PC = 4;
 
 const STANDOFF_PC = 0.3;
-/** The closing shot drifts on a wider arc, so it glides rather than circles. */
-const CODA_STANDOFF_PC = 4;
-/** How far out that shot looks, well beyond anything in the index. */
-const CODA_DISTANCE_PC = 4000;
 
 const FOV_DEG = 50;
 /** Wider at the two ends, where the subject is the sky rather than a star. */
@@ -59,14 +63,16 @@ const OPEN_FOV_DEG = 65;
 const FADE = 1.4;
 
 /** Seconds the picture takes to come up from black, and to go back down. */
-const FADE_IN = 2.5;
-const FADE_OUT = 4;
+const FADE_IN = 3;
+const FADE_OUT = 5;
 
 // Galactic north pole and galactic centre, in the equatorial cartesian frame
 // the catalogue is stored in. North keeps the galactic plane level; the centre
-// is what the opening and closing shots look at.
+// is what the opening and closing shots look at. The frame is equatorial, so
+// the celestial pole the sky turns about is simply z.
 const NGP = normalize([-0.86703, -0.20006, 0.45673]);
 const GALACTIC_CENTRE = normalize([-0.05487, -0.87344, -0.48384]);
+const POLE: Vec3 = [0, 0, 1];
 
 // Ordered so that the turn each leg asks for is in proportion to the distance
 // it has to cover, since at a fixed speed the turn per parsec is exactly the
@@ -94,53 +100,22 @@ export type Tour = {
   fadeAt(seconds: number): number;
 };
 
-/**
- * A stretch of orbit. The camera arcs around `pivot` while looking at
- * `target`; for a showcase the two are the same star, which is what pins it,
- * and the closing shot sets them apart so the camera drifts past 51 Pegasi
- * with the galaxy held still in frame.
- */
+type Motion = { position: Vec3; velocity: Vec3 };
+
+/** A stretch of camera motion, and the flight from it to the next. */
 type Hold = {
   name: string | null;
-  pivot: Vec3;
-  target: Vec3;
-  /** Camera position where the arc starts. */
-  from: Vec3;
-  /** Which way around the arc goes; whichever leans toward the next star. */
-  way: number;
   fovDeg: number;
   dwell: number;
   /** Seconds spent flying to the next hold. */
   transit: number;
+  at(seconds: number): Motion;
+  facing(seconds: number): Quaternion;
 };
 
 function smootherstep(t: number): number {
   const s = Math.min(Math.max(t, 0), 1);
   return s * s * s * (s * (s * 6 - 15) + 10);
-}
-
-/** Camera position and velocity `seconds` into a hold's arc. */
-function onArc(hold: Hold, seconds: number): { position: Vec3; velocity: Vec3 } {
-  const away = subtract(hold.from, hold.pivot);
-  const radius = Math.hypot(...away);
-  const offset = scale(away, 1 / radius);
-  // North made perpendicular to the view, so the drift is sideways not a roll.
-  const axis = normalize(cross(offset, cross(NGP, offset)));
-  const rate = (ORBIT * Math.PI) / 180;
-  const turned = rotate(fromAxisAngle(axis, rate * seconds * hold.way), offset);
-  return {
-    position: add(hold.pivot, scale(turned, radius)),
-    velocity: scale(cross(axis, turned), radius * rate * hold.way),
-  };
-}
-
-function aim(hold: Hold, position: Vec3): Quaternion {
-  return lookRotation(subtract(hold.target, position), NGP);
-}
-
-/** Where the camera points `seconds` into a hold's arc. */
-function facing(hold: Hold): (seconds: number) => Quaternion {
-  return (seconds) => aim(hold, onArc(hold, seconds).position);
 }
 
 function hermite(p0: Vec3, v0: Vec3, p1: Vec3, v1: Vec3, s: number, span: number): Vec3 {
@@ -150,6 +125,79 @@ function hermite(p0: Vec3, v0: Vec3, p1: Vec3, v1: Vec3, s: number, span: number
     add(scale(p0, 2 * s3 - 3 * s2 + 1), scale(p1, 3 * s2 - 2 * s3)),
     add(scale(v0, (s3 - 2 * s2 + s) * span), scale(v1, (s3 - s2) * span)),
   );
+}
+
+/** Arcing around `pivot` from `from`, `way` deciding which way round. */
+function orbit(pivot: Vec3, from: Vec3, way: number): (seconds: number) => Motion {
+  const away = subtract(from, pivot);
+  const radius = Math.hypot(...away);
+  const offset = scale(away, 1 / radius);
+  // North made perpendicular to the view, so the drift is sideways not a roll.
+  const axis = normalize(cross(offset, cross(NGP, offset)));
+  const rate = ((ORBIT * Math.PI) / 180) * way;
+  return (seconds) => {
+    const turned = rotate(fromAxisAngle(axis, rate * seconds), offset);
+    return {
+      position: add(pivot, scale(turned, radius)),
+      velocity: scale(cross(axis, turned), radius * rate),
+    };
+  };
+}
+
+function showcase(name: string, star: Vec3, from: Vec3, way: number): Hold {
+  const at = orbit(star, from, way);
+  return {
+    name,
+    fovDeg: FOV_DEG,
+    dwell: SHOWCASE,
+    transit: 0,
+    at,
+    facing: (seconds) => lookRotation(subtract(star, at(seconds).position), NGP),
+  };
+}
+
+/**
+ * The opening: the Sun held while the sky turns about the celestial pole, the
+ * turn unwinding to nothing by the end. The film therefore leaves from a camera
+ * that has just come to rest, and the transition out of it can start straight
+ * away towards the first star rather than having to stop the spin first.
+ */
+function opening(sun: Vec3, from: Vec3, way: number): Hold {
+  const held = showcase("The Sun", sun, from, way);
+  const spin = (SPIN_DEG * Math.PI) / 180;
+  return {
+    ...held,
+    fovDeg: OPEN_FOV_DEG,
+    dwell: OPENING,
+    facing(seconds) {
+      const left = 1 - smootherstep(seconds / OPENING);
+      return multiply(fromAxisAngle(POLE, -spin * left), held.facing(seconds));
+    },
+  };
+}
+
+/**
+ * The closing rush: straight out along `heading` and accelerating, cubic in
+ * time so it leaves at rest and is moving fastest as the picture goes. It runs
+ * towards the galactic centre rather than away from anything, so the field
+ * ahead only ever thickens and no edge of the catalogue comes into view.
+ */
+function rush(from: Vec3, heading: Vec3): Hold {
+  const orientation = lookRotation(heading, NGP);
+  return {
+    name: null,
+    fovDeg: OPEN_FOV_DEG,
+    dwell: RUSH,
+    transit: 0,
+    at(seconds) {
+      const u = seconds / RUSH;
+      return {
+        position: add(from, scale(heading, RUSH_PC * u * u * u)),
+        velocity: scale(heading, (3 * RUSH_PC * u * u) / RUSH),
+      };
+    },
+    facing: () => orientation,
+  };
 }
 
 /**
@@ -166,50 +214,36 @@ function holds(labels: Labels): Hold[] {
   const stars = ROUTE.map((name) => ({ name, position: labels[name] }));
   const targets = [sun, ...stars.map((s) => s.position)];
 
-  const all: Hold[] = targets.map((target, i) => ({
-    name: i === 0 ? "The Sun" : stars[i - 1].name,
-    pivot: target,
-    target,
-    // The opening stands off against the galactic centre, which puts the Sun
-    // in the middle of the frame with the whole Milky Way behind it.
-    from: i === 0 ? subtract(sun, scale(GALACTIC_CENTRE, STANDOFF_PC))
-                  : standoff(target, targets[i - 1], STANDOFF_PC),
-    way: 1,
-    fovDeg: i === 0 ? OPEN_FOV_DEG : FOV_DEG,
-    dwell: i === 0 ? OPENING : SHOWCASE,
-    transit: 0,
-  }));
+  // The opening stands off against the galactic centre, which puts the Sun in
+  // the middle of the frame with the whole Milky Way behind it.
+  const build = (i: number, way: number): Hold =>
+    i === 0
+      ? opening(sun, subtract(sun, scale(GALACTIC_CENTRE, STANDOFF_PC)), way)
+      : showcase(
+          stars[i - 1].name, targets[i],
+          standoff(targets[i], targets[i - 1], STANDOFF_PC), way,
+        );
 
-  // The closing shot drifts on past the last star while looking away at the
-  // galaxy, so the film settles instead of stopping.
-  const last = all[all.length - 1];
-  const outward = normalize(subtract(last.target, targets[targets.length - 2]));
-  all.push({
-    name: null,
-    pivot: last.target,
-    target: add(last.target, scale(GALACTIC_CENTRE, CODA_DISTANCE_PC)),
-    from: add(last.target, scale(outward, CODA_STANDOFF_PC)),
-    way: 1,
-    fovDeg: OPEN_FOV_DEG,
-    dwell: CODA,
-    transit: 0,
-  });
+  const all = targets.map((_, i) => build(i, 1));
+  const last = targets[targets.length - 1];
+  const outward = normalize(subtract(last, targets[targets.length - 2]));
+  all.push(rush(add(last, scale(outward, RUN_UP_PC)), GALACTIC_CENTRE));
 
   // An arc swings the camera as far as it drifts, so which way it goes decides
   // how much of the next turn is already done. Going the wrong way around adds
   // the whole arc back onto the transition.
   for (let i = 0; i < all.length - 1; i++) {
-    const arrival = facing(all[i + 1])(0);
+    const arrival = all[i + 1].facing(0);
     const turn = (way: number) =>
-      turnAngle(facing({ ...all[i], way })(all[i].dwell), arrival);
-    all[i].way = turn(-1) < turn(1) ? -1 : 1;
+      turnAngle(build(i, way).facing(all[i].dwell), arrival);
+    all[i] = build(i, turn(-1) < turn(1) ? -1 : 1);
 
     const travel = Math.hypot(
-      ...subtract(all[i + 1].from, onArc(all[i], all[i].dwell).position),
+      ...subtract(all[i + 1].at(0).position, all[i].at(all[i].dwell).position),
     );
     all[i].transit = Math.max(
       MIN_TRANSIT,
-      (turn(all[i].way) * 180) / Math.PI / TURN_RATE,
+      (turnAngle(all[i].facing(all[i].dwell), arrival) * 180) / Math.PI / TURN_RATE,
       travel / CRUISE_SPEED,
     );
   }
@@ -218,7 +252,7 @@ function holds(labels: Labels): Hold[] {
 
 export function buildTour(labels: Labels): Tour {
   const all = holds(labels);
-  // Where each arc starts; the transition to the next follows it.
+  // Where each hold starts; the transition to the next follows it.
   const starts: number[] = [];
   let at = 0;
   for (const hold of all) {
@@ -227,14 +261,14 @@ export function buildTour(labels: Labels): Tour {
   }
   const duration = at;
 
-  // The ends of every arc, which is all a transition needs in order to match.
+  // The ends of every hold, which is all a transition needs in order to match.
   const leaves = all.map((hold) => ({
-    orientation: facing(hold)(hold.dwell),
-    spin: angularVelocity(facing(hold), hold.dwell),
+    orientation: hold.facing(hold.dwell),
+    spin: angularVelocity(hold.facing, hold.dwell),
   }));
   const arrives = all.map((hold) => ({
-    orientation: facing(hold)(0),
-    spin: angularVelocity(facing(hold), 0),
+    orientation: hold.facing(0),
+    spin: angularVelocity(hold.facing, 0),
   }));
 
   function index(seconds: number): number {
@@ -248,14 +282,17 @@ export function buildTour(labels: Labels): Tour {
     const hold = all[i];
     const elapsed = seconds - starts[i];
     if (elapsed <= hold.dwell) {
-      const { position } = onArc(hold, elapsed);
-      return { position, orientation: aim(hold, position), fovDeg: hold.fovDeg };
+      return {
+        position: hold.at(elapsed).position,
+        orientation: hold.facing(elapsed),
+        fovDeg: hold.fovDeg,
+      };
     }
 
     const next = all[i + 1];
     const s = (elapsed - hold.dwell) / hold.transit;
-    const leave = onArc(hold, hold.dwell);
-    const arrive = onArc(next, 0);
+    const leave = hold.at(hold.dwell);
+    const arrive = next.at(0);
     return {
       position: hermite(
         leave.position, leave.velocity, arrive.position, arrive.velocity, s, hold.transit,

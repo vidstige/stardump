@@ -87,12 +87,29 @@ test("every star in the labels is held at some point", () => {
   assert.strictEqual(names.size, Object.keys(neighbourhood()).length);
 });
 
+/** Where a star lands on screen, in pixels from the centre. */
+function offCentre(name: string, seconds: number): number {
+  const shot = tour.shotAt(seconds);
+  const projection = projectionMatrix(Math.PI / 4, WIDTH / HEIGHT, 8000);
+  const screen = toScreen(
+    held(name), viewMatrix(shot.camera), projection, WIDTH, HEIGHT,
+  );
+  return screen ? Math.hypot(screen[0] - WIDTH / 2, screen[1] - HEIGHT / 2) : Infinity;
+}
+
+// The opening is a different kind of shot: the sky turns about the celestial
+// pole, so the Sun is off centre for most of it and its caption names where the
+// film starts rather than pointing at anything. That the spin unwinds onto the
+// Sun exactly is asserted on its own below.
+const SPINNING = "The Sun";
+
 test("a star sits in the middle of the frame while it is held", () => {
   const projection = projectionMatrix(Math.PI / 4, WIDTH / HEIGHT, 8000);
   let checked = 0;
   for (const f of frames()) {
     const shot = tour.shotAt(f / FPS);
     if (!shot.focus || shot.focus.emphasis < 0.99) continue;
+    if (shot.focus.name === SPINNING) continue;
     const screen = toScreen(
       held(shot.focus.name), viewMatrix(shot.camera), projection, WIDTH, HEIGHT,
     );
@@ -102,4 +119,9 @@ test("a star sits in the middle of the frame while it is held", () => {
     checked++;
   }
   assert.ok(checked > 0);
+});
+
+test("the opening spin unwinds onto the Sun", () => {
+  const closest = Math.min(...frames().map((f) => offCentre(SPINNING, f / FPS)));
+  assert.ok(closest < 1, `the Sun never gets closer than ${closest.toFixed(0)} px to centre`);
 });
