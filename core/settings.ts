@@ -15,7 +15,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   exposure: 2000,
   sizeScale: 0.02,
-  maxRadius: 64,
+  maxRadius: 16,
   pixelThreshold: 16,
   pointBudget: 16_000_000,
   fovDeg: 60,
