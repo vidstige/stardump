@@ -2,7 +2,13 @@ import { Mat4, lookAt, perspective, transform } from "./mat4";
 import { Quaternion, rotate } from "./quaternion";
 import { Vec3, add } from "./vec3";
 
-export const NEAR_PC = 0.1;
+/**
+ * Near plane. There is no depth buffer to lose precision in — nothing depth
+ * tests — so this only decides how close a star may be and still be drawn.
+ * At the 0.1 it used to be, holding a faint star near enough to see clipped it
+ * away altogether.
+ */
+export const NEAR_PC = 0.01;
 
 export type Camera = {
   position: Vec3;

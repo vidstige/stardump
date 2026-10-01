@@ -20,6 +20,15 @@ varying float vGaussCoeff;
 /** Colour of a star with no measured bp_rp: the white point of the ramp. */
 const float UNKNOWN_COLOR = 1.0 / 3.0;
 
+/**
+ * Closest a star is allowed to get before the inverse square stops, in square
+ * parsecs. It is only there so that sitting exactly on one cannot divide by
+ * zero. At the 0.01 it used to be, no approach inside 0.1 pc gained any
+ * brightness at all, which is most of the range a camera holding a star works
+ * in: a red dwarf held at 0.05 pc came out no brighter than at 0.1.
+ */
+const float NEAREST_PC2 = 1.0e-6;
+
 /** Standard deviations per unit of radius, which fixes the shape of a star. */
 const float SIGMA_PER_RADIUS = 0.35355339;
 
@@ -41,7 +50,7 @@ vec3 bpRpToColor(float t) {
 void main() {
   gl_Position = projection * view * vec4(position, 1.0);
   vec3 delta = position - eye;
-  float brightness = luminosity * exposure / max(dot(delta, delta), 0.01);
+  float brightness = luminosity * exposure / max(dot(delta, delta), NEAREST_PC2);
 
   // A small fraction of Gaia sources have no bp_rp at all. NaN would survive
   // the clamp and spread through the additive buffer, blanking out every pixel
