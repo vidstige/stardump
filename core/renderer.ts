@@ -100,6 +100,11 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
   const uExposure   = uniform(stars, "exposure");
   const uSizeScale  = uniform(stars, "sizeScale");
   const uMaxRadius  = uniform(stars, "maxRadius");
+  const uMaxPoint   = uniform(stars, "maxPointSize");
+
+  // headless-gl grants 64 px, Chrome 1023, and the shader has to know which so
+  // that it sizes the gaussian to the quad it will really get.
+  const maxPointSize = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1];
 
   // One triangle large enough to cover the viewport, so the tone map pass
   // needs no index buffer and no second draw.
@@ -169,6 +174,7 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.uniform1f(uExposure, settings.exposure);
       gl.uniform1f(uSizeScale, settings.sizeScale);
       gl.uniform1f(uMaxRadius, settings.maxRadius);
+      gl.uniform1f(uMaxPoint, maxPointSize);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.disableVertexAttribArray(QUAD);

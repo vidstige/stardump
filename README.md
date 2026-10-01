@@ -38,7 +38,13 @@ The index covers a cube of ±4000 pc centered on the Sun, corresponding to a sph
 
 Leaves have no subsample: they are drawn whole or not at all. At the default depth of 7 a leaf is a 62 pc cube holding as much as 50 000 stars, so any view from inside a kiloparsec or two is dominated by whole leaves rather than by subsamples — the level-of-detail cut for the Sun's neighbourhood comes to 5–18 million points depending on which way the camera looks. The viewer's point budget is what caps that, and a budget below the cut makes the cut depend on view direction, which shows up as detail swinging as the camera turns. A deeper index, or leaf points ordered so that a prefix is a fair sample, is what would fix it properly.
 
-**Rendering** — Each star is projected onto the image plane and splatted as a Gaussian with radius proportional to its screen-space brightness. Flux falls off with distance squared. Colors are derived from the Gaia BP−RP color index. The HDR accumulation buffer is tone-mapped with a Reinhard curve and gamma-corrected (γ = 2.2) before writing to PNG.
+**Rendering** — Each star is projected onto the image plane and splatted as a Gaussian with radius proportional to its screen-space brightness. Flux falls off with distance squared. Colors are derived from the Gaia BP−RP color index. The quad a star is drawn
+on is sized to hold its whole saturated disc — `sigma * sqrt(2 * log(255 *
+brightness))` — rather than to a fixed multiple of its width: what is seen of a
+bright star is not its Gaussian but the disc out to where the tail crosses the
+white point, and a quad sized any other way clips that disc into the square it
+is drawn on. Faint stars, which are nearly all of them, keep the quad they
+always had. The HDR accumulation buffer is tone-mapped with a Reinhard curve and gamma-corrected (γ = 2.2) before writing to PNG.
 
 The shaders are GLSL ES 1.00 on WebGL 1.0, which is not the browser's ceiling but Node's: headless-gl is WebGL 1.0 and the WebGL2 bindings for Node are unmaintained, so the viewer came down to meet the offline renderer rather than keeping a second copy of the splat maths. The accumulation target picks half float where the context offers it, which browsers do and headless-gl does not, and full float otherwise.
 
