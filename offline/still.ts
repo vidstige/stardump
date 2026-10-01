@@ -20,7 +20,7 @@ const settings = {
   ...DEFAULT_SETTINGS,
   exposure: args.number("exposure", DEFAULT_SETTINGS.exposure),
   sizeScale: args.number("size", DEFAULT_SETTINGS.sizeScale),
-  maxRadius: args.number("radius", DEFAULT_SETTINGS.maxRadius),
+  maxRadius: args.number("size-cap", DEFAULT_SETTINGS.maxRadius),
   pixelThreshold: args.number("detail", DEFAULT_SETTINGS.pixelThreshold),
   pointBudget: args.number("budget", DEFAULT_SETTINGS.pointBudget),
   fovDeg: args.number("fov", DEFAULT_SETTINGS.fovDeg),
