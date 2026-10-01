@@ -106,12 +106,15 @@ async function main(): Promise<void> {
   const started = Date.now();
   const tour = buildTour(labels(dataset));
   const total = Math.round(tour.duration * fps);
+  const first = Math.max(args.number("from", 0), 0);
+  const last = Math.min(args.number("to", total), total);
   const size = args.number(
-    "segment", sketch ? Math.ceil(total / jobs) : SEGMENT_FRAMES,
+    "segment", sketch ? Math.ceil((last - first) / jobs) : SEGMENT_FRAMES,
   );
-  const work = ranges(total, size);
+  const work = ranges(last - first, size)
+    .map(([a, b]) => [a + first, b + first] as [number, number]);
   console.log(
-    `${output}: ${tour.duration.toFixed(1)}s, ${total} frames at ${width}x${height}, ` +
+    `${output}: frames ${first} to ${last} of ${total} at ${width}x${height}, ` +
     `${work.length} segments, ${jobs} at a time`,
   );
 
