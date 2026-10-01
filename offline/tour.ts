@@ -62,7 +62,36 @@ const TILT = 9;
 const RUSH = 13;
 const RUSH_PC = 800;
 
-const STANDOFF_PC = 0.3;
+/** Standoff for a star of solar luminosity. The rest scale from it. */
+const STANDOFF_PC = 0.36;
+
+/**
+ * How much of the luminosity difference the standoff takes out. Screen
+ * brightness goes as luminosity over distance squared, so holding a star at a
+ * distance proportional to the fourth root of its luminosity halves that
+ * exponent: the 4300-fold spread across these six comes down to 66-fold.
+ *
+ * Neither end is wanted. Held all at one distance a red dwarf falls below the
+ * smallest splat the shader will draw and simply is not there — Proxima at
+ * 0.3 pc lands under the floor. Compensated in full they would all look alike,
+ * and that they do not is half of what the picture is saying.
+ */
+const COMPENSATION = 0.25;
+
+/**
+ * Luminosity in solar units, read out of the index. The catalogue has it per
+ * star but labels.json carries only positions, and find-star already keeps
+ * these same six by hand, so they are kept here too rather than threading the
+ * point table through a camera path that otherwise needs nothing from it.
+ */
+const LUMINOSITY: Record<string, number> = {
+  "Proxima Centauri": 3.19e-4,
+  "Barnard's Star": 1.3e-3,
+  "61 Cygni A": 1.12e-1,
+  "Epsilon Eridani": 3.14e-1,
+  "Tau Ceti": 4.71e-1,
+  "51 Pegasi": 1.371,
+};
 
 const FOV_DEG = 50;
 /** Wider at the two ends, where the subject is the sky rather than a star. */
@@ -261,7 +290,10 @@ function holds(labels: Labels): Hold[] {
   const build = (i: number, way: number): Hold =>
     showcase(
       stars[i].name, stars[i].position,
-      standoff(stars[i].position, i === 0 ? sun : stars[i - 1].position, STANDOFF_PC),
+      standoff(
+        stars[i].position, i === 0 ? sun : stars[i - 1].position,
+        STANDOFF_PC * Math.pow(LUMINOSITY[stars[i].name], COMPENSATION),
+      ),
       way,
     );
 
