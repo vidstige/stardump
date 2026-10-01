@@ -8,3 +8,4 @@ __pycache__/
 /docs
 /offline/node_modules
 /renders
+.DS_Store
