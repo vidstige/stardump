@@ -30,9 +30,9 @@ const LOG_STEPS = 1000;
 const SLIDERS: Slider[] = [
   { key: "exposure", label: "Exposure", min: 1e-1, max: 1e6, step: 1, log: true,
     format: (v) => v.toExponential(1) },
-  { key: "sizeScale", label: "Size", min: 0.1, max: 2, step: 0.05, log: false,
+  { key: "sizeScale", label: "Size", min: 0.1, max: 20, step: 0.1, log: false,
     format: (v) => v.toFixed(1) },
-  { key: "maxRadius", label: "Radius", min: 0.5, max: 6, step: 0.1, log: false,
+  { key: "maxRadius", label: "Radius", min: 0.5, max: 16, step: 0.1, log: false,
     format: (v) => `${v.toFixed(1)} px` },
   { key: "pixelThreshold", label: "Detail", min: 4, max: 64, step: 1, log: false,
     format: (v) => `${v} px` },

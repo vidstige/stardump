@@ -2,10 +2,7 @@
 
 export type Settings = {
   exposure: number;
-  /** Standard deviations a star grows per decade of screen brightness. */
   sizeScale: number;
-  /** Largest a star may get, in standard deviations. A sprite spans ten of
-   *  them and the driver caps a sprite at 64 px, so beyond 6 is clipped. */
   maxRadius: number;
   pixelThreshold: number;
   /** Points the visible cut may use, and so how much lands on the GPU. */
@@ -17,8 +14,8 @@ export type Settings = {
 
 export const DEFAULT_SETTINGS: Settings = {
   exposure: 2000,
-  sizeScale: 0.7,
-  maxRadius: 4,
+  sizeScale: 2,
+  maxRadius: 1.5,
   pixelThreshold: 16,
   pointBudget: 16_000_000,
   fovDeg: 60,

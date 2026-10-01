@@ -18,20 +18,6 @@ varying float vGaussCoeff;
 /** Colour of a star with no measured bp_rp: the white point of the ramp. */
 const float UNKNOWN_COLOR = 1.0 / 3.0;
 
-/**
- * Half the sprite, in standard deviations of the gaussian drawn on it. What is
- * seen of a star is not its sigma but the disc out to where its tail crosses
- * the white point, and that radius is sigma times the square root of twice the
- * log of its brightness — near five sigma for the brightest thing in the sky
- * here. Any less and the disc is clipped into the square it is drawn on.
- */
-const float SPREAD = 5.0;
-
-/** Smallest star, which is nearly all of them, matching the old faint dot. */
-const float MIN_SIGMA = 0.32;
-
-const float LOG10 = 0.4342944819;
-
 vec3 bpRpToColor(float t) {
   float s = t * 3.0;
   vec3 blue   = vec3(0.6, 0.7, 1.0);
@@ -55,14 +41,9 @@ void main() {
   float t = bpRp == bpRp ? clamp((bpRp + 0.5) / 3.5, 0.0, 1.0) : UNKNOWN_COLOR;
   vColor = bpRpToColor(t);
 
-  // Sized by the log of brightness, the way a chart sizes a star by magnitude.
-  // Screen brightness runs over five decades in one frame — a star half a
-  // parsec off against the field behind it — so anything proportional either
-  // leaves the near ones the same as the far ones or turns the whole sky into
-  // discs. A decade of brightness is worth sizeScale standard deviations.
-  float sigma = clamp(sizeScale * log(1.0 + brightness) * LOG10, MIN_SIGMA, maxRadius);
-  float spriteSizePx = 2.0 * SPREAD * sigma + 1.0;
+  float rPx = clamp(brightness * sizeScale, 0.8, maxRadius);
+  float spriteSizePx = rPx * 2.0 + 1.0;
   gl_PointSize = spriteSizePx;
   vBrightness = brightness;
-  vGaussCoeff = spriteSizePx * spriteSizePx / (2.0 * sigma * sigma);
+  vGaussCoeff = 4.0 * spriteSizePx * spriteSizePx / (rPx * rPx);
 }
