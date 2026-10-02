@@ -3,6 +3,10 @@
 /target
 /viewer/node_modules
 /data
+/renders
+/screenshots
+/offline/node_modules
+/render-check/node_modules
 /.stardump
 /docs
 /sh
