@@ -10,7 +10,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-const FONT = "Helvetica";
+const FONT = "Avenir Next";
 /** Type size and baseline as fractions of the frame height. */
 const SIZE = 1 / 22;
 const BASELINE = 0.62;
