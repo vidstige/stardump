@@ -3,6 +3,7 @@
 // buffer. WebGL 1.0 / GLSL ES 1.00, which is the ceiling headless-gl offers,
 // so the browser and Node run the same shaders.
 
+import { STAND_FLOATS } from "./lod";
 import { Mat4 } from "./mat4";
 import { Settings } from "./settings";
 import { POINT_BYTES } from "./starcloud";
@@ -28,12 +29,18 @@ export type Renderer = {
    * holding the whole cut on the GPU at once.
    */
   begin(projection: Mat4, view: Mat4, eye: Vec3, settings: Settings): void;
-  /** `ranges` holds [batch, firstPoint, pointCount] triples. */
-  draw(ranges: Int32Array): void;
+  /**
+   * `ranges` holds [batch, firstPoint, pointCount] triples. `stands`, when
+   * given, holds STAND_FLOATS per span, marking spans that stand in for
+   * subtrees still streaming; see Draws in lod.ts. Without it every span is
+   * drawn whole, which is all an offline frame ever needs.
+   */
+  draw(ranges: Int32Array, stands?: Float32Array): void;
   end(): void;
   /** The whole pass at once, for a caller that already has everything. */
   render(
     projection: Mat4, view: Mat4, eye: Vec3, ranges: Int32Array, settings: Settings,
+    stands?: Float32Array,
   ): void;
 };
 
@@ -101,6 +108,9 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
   const uSizeScale  = uniform(stars, "sizeScale");
   const uMaxRadius  = uniform(stars, "maxRadius");
   const uMaxPoint   = uniform(stars, "maxPointSize");
+  const uStandCenter = uniform(stars, "standCenter");
+  const uStandBoost  = uniform(stars, "standBoost");
+  const uStandMask   = uniform(stars, "standMask");
 
   // headless-gl grants 64 px, Chrome 1023, and the shader has to know which so
   // that it sizes the gaussian to the quad it will really get.
@@ -175,18 +185,34 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.uniform1f(uSizeScale, settings.sizeScale);
       gl.uniform1f(uMaxRadius, settings.maxRadius);
       gl.uniform1f(uMaxPoint, maxPointSize);
+      gl.uniform1f(uStandMask, 0);
+      gl.uniform1f(uStandBoost, 1);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.disableVertexAttribArray(QUAD);
       for (const slot of [POSITION, LUMINOSITY, BP_RP]) gl.enableVertexAttribArray(slot);
     },
 
-    draw(ranges) {
+    draw(ranges, stands) {
       let bound = -1;
-      for (let i = 0; i < ranges.length; i += 3) {
+      let standing = false;
+      for (let i = 0, j = 0; i < ranges.length; i += 3, j += STAND_FLOATS) {
         if (ranges[i] !== bound) {
           bound = ranges[i];
           bind(bound);
+        }
+        // Most spans are ordinary; the mask is only touched around the few
+        // that are not, so a fully loaded view sets no uniform per draw.
+        const mask = stands ? stands[j + 4] : 0;
+        if (mask !== 0) {
+          gl.uniform3f(uStandCenter, stands![j], stands![j + 1], stands![j + 2]);
+          gl.uniform1f(uStandBoost, stands![j + 3]);
+          gl.uniform1f(uStandMask, mask);
+          standing = true;
+        } else if (standing) {
+          gl.uniform1f(uStandMask, 0);
+          gl.uniform1f(uStandBoost, 1);
+          standing = false;
         }
         gl.drawArrays(gl.POINTS, ranges[i + 1], ranges[i + 2]);
       }
@@ -204,9 +230,9 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     },
 
-    render(projection, view, eye, ranges, settings) {
+    render(projection, view, eye, ranges, settings, stands) {
       this.begin(projection, view, eye, settings);
-      this.draw(ranges);
+      this.draw(ranges, stands);
       this.end();
     },
   };

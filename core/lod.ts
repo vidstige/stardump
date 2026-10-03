@@ -105,53 +105,107 @@ export function selectCut(
   return { wanted, state };
 }
 
-/** Joins ranges that are adjacent within the same batch into single draws. */
-function merge(ranges: number[]): Int32Array {
-  const out: number[] = [];
-  for (let i = 0; i < ranges.length; i += 3) {
-    const n = out.length;
-    if (n > 0 && out[n - 3] === ranges[i] && out[n - 2] + out[n - 1] === ranges[i + 1]) {
-      out[n - 1] += ranges[i + 2];
+/** Floats per span in Draws.stands. */
+export const STAND_FLOATS = 5;
+
+/**
+ * Set in the mask of every stand-in, above the eight octant bits, so that one
+ * with no octant covered yet is still told apart from an ordinary span.
+ */
+const STAND = 256;
+
+/** What a frame draws: spans of resident buffers, some standing in for others. */
+export type Draws = {
+  /** [batch, firstPoint, pointCount] per span. */
+  ranges: Int32Array;
+  /**
+   * [cx, cy, cz, boost, mask] per span. A mask of zero is an ordinary span.
+   * Otherwise the span is a node standing in for its subtree: the shader
+   * divides the boost back out and draws the subsample as the real stars it
+   * is, and the low eight bits name the octants where something finer is
+   * already drawn, which it leaves to that.
+   */
+  stands: Float32Array;
+};
+
+/**
+ * Joins ordinary spans that are adjacent within the same batch into single
+ * draws. A stand-in keeps its own span, since its mask applies to it alone.
+ */
+function merge(ranges: number[], stands: number[]): Draws {
+  const outRanges: number[] = [];
+  const outStands: number[] = [];
+  for (let i = 0, j = 0; i < ranges.length; i += 3, j += STAND_FLOATS) {
+    const n = outRanges.length;
+    const plain = stands[j + 4] === 0 && n > 0 && outStands[outStands.length - 1] === 0;
+    if (plain && outRanges[n - 3] === ranges[i] &&
+        outRanges[n - 2] + outRanges[n - 1] === ranges[i + 1]) {
+      outRanges[n - 1] += ranges[i + 2];
     } else {
-      out.push(ranges[i], ranges[i + 1], ranges[i + 2]);
+      outRanges.push(ranges[i], ranges[i + 1], ranges[i + 2]);
+      for (let k = 0; k < STAND_FLOATS; k++) outStands.push(stands[j + k]);
     }
   }
-  return Int32Array.from(out);
+  return { ranges: Int32Array.from(outRanges), stands: Float32Array.from(outStands) };
 }
 
 /**
- * Draw ranges as `[batch, firstPoint, pointCount]` triples.
+ * Collects the spans a frame draws.
  *
- * A node stands in for its subtree only where the subtree has nothing to show
- * yet, which is what makes a region appear coarse first and then sharpen. A
- * subtree that is merely incomplete keeps the detail it has and leaves the
- * gap: standing in for it would throw away every resident sibling, and since
- * one node can carry tens of thousands of stars where the subsample carries
- * 256, a residency gap of a few thousand points used to cost more than a
- * million drawn ones.
+ * Everything visible is represented at every moment. A node whose subtree
+ * has fully arrived is drawn through its children; one whose subtree is still
+ * coming is drawn from its own subsample, but only in the octants where
+ * nothing finer is there yet. So detail lands star by star where it lands,
+ * the coarse picture recedes octant by octant beneath it, and no star is
+ * drawn twice. Nothing waits for a sibling, and nothing is left black while
+ * it waits.
+ *
+ * The subsample is shown at true brightness, not with the boost the index
+ * gave it. The boost conserves flux only from far away, and its variance is
+ * ruinous as an image: one boosted giant is a thousand giants of light in a
+ * single disc. Unboosted, the coarse view is a sparse field of real stars,
+ * exactly the ones the leaf will bring back among the rest.
  */
-export function collectDraws(sc: Starcloud, cut: Cut, locate: Locate): Int32Array {
+export function collectDraws(sc: Starcloud, cut: Cut, locate: Locate): Draws {
   const ranges: number[] = [];
+  const stands: number[] = [];
 
-  function drawSelf(node: number): void {
-    const count = sc.pointCount[node];
-    const at = count > 0 ? locate(node) : undefined;
-    if (at) ranges.push(at.batch, at.first, count);
+  const resident = (node: number) => sc.pointCount[node] > 0 && locate(node) !== undefined;
+
+  function span(node: number, mask: number): void {
+    const at = locate(node)!;
+    ranges.push(at.batch, at.first, sc.pointCount[node]);
+    stands.push(
+      sc.center[node * 3], sc.center[node * 3 + 1], sc.center[node * 3 + 2],
+      sc.boost[node], mask,
+    );
   }
 
-  function emit(node: number): void {
-    if (cut.state[node] === CULLED) return;
+  /** Draws what there is of the node; true if its box is represented at all. */
+  function emit(node: number): boolean {
+    if (cut.state[node] === CULLED) return true;
     if (cut.state[node] !== EXPANDED) {
-      drawSelf(node);
-      return;
+      const here = resident(node);
+      if (here) span(node, 0);
+      return here || sc.pointCount[node] === 0;
     }
-    const mark = ranges.length;
-    const first = sc.firstChild[node];
-    const children = childCount(sc.childMask[node]);
-    for (let i = 0; i < children; i++) emit(first + i);
-    if (ranges.length === mark) drawSelf(node);
+    // Octant bits, so the mask lines up with the shader and not with the
+    // packed child slots.
+    const mask = sc.childMask[node];
+    let covered = 0;
+    let child = sc.firstChild[node];
+    for (let bit = 1; bit < 256; bit <<= 1) {
+      if ((mask & bit) === 0) continue;
+      if (emit(child++)) covered |= bit;
+    }
+    if (covered === mask) return true;
+    if (resident(node)) {
+      span(node, STAND | covered);
+      return true;
+    }
+    return covered !== 0;
   }
 
   emit(0);
-  return merge(ranges);
+  return merge(ranges, stands);
 }

@@ -5,6 +5,7 @@ import { attachControls } from "./controls";
 import { fromViewProjection } from "../../core/frustum";
 import { Endpoint, createHud } from "./hud";
 import { Label, drawLabels, fetchLabels } from "./labels";
+import { Draws } from "../../core/lod";
 import { multiply } from "../../core/mat4";
 import { Minimap, loadMinimap } from "./minimap";
 import { FromWorker, ToWorker } from "./protocol";
@@ -58,7 +59,7 @@ const control = attachControls(canvas, camera);
 const hud = createHud(settings, ENDPOINTS, api, camera);
 
 const worker = new Worker("dist/loader.worker.js", { type: "module" });
-let ranges: Int32Array = new Int32Array(0);
+let draws: Draws = { ranges: new Int32Array(0), stands: new Float32Array(0) };
 let stars = 0;
 let dataset = "";
 let labels: Label[] = [];
@@ -69,7 +70,7 @@ worker.addEventListener("message", (event: MessageEvent<FromWorker>) => {
   if (message.type === "upload") renderer.upload(message.batch, message.data);
   else if (message.type === "free") renderer.free(message.batch);
   else if (message.type === "draws") {
-    ranges = message.ranges;
+    draws = { ranges: message.ranges, stands: message.stands };
     stars = message.stars;
   } else {
     const url = `${api}/datasets/${dataset}/minimap.png`;
@@ -119,7 +120,7 @@ function frame(now: number): void {
     pixelThreshold: settings.pixelThreshold,
     pointBudget: settings.pointBudget,
   } as ToWorker);
-  renderer.render(projection, view, camera.position, ranges, settings);
+  renderer.render(projection, view, camera.position, draws.ranges, settings, draws.stands);
   drawLabels(overlayContext, labels, camera.position, view, projection);
   minimap?.draw(camera);
 

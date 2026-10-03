@@ -12,6 +12,17 @@ uniform float sizeScale;
 uniform float maxRadius;
 /** The largest sprite the driver will give us: 64 px headless, 1023 in Chrome. */
 uniform float maxPointSize;
+/**
+ * A span standing in for a subtree that is still streaming. standMask holds
+ * one bit per octant of the box around standCenter that finer data already
+ * covers, and the span draws only in the others; zero for an ordinary span,
+ * which is every span once a view has fully loaded. standBoost is the
+ * multiplier the index baked into the luminosity of this subsample, divided
+ * back out so its stars show as themselves; one for an ordinary span.
+ */
+uniform vec3 standCenter;
+uniform float standBoost;
+uniform float standMask;
 
 varying vec3 vColor;
 varying float vBrightness;
@@ -35,6 +46,7 @@ const float SIGMA_PER_RADIUS = 0.35355339;
 /** How far down the tail has to go before the quad may end: one output level. */
 const float LEVELS = 255.0;
 
+
 vec3 bpRpToColor(float t) {
   float s = t * 3.0;
   vec3 blue   = vec3(0.6, 0.7, 1.0);
@@ -47,10 +59,30 @@ vec3 bpRpToColor(float t) {
   return col;
 }
 
+/**
+ * Whether the octant this point of a stand-in falls in is already drawn by
+ * finer data. Always false for an ordinary span.
+ */
+bool hidden() {
+  if (standMask == 0.0) return false;
+  vec3 upper = step(standCenter, position);
+  float octant = upper.x + 2.0 * upper.y + 4.0 * upper.z;
+  return mod(floor(standMask / exp2(octant)), 2.0) > 0.5;
+}
+
 void main() {
+  if (hidden()) {
+    // Behind the far plane, and dark besides, so neither pass can show it.
+    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+    gl_PointSize = 1.0;
+    vColor = vec3(0.0);
+    vBrightness = 0.0;
+    vGaussCoeff = 1.0;
+    return;
+  }
   gl_Position = projection * view * vec4(position, 1.0);
   vec3 delta = position - eye;
-  float brightness = luminosity * exposure / max(dot(delta, delta), NEAREST_PC2);
+  float brightness = luminosity / standBoost * exposure / max(dot(delta, delta), NEAREST_PC2);
 
   // A small fraction of Gaia sources have no bp_rp at all. NaN would survive
   // the clamp and spread through the additive buffer, blanking out every pixel
@@ -59,6 +91,7 @@ void main() {
   vColor = bpRpToColor(t);
 
   float rPx = clamp(brightness * sizeScale, 0.8, maxRadius);
+  float sigma = rPx * SIGMA_PER_RADIUS;
 
   // What is seen of a star is not its sigma but the disc out to where its tail
   // crosses the white point, and the quad has to hold that or the disc is
@@ -70,7 +103,6 @@ void main() {
   // one output level. For the brightest star here that is a quad near four
   // times its radius, and for the faint ones, which are almost all of them,
   // the max below leaves it exactly as it was.
-  float sigma = rPx * SIGMA_PER_RADIUS;
   float reach = sigma * sqrt(2.0 * log(LEVELS * brightness + 1.0));
   float spriteSizePx = min(2.0 * max(reach, rPx) + 1.0, maxPointSize);
 

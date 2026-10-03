@@ -10,4 +10,4 @@ export type FromWorker =
   | { type: "ready";  halfExtentPc: number }
   | { type: "upload"; batch: number; data: ArrayBuffer }
   | { type: "free";   batch: number }
-  | { type: "draws";  ranges: Int32Array; stars: number };
+  | { type: "draws";  ranges: Int32Array; stands: Float32Array; stars: number };

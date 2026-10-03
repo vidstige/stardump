@@ -45,10 +45,10 @@ async function init(url: string): Promise<void> {
 function refresh(sc: Starcloud, view: View, pixelThreshold: number, pointBudget: number): void {
   const cut = selectCut(sc, view, pixelThreshold, pointBudget, state);
   cache.update(cut.wanted, pointBudget * POINT_BYTES * CACHE_FACTOR);
-  const ranges = collectDraws(sc, cut, cache.locate);
+  const { ranges, stands } = collectDraws(sc, cut, cache.locate);
   let stars = 0;
   for (let i = 2; i < ranges.length; i += 3) stars += ranges[i];
-  post({ type: "draws", ranges, stars }, [ranges.buffer]);
+  post({ type: "draws", ranges, stands, stars }, [ranges.buffer, stands.buffer]);
   for (const batch of freed) post({ type: "free", batch });
   freed.length = 0;
 }

@@ -168,12 +168,20 @@ skipping anything outside the view frustum and stopping once the point budget
 is spent, so how much reaches the GPU does not depend on where the camera is.
 Wanted nodes that are already adjacent in the point table are fetched as one
 byte range and uploaded verbatim as one vertex buffer, which keeps streaming
-free of any repacking. Buffers nobody wants any more are freed
-least-recently-wanted first once the memory budget is exceeded. A node stands
-in for its subtree only where the subtree has nothing to show yet, which is
-what makes a region appear coarse and then sharpen; a subtree that is merely
-incomplete keeps the detail it has, because standing in for it would throw
-away every sibling that had already arrived.
+free of any repacking. They are fetched in order of screen area per byte: an
+interior subsample is a few kilobytes standing for a whole region of sky, a
+leaf near the camera a megabyte sharpening one small box, so the whole view
+fills in coarse first and then sharpens rather than arriving as sharp patches
+in the dark. Buffers nobody wants any more are freed least-recently-wanted
+first once the memory budget is exceeded.
+
+While a subtree is still streaming, its node is drawn from its own subsample,
+but only in the octants where nothing finer has arrived yet — the shader drops
+the subsample's points in the others — and at true brightness rather than
+with the boost the index gave it, since one boosted giant would be a thousand
+giants of light in a single disc. The coarse view is therefore a sparse field
+of real stars that densifies as detail lands where it lands, with the coarse
+picture receding beneath it octant by octant and no star ever drawn twice.
 
 ![Viewer](screenshots/viewer.png)
 

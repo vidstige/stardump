@@ -24,6 +24,12 @@ export type Starcloud = {
   center: Float32Array;
   /** Half the side length of each node's cube. */
   halfSize: Float32Array;
+  /**
+   * The multiplier the index baked into each subsample's luminosity: stars in
+   * the box over points kept, so the subsample carries the flux of them all.
+   * One for a leaf, whose stars are stored as they are.
+   */
+  boost: Float32Array;
 };
 
 export type Header = { halfExtentPc: number; nodeCount: number };
@@ -69,6 +75,29 @@ function computeGeometry(sc: Starcloud): void {
   }
 }
 
+/**
+ * Recovers each subsample's luminosity boost from the tree. Children are
+ * numbered after their parent, so one pass downwards gives every node its
+ * parent and one pass upwards sums the stars beneath it.
+ */
+function computeBoost(sc: Starcloud): void {
+  const count = sc.childMask.length;
+  const parent = new Uint32Array(count);
+  for (let node = 0; node < count; node++) {
+    const first = sc.firstChild[node];
+    for (let i = 0; i < childCount(sc.childMask[node]); i++) parent[first + i] = node;
+  }
+  const stars = new Float64Array(count);
+  for (let node = count - 1; node > 0; node--) {
+    if (sc.childMask[node] === 0) stars[node] = sc.pointCount[node];
+    stars[parent[node]] += stars[node];
+  }
+  for (let node = 0; node < count; node++) {
+    const kept = sc.pointCount[node];
+    sc.boost[node] = sc.childMask[node] !== 0 && kept > 0 ? stars[node] / kept : 1;
+  }
+}
+
 export function decodeNodes(header: Header, bytes: ArrayBuffer): Starcloud {
   const { nodeCount } = header;
   const view = new DataView(bytes);
@@ -81,6 +110,7 @@ export function decodeNodes(header: Header, bytes: ArrayBuffer): Starcloud {
     pointCount: new Uint32Array(nodeCount),
     center:     new Float32Array(nodeCount * 3),
     halfSize:   new Float32Array(nodeCount),
+    boost:      new Float32Array(nodeCount),
   };
   for (let i = 0; i < nodeCount; i++) {
     const at = i * NODE_BYTES;
@@ -90,6 +120,7 @@ export function decodeNodes(header: Header, bytes: ArrayBuffer): Starcloud {
     sc.pointCount[i] = view.getUint32(at + 12, true);
   }
   computeGeometry(sc);
+  computeBoost(sc);
   return sc;
 }
 
