@@ -9,6 +9,7 @@ uniform mat4 view;
 uniform vec3 eye;
 uniform float exposure;
 uniform float sizeScale;
+uniform float minRadius;
 uniform float maxRadius;
 /** The largest sprite the driver will give us: 64 px headless, 1023 in Chrome. */
 uniform float maxPointSize;
@@ -17,12 +18,37 @@ uniform float maxPointSize;
  * one bit per octant of the box around standCenter that finer data already
  * covers, and the span draws only in the others; zero for an ordinary span,
  * which is every span once a view has fully loaded. standBoost is the
- * multiplier the index baked into the luminosity of this subsample, divided
- * back out so its stars show as themselves; one for an ordinary span.
+ * multiplier the index baked into the luminosity of this subsample, one for
+ * an ordinary span, and standPower how much of it is kept: at 1 the
+ * subsample is shown as stored, carrying the flux of every star in its box,
+ * at 0 its stars show at their own brightness. standHalf is half the side of
+ * the box, so that the boost can be faded out for a box the camera is near.
  */
 uniform vec3 standCenter;
+uniform float standHalf;
 uniform float standBoost;
+uniform float standPower;
 uniform float standMask;
+
+/**
+ * The boost conserves luminosity, which is flux only when the whole box is
+ * about equally far away. From STAND_FAR half-sizes out it is kept whole;
+ * inside STAND_NEAR, where a nearby sample would otherwise carry the light of
+ * stars thousands of parsecs behind it, it is dropped and the sample shows as
+ * the one star it is.
+ */
+const float STAND_NEAR = 1.5;
+const float STAND_FAR = 3.0;
+
+/**
+ * The largest splat a stand-in star may make, in pixels of radius. The boost
+ * is right on average but a boosted giant is a thousand giants of light in
+ * one point, a saturated disc that pops out and then shrinks when its leaf
+ * arrives. The faint majority are far below this and keep their full boost;
+ * only the few that would turn into discs are held back, and the real giant
+ * among them comes in at its own size with the rest of its box.
+ */
+const float STAND_MAX_RADIUS = 2.0;
 
 varying vec3 vColor;
 varying float vBrightness;
@@ -82,7 +108,10 @@ void main() {
   }
   gl_Position = projection * view * vec4(position, 1.0);
   vec3 delta = position - eye;
-  float brightness = luminosity / standBoost * exposure / max(dot(delta, delta), NEAREST_PC2);
+  float farness = clamp((length(standCenter - eye) / standHalf - STAND_NEAR) / (STAND_FAR - STAND_NEAR), 0.0, 1.0);
+  float boost = pow(standBoost, standPower * farness - 1.0);
+  float brightness = luminosity * boost * exposure / max(dot(delta, delta), NEAREST_PC2);
+  if (standMask > 0.0) brightness = min(brightness, STAND_MAX_RADIUS / sizeScale);
 
   // A small fraction of Gaia sources have no bp_rp at all. NaN would survive
   // the clamp and spread through the additive buffer, blanking out every pixel
@@ -90,8 +119,11 @@ void main() {
   float t = bpRp == bpRp ? clamp((bpRp + 0.5) / 3.5, 0.0, 1.0) : UNKNOWN_COLOR;
   vColor = bpRpToColor(t);
 
-  float rPx = clamp(brightness * sizeScale, 0.8, maxRadius);
-  float sigma = rPx * SIGMA_PER_RADIUS;
+  float rPx = clamp(brightness * sizeScale, minRadius, maxRadius);
+  // Floored rather than allowed to reach zero: the coefficient divides by its
+  // square, and an infinite one turns the centre of the splat into a NaN that
+  // the fragment shader then throws away, losing the star altogether.
+  float sigma = max(rPx * SIGMA_PER_RADIUS, 1.0e-3);
 
   // What is seen of a star is not its sigma but the disc out to where its tail
   // crosses the white point, and the quad has to hold that or the disc is
@@ -104,7 +136,7 @@ void main() {
   // times its radius, and for the faint ones, which are almost all of them,
   // the max below leaves it exactly as it was.
   float reach = sigma * sqrt(2.0 * log(LEVELS * brightness + 1.0));
-  float spriteSizePx = min(2.0 * max(reach, rPx) + 1.0, maxPointSize);
+  float spriteSizePx = clamp(2.0 * max(reach, rPx) + 1.0, 1.0, maxPointSize);
 
   gl_PointSize = spriteSizePx;
   vBrightness = brightness;

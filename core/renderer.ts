@@ -106,10 +106,13 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
   const uEye        = uniform(stars, "eye");
   const uExposure   = uniform(stars, "exposure");
   const uSizeScale  = uniform(stars, "sizeScale");
+  const uMinRadius  = uniform(stars, "minRadius");
   const uMaxRadius  = uniform(stars, "maxRadius");
   const uMaxPoint   = uniform(stars, "maxPointSize");
   const uStandCenter = uniform(stars, "standCenter");
+  const uStandHalf   = uniform(stars, "standHalf");
   const uStandBoost  = uniform(stars, "standBoost");
+  const uStandPower  = uniform(stars, "standPower");
   const uStandMask   = uniform(stars, "standMask");
 
   // headless-gl grants 64 px, Chrome 1023, and the shader has to know which so
@@ -183,10 +186,13 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
       gl.uniform3fv(uEye, eye);
       gl.uniform1f(uExposure, settings.exposure);
       gl.uniform1f(uSizeScale, settings.sizeScale);
+      gl.uniform1f(uMinRadius, settings.minRadius);
       gl.uniform1f(uMaxRadius, settings.maxRadius);
       gl.uniform1f(uMaxPoint, maxPointSize);
       gl.uniform1f(uStandMask, 0);
+      gl.uniform1f(uStandHalf, 1);
       gl.uniform1f(uStandBoost, 1);
+      gl.uniform1f(uStandPower, settings.standBoost);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE);
       gl.disableVertexAttribArray(QUAD);
@@ -203,10 +209,11 @@ export function createRenderer(gl: WebGLRenderingContext, sources: Sources): Ren
         }
         // Most spans are ordinary; the mask is only touched around the few
         // that are not, so a fully loaded view sets no uniform per draw.
-        const mask = stands ? stands[j + 4] : 0;
+        const mask = stands ? stands[j + 5] : 0;
         if (mask !== 0) {
           gl.uniform3f(uStandCenter, stands![j], stands![j + 1], stands![j + 2]);
-          gl.uniform1f(uStandBoost, stands![j + 3]);
+          gl.uniform1f(uStandHalf, stands![j + 3]);
+          gl.uniform1f(uStandBoost, stands![j + 4]);
           gl.uniform1f(uStandMask, mask);
           standing = true;
         } else if (standing) {
