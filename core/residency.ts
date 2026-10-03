@@ -4,14 +4,24 @@
 // in the point table, so one range request yields one vertex buffer that is
 // uploaded verbatim, with no repacking. Batches nobody wants any more are freed
 // least-recently-wanted first once the memory budget is exceeded.
+//
+// Fetch order is screen area per byte. An interior node is a few kilobytes
+// standing in for a whole region of sky; a leaf near the camera is a megabyte
+// that sharpens one small box. Taking the cheap wide ones first is what makes a
+// view fill in coarse everywhere and then sharpen, instead of arriving as a
+// handful of sharp patches in the dark.
 
 import { Locate, Location, Wanted } from "./lod";
 import { Run, groupRuns, runBytes } from "./runs";
-import { POINT_BYTES, Starcloud } from "./starcloud";
+import { Starcloud } from "./starcloud";
 import { ReadRange } from "./starcloud_io";
 
 const MAX_BATCH_BYTES = 1 << 20;
-const MAX_REQUESTS    = 12;
+// Two caps: one on bytes, which is what the pipe fills on, and one on count,
+// so that a thousand five-kilobyte subsamples still go many at a time rather
+// than queueing behind each other on latency.
+const MAX_IN_FLIGHT_BYTES = 12 << 20;
+const MAX_REQUESTS        = 48;
 
 type Batch = { id: number; nodes: number[]; bytes: number; lastWanted: number };
 
@@ -33,7 +43,8 @@ export function createCache(
   const locations = new Map<number, Location>();
   const inFlight  = new Set<number>();
   let requests = 0;
-  // Smallest footprint first, so pump takes the biggest off the end.
+  let inFlightBytes = 0;
+  // Least valuable first, so pump takes the most valuable off the end.
   let queue: Run[] = [];
   let nextBatch = 0;
   let resident = 0;
@@ -56,12 +67,17 @@ export function createCache(
     }
   }
 
-  async function load(nodes: number[]): Promise<void> {
+  /** Screen area a run improves per byte it costs to fetch. */
+  const value = (run: Run) => (run.footprint * run.footprint) / run.bytes;
+
+  async function load(run: Run): Promise<void> {
+    const { nodes } = run;
     for (const node of nodes) inFlight.add(node);
     requests++;
+    inFlightBytes += run.bytes;
     try {
       const first = sc.pointFirst[nodes[0]];
-      const [start, end] = runBytes(sc, { nodes, footprint: 0, bytes: 0 });
+      const [start, end] = runBytes(sc, run);
       const data = await read(start, end);
       const id = nextBatch++;
       batches.set(id, { id, nodes, bytes: data.byteLength, lastWanted: tick });
@@ -70,6 +86,7 @@ export function createCache(
       onUpload(id, data);
     } finally {
       requests--;
+      inFlightBytes -= run.bytes;
       for (const node of nodes) inFlight.delete(node);
     }
     // Keep the pipe full rather than waiting for the next selection pass.
@@ -91,7 +108,12 @@ export function createCache(
    * than the reads it schedules.
    */
   function pump(): void {
-    while (requests < MAX_REQUESTS && queue.length > 0) void load(queue.pop()!.nodes);
+    while (requests < MAX_REQUESTS && queue.length > 0) {
+      const next = queue[queue.length - 1];
+      if (requests > 0 && inFlightBytes + next.bytes > MAX_IN_FLIGHT_BYTES) return;
+      queue.pop();
+      void load(next);
+    }
   }
 
   return {
@@ -106,8 +128,7 @@ export function createCache(
         if (at) batches.get(at.batch)!.lastWanted = tick;
       }
       evict(wantedNodes, memoryBudget);
-      // Biggest on screen first, which also means shallow nodes before deep ones.
-      queue = runs(wanted).sort((a, b) => a.footprint - b.footprint);
+      queue = runs(wanted).sort((a, b) => value(a) - value(b));
       pump();
     },
   };
