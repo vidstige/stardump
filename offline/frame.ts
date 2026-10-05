@@ -40,7 +40,6 @@ const CHUNK = 0;
 export type Frame = { rgb: Uint8Array; stars: number };
 
 export type Frames = {
-  halfExtentPc: number;
   render(camera: Camera, settings: Settings): Promise<Frame>;
 };
 
@@ -79,8 +78,6 @@ export async function openFrames(
   };
 
   return {
-    halfExtentPc: sc.halfExtentPc,
-
     async render(camera, settings) {
       const fov = fovY(settings);
       const projection = projectionMatrix(fov, width / height, settings.far);

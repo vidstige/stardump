@@ -2,9 +2,9 @@
 
 import { View } from "../../core/lod";
 
-export type ToWorker =
-  | { type: "init"; url: string }
-  | ({ type: "view"; pixelThreshold: number; pointBudget: number } & View);
+export type ViewMessage = { type: "view"; pixelThreshold: number; pointBudget: number } & View;
+
+export type ToWorker = { type: "init"; url: string } | ViewMessage;
 
 export type FromWorker =
   | { type: "ready";  halfExtentPc: number }

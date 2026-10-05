@@ -27,8 +27,6 @@ type Batch = { id: number; nodes: number[]; bytes: number; lastWanted: number };
 
 export type Cache = {
   locate: Locate;
-  /** Whether anything is still queued or in flight from the last update. */
-  busy(): boolean;
   /** `memoryBudget` caps what is kept beyond the nodes currently wanted. */
   update(wanted: Wanted[], memoryBudget: number): void;
 };
@@ -118,7 +116,6 @@ export function createCache(
 
   return {
     locate: (node) => locations.get(node),
-    busy: () => requests > 0 || queue.length > 0,
     update(wanted, memoryBudget) {
       tick++;
       const wantedNodes = new Set<number>();

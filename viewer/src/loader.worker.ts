@@ -2,8 +2,8 @@
 // page thread only ever binds buffers and draws.
 
 import { Frustum } from "../../core/frustum";
-import { View, collectDraws, selectCut } from "../../core/lod";
-import { FromWorker, ToWorker } from "./protocol";
+import { collectDraws, selectCut } from "../../core/lod";
+import { FromWorker, ToWorker, ViewMessage } from "./protocol";
 import { Cache, createCache } from "../../core/residency";
 import { POINT_BYTES, Starcloud } from "../../core/starcloud";
 import { httpRange, loadStarcloud } from "../../core/starcloud_io";
@@ -42,9 +42,9 @@ async function init(url: string): Promise<void> {
   post({ type: "ready", halfExtentPc: sc.halfExtentPc });
 }
 
-function refresh(sc: Starcloud, view: View, pixelThreshold: number, pointBudget: number): void {
-  const cut = selectCut(sc, view, pixelThreshold, pointBudget, state);
-  cache.update(cut.wanted, pointBudget * POINT_BYTES * CACHE_FACTOR);
+function refresh(sc: Starcloud, view: ViewMessage): void {
+  const cut = selectCut(sc, view, view.pixelThreshold, view.pointBudget, state);
+  cache.update(cut.wanted, view.pointBudget * POINT_BYTES * CACHE_FACTOR);
   const { ranges, stands } = collectDraws(sc, cut, cache.locate);
   let stars = 0;
   for (let i = 2; i < ranges.length; i += 3) stars += ranges[i];
@@ -53,8 +53,8 @@ function refresh(sc: Starcloud, view: View, pixelThreshold: number, pointBudget:
   freed.length = 0;
 }
 
-function changed(view: View, pixelThreshold: number, pointBudget: number): boolean {
-  return pixelThreshold !== selectedThreshold || pointBudget !== selectedBudget ||
+function changed(view: ViewMessage): boolean {
+  return view.pixelThreshold !== selectedThreshold || view.pointBudget !== selectedBudget ||
     view.frustum.some((value, i) => value !== selectedFrustum[i]);
 }
 
@@ -67,12 +67,12 @@ self.addEventListener("message", (event: MessageEvent<ToWorker>) => {
   if (!starcloud) return;
 
   const now = performance.now();
-  if (!(stale || changed(message, message.pixelThreshold, message.pointBudget))) return;
+  if (!(stale || changed(message))) return;
   if (now - selectedAt < SELECT_INTERVAL_MS) return;
   stale = false;
   selectedAt = now;
   selectedFrustum = message.frustum;
   selectedThreshold = message.pixelThreshold;
   selectedBudget = message.pointBudget;
-  refresh(starcloud, message, message.pixelThreshold, message.pointBudget);
+  refresh(starcloud, message);
 });
