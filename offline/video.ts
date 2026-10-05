@@ -7,8 +7,7 @@ import * as os from "os";
 import * as path from "path";
 
 import * as args from "./args";
-import { labels } from "./dataset";
-import { dataset } from "./source";
+import { openSource } from "./source";
 import { buildTour } from "./tour";
 
 // A sketch is for judging the moves, so it goes small and coarse. That costs
@@ -70,7 +69,9 @@ async function pool<T>(work: (() => Promise<T>)[], width: number): Promise<void>
   await Promise.all(Array.from({ length: Math.min(width, work.length) }, run));
 }
 
-function renderSegment(segment: string, [first, last]: [number, number]): Promise<void> {
+function renderSegment(
+  dataset: string, segment: string, [first, last]: [number, number],
+): Promise<void> {
   const child = spawn("npx", [
     "tsx", path.join(__dirname, "render.ts"),
     "--dataset", dataset,
@@ -104,7 +105,8 @@ function join(segments: string[]): void {
 
 async function main(): Promise<void> {
   const started = Date.now();
-  const tour = buildTour(labels(dataset));
+  const { dataset, labels } = await openSource();
+  const tour = buildTour(labels);
   const total = Math.round(tour.duration * fps);
   const first = Math.max(args.number("from", 0), 0);
   const last = Math.min(args.number("to", total), total);
@@ -120,7 +122,7 @@ async function main(): Promise<void> {
 
   fs.mkdirSync(path.dirname(output), { recursive: true });
   const segments = work.map((_, i) => `${output.replace(/\.mp4$/, "")}.part${i}.mp4`);
-  await pool(work.map((range, i) => () => renderSegment(segments[i], range)), jobs);
+  await pool(work.map((range, i) => () => renderSegment(dataset, segments[i], range)), jobs);
   join(segments);
   for (const segment of segments) fs.unlinkSync(segment);
   console.log(`${output} in ${((Date.now() - started) / 1000 / 60).toFixed(1)} min`);

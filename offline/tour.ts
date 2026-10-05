@@ -35,7 +35,7 @@
 import { Camera } from "../core/camera";
 import { Quaternion, fromAxisAngle, lookRotation, multiply, rotate } from "../core/quaternion";
 import { Vec3, add, cross, dot, normalize, scale, subtract } from "../core/vec3";
-import { Labels } from "./dataset";
+import { Labels } from "./source";
 import { angularVelocity, sweep, turnAngle } from "./rotation";
 
 /** Degrees a second the camera pans while a star is held. */

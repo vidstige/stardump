@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { projectionMatrix, toScreen, viewMatrix } from "../core/camera";
 import { rotate } from "../core/quaternion";
 import { add, normalize, scale, subtract } from "../core/vec3";
-import { Labels } from "./dataset";
+import { Labels } from "./source";
 import { angularVelocity } from "./rotation";
 import { buildTour } from "./tour";
 
