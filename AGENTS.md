@@ -117,6 +117,24 @@ each step beats everything below it.
 - When asked to optimize, measure before and after and report both. After
   changing a hot loop, run a performance comparison.
 
+## Changing the picture
+
+The look of the renderer is locked in by comparison with itself, not by a
+reference implementation. Anything that can change a rendered frame — the
+shaders, `core/renderer.ts`, `core/lod.ts`, `core/settings.ts`, the camera,
+the offline frame path — is checked the same way:
+
+1. Before the change, `npx tsx offline/views.ts --output renders/before`.
+2. After it, `npx tsx offline/views.ts --output renders/after`, then
+   `npx tsx offline/compare.ts renders/before renders/after`.
+3. The renderer is deterministic, so a change that was not meant to alter
+   the picture compares to zero on every view. Anything else is a finding:
+   either a bug, or a change in look that the commit message states as such,
+   with the numbers.
+
+A refactor compares to zero, always. A change in look is a behaviour change,
+made in its own commit, with before and after numbers in the message.
+
 ## Committing
 
 - Split separable work into separate commits: one step or concern each.

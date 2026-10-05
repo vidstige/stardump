@@ -224,17 +224,38 @@ npx tsx offline/still.ts --at "Barnard's Star" --eye 0,-1.1,0.1 --fov 35 \
 npx tsx render-check/render-exact.ts --width 960 --height 540 --output renders/exact.png
 ```
 
-`--output` writes P6 directly, which is what `render-check/compare.ts` reads,
+`--output` writes P6 directly, which is what `offline/compare.ts` reads,
 and hands anything else to ffmpeg. `--exposure`, `--size`, `--size-min`,
 `--size-cap`, `--detail`, `--budget`, `--fov` and `--far` override the
 defaults; `--dataset` names a dataset, and defaults to the first one under
 `./data/` or, with `--url`, the first one the API lists.
 
-### Checking it against the viewer
+### Checking a change to the picture
+
+The look of the renderer is locked in by comparing it with itself. The
+renderer is deterministic — same cut, same draw order, same GL — so a change
+that was not meant to alter the picture renders every view identically, and
+one that was shows up as numbers to put in the commit message.
+
+```bash
+npx tsx offline/views.ts --output renders/before
+# make the change
+npx tsx offline/views.ts --output renders/after
+npx tsx offline/compare.ts renders/before renders/after
+```
+
+`views.ts` renders a fixed set of views at 960x540 on the defaults: the
+galactic centre and the galactic pole from the Sun, which are the densest and
+the sparsest sky there is; Tau Ceti from 0.3 pc, for a saturated disc with
+stars behind it; and Barnard's Star at a 35 degree field of view. `compare.ts`
+reports, per view, the ratio of total flux and of bright pixels, how many
+64 px tiles differ by an RMSE above 0.05, and the worst tile, and writes an
+amplified difference image next to each after frame. It passes no verdict:
+whether a difference is wanted is for whoever made the change to say.
 
 Since both sides run the same shaders on the same cut, the offline renderer can
-be measured against a browser screenshot of the viewer at the same camera. At
-960x540 on the defaults, all 135 tiles come in under an RMSE of 0.05 and the
+also be measured against a browser screenshot of the viewer at the same camera.
+At 960x540 on the defaults, all 135 tiles come in under an RMSE of 0.05 and the
 worst is 0.036. Total flux runs about 9% high, which is point sprite coverage
 rounding between the two GL implementations rather than anything shared: at a
 splat radius of 6 px, where a sprite spans 13 px instead of 4, the same

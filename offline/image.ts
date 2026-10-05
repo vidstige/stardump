@@ -1,5 +1,5 @@
 // Writing a finished frame out as a file. P6 is written directly because
-// render-check/compare.ts reads it; anything else goes through ffmpeg, which
+// compare.ts reads it; anything else goes through ffmpeg, which
 // the video encoding needs anyway.
 
 import { spawnSync } from "child_process";
