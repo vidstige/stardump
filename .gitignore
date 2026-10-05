@@ -3,9 +3,8 @@
 /.stardump
 __pycache__/
 /viewer/dist
-/viewer/node_modules
+/node_modules
 /.env
 /docs
-/offline/node_modules
 /renders
 .DS_Store

@@ -1,0 +1,18 @@
+{
+  "name": "stardump",
+  "private": true,
+  "scripts": {
+    "build": "esbuild viewer/src/main.ts viewer/src/*.worker.ts --bundle --format=esm --platform=browser --target=es2020 --loader:.glsl=text --outdir=viewer/dist",
+    "dev": "npm run build -- --watch --serve=8000 --servedir=viewer",
+    "check": "tsc --noEmit",
+    "test": "npx tsx offline/rotation.test.ts && npx tsx offline/tour.test.ts"
+  },
+  "dependencies": {
+    "gl": "^8.1.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.3",
+    "typescript": "^5.8.3"
+  }
+}

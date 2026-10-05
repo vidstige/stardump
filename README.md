@@ -51,7 +51,7 @@ The shaders are GLSL ES 1.00 on WebGL 1.0, which is not the browser's ceiling bu
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (Cargo) for the backend binaries
-- [Node.js](https://nodejs.org/) 18 or newer for the viewer and offline renderers
+- [Node.js](https://nodejs.org/) 18 or newer for the viewer and offline renderers; `npm install` at the root covers all of them
 - [ffmpeg](https://ffmpeg.org/) for image conversion, captions and video encoding
 
 ## Generating the data
@@ -141,8 +141,8 @@ curl 'http://127.0.0.1:3000/query/8fbfbc19d3f4d71f76b76fef607d4dfb/radius?x=0&y=
 ## Running the viewer locally
 
 ```bash
-npm -C viewer/ install
-npm -C viewer/ run dev
+npm install
+npm run dev
 ```
 
 Open [http://localhost:8000](http://localhost:8000) in a browser. By default it
@@ -151,7 +151,7 @@ connects to `http://127.0.0.1:3000`; a running query API is required.
 
 The query API also serves the viewer itself, from `--viewer-root` (`viewer` by
 default), which is how the deployment runs: build the bundles with
-`npm -C viewer/ run build` and open the API's own root. Served that way the
+`npm run build` and open the API's own root. Served that way the
 page is same-origin with the data it streams, so the byte-range requests need
 no cross-origin preflight.
 
@@ -188,11 +188,8 @@ picture receding beneath it octant by octant and no star ever drawn twice.
 ## Offline renderer
 
 `offline/` runs the viewer's renderer under Node, with no browser and no
-display. It needs one dependency, [headless-gl](https://github.com/stackgl/headless-gl):
-
-```bash
-npm -C offline/ install
-```
+display. It needs one dependency, [headless-gl](https://github.com/stackgl/headless-gl),
+which the root `npm install` brings in.
 
 What it changes about the viewer is two things and nothing else: the GL context
 comes from headless-gl instead of a canvas, and the shaders are read off disk
@@ -380,8 +377,8 @@ drawing a third as many. It carries an exposure of its own for that, in
 the same view. It is the one way a sketch does not preview the final.
 
 ```bash
-npm -C offline/ test
-npm -C offline/ run check    # typecheck
+npm test
+npm run check    # typecheck the viewer, the offline tools and the reference
 ```
 
 ## Author

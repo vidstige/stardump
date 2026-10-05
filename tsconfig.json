@@ -3,17 +3,12 @@
     "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "lib": ["ES2020", "DOM", "WebWorker"],
+    "types": ["node"],
     "strict": true,
     "noEmit": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true,
-    "lib": [
-      "ES2020",
-      "WebWorker"
-    ]
+    "skipLibCheck": true
   },
-  "include": [
-    "src/loader.worker.ts"
-  ]
+  "include": ["core", "viewer/src", "offline", "render-check"]
 }
