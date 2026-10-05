@@ -1,6 +1,3 @@
-import * as fs from "fs";
-import { encode as encodePng } from "fast-png";
-
 export type Vec3 = [number, number, number];
 
 export type Camera = {
@@ -45,28 +42,6 @@ export function makeCamera(eye: Vec3, dir: Vec3, up: Vec3, width: number, height
   const right = normalize(cross(forward, up));
   const upOrth = cross(right, forward);
   return { eye, forward, right, up: upOrth, width, height };
-}
-
-export function cameraQuaternion(c: Camera): [number, number, number, number] {
-  const r = c.right, u = c.up, f = c.forward;
-  const m00 = r[0], m10 = r[1], m20 = r[2];
-  const m01 = u[0], m11 = u[1], m21 = u[2];
-  const m02 = -f[0], m12 = -f[1], m22 = -f[2];
-  const trace = m00 + m11 + m22;
-  if (trace > 0) {
-    const s = 0.5 / Math.sqrt(trace + 1);
-    return [(m21 - m12) * s, (m02 - m20) * s, (m10 - m01) * s, 0.25 / s];
-  }
-  if (m00 > m11 && m00 > m22) {
-    const s = 2 * Math.sqrt(1 + m00 - m11 - m22);
-    return [0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s];
-  }
-  if (m11 > m22) {
-    const s = 2 * Math.sqrt(1 + m11 - m00 - m22);
-    return [(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s];
-  }
-  const s = 2 * Math.sqrt(1 + m22 - m00 - m11);
-  return [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s];
 }
 
 function planeFromPointNormal(px: number, py: number, pz: number, nx: number, ny: number, nz: number): Plane {
@@ -229,9 +204,4 @@ export function tonemapToBytes(hdr: Float32Array, width: number, height: number)
     pixels[i * 3 + 2] = tm(hdr[i * 3 + 2]);
   }
   return pixels;
-}
-
-export function writePng(path: string, width: number, height: number, pixels: Buffer): void {
-  const data = encodePng({ width, height, data: new Uint8Array(pixels), depth: 8, channels: 3 });
-  fs.writeFileSync(path, Buffer.from(data));
 }

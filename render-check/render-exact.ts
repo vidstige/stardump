@@ -1,5 +1,7 @@
 import * as fs from "fs";
 
+import { writeImage } from "../offline/image";
+import { firstDataset, starcloudPath } from "../offline/source";
 import {
   makeCamera,
   PerspectiveProjection,
@@ -7,7 +9,6 @@ import {
   normalize,
   rasterize,
   tonemapToBytes,
-  writePng,
   type Plane,
   type Star,
 } from "./brightness";
@@ -28,13 +29,13 @@ function getArgNum(name: string, def?: number): number {
 }
 function hasArg(name: string): boolean { return args.includes("--" + name); }
 
-const STARCLOUD = getArg("starcloud");
+const DATASET  = getArg("dataset", firstDataset());
 const FOV_DEG  = getArgNum("fov", 60);
 const DEPTH    = getArgNum("depth", 5000);
 const NEAR     = getArgNum("near", 0.1);
 const WIDTH    = getArgNum("width", 1920);
 const HEIGHT   = getArgNum("height", 1080);
-const OUT        = getArg("output", "stars.png");
+const OUT        = getArg("output", "renders/exact.png");
 const MAX_RADIUS = getArgNum("max-radius", 1.0);
 const ORTHO      = hasArg("orthographic");
 
@@ -171,8 +172,7 @@ function* iterateStars(sc: ParsedStarcloud, ranges: { firstPoint: number; count:
 
 async function main(): Promise<void> {
   const started = Date.now();
-  console.log("Reading:", STARCLOUD);
-  const buf = fs.readFileSync(STARCLOUD);
+  const buf = fs.readFileSync(starcloudPath(DATASET));
   const sc  = parseStarcloud(buf);
   console.log(`starcloud: depth=${sc.depth} half_extent_pc=${sc.halfExtentPc} nodes=${sc.nodeCount} points=${sc.pointCount}`);
 
@@ -208,7 +208,7 @@ async function main(): Promise<void> {
   rasterize(iterateStars(sc, ranges, planes), hdr, { camera, projection, exposure, maxRadius: MAX_RADIUS });
 
   const pixels = tonemapToBytes(hdr, WIDTH, HEIGHT);
-  writePng(OUT, WIDTH, HEIGHT, pixels);
+  writeImage(OUT, WIDTH, HEIGHT, pixels);
   console.log(`Saved ${OUT} in ${((Date.now() - started) / 1000).toFixed(2)}s`);
 }
 

@@ -4,21 +4,23 @@
 
 import { spawnSync } from "child_process";
 import * as fs from "fs";
+import * as path from "path";
 
 function bytes(rgb: Uint8Array): Buffer {
   return Buffer.from(rgb.buffer, rgb.byteOffset, rgb.length);
 }
 
-export function writeImage(path: string, width: number, height: number, rgb: Uint8Array): void {
-  if (path.endsWith(".ppm")) {
+export function writeImage(file: string, width: number, height: number, rgb: Uint8Array): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (file.endsWith(".ppm")) {
     const header = Buffer.from(`P6\n${width} ${height}\n255\n`, "ascii");
-    fs.writeFileSync(path, Buffer.concat([header, bytes(rgb)]));
+    fs.writeFileSync(file, Buffer.concat([header, bytes(rgb)]));
     return;
   }
   const ffmpeg = spawnSync("ffmpeg", [
     "-y", "-loglevel", "error",
     "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", `${width}x${height}`,
-    "-i", "-", path,
+    "-i", "-", file,
   ], { input: bytes(rgb) });
   if (ffmpeg.status !== 0) throw new Error(`ffmpeg: ${ffmpeg.stderr}`);
 }

@@ -207,30 +207,31 @@ viewer came down to meet it rather than keeping a second copy of the splat
 maths. Settings come from the viewer's own `DEFAULT_SETTINGS`, so a render and
 the page agree without anything being tuned twice.
 
-The third difference is not code but policy: the offline renderer blocks until
-every node of the cut is resident and then draws once, where the viewer draws
-what has arrived and refines over later frames. Same cut, same cache, opposite
-scheduling.
+The third difference is not code but policy: an offline frame reads, uploads
+and draws its whole cut a chunk at a time and keeps none of it, where the viewer
+draws what has arrived, refines over later frames and keeps it all on the GPU
+for the next one. Same cut, same renderer, opposite scheduling.
 
 ```bash
 # The shared renderer, local index, 1920x1080
-sh sh/render.sh --mode fast --dir -0.055,-0.873,-0.484 --output renders/still.png
+npx tsx offline/still.ts --dir -0.055,-0.873,-0.484 --output renders/still.png
 
 # Same, streaming from a running query API
-sh sh/render.sh --mode fast --url http://127.0.0.1:3000 --output renders/still.png
+npx tsx offline/still.ts --url http://127.0.0.1:3000 --output renders/still.png
 
 # Aimed at a labelled star, from 1.1 pc away, at a 35 degree field of view
-sh sh/render.sh --mode fast --at "Barnard's Star" --eye 0,-1.1,0.1 --fov 35 \
+npx tsx offline/still.ts --at "Barnard's Star" --eye 0,-1.1,0.1 --fov 35 \
   --output renders/barnard.png
 
 # The CPU reference: every leaf, no level of detail, no GPU
-sh sh/render.sh --mode exact --width 960 --height 540 --output renders/exact.png
+npx tsx render-check/render-exact.ts --width 960 --height 540 --output renders/exact.png
 ```
 
 `--output` writes P6 directly, which is what `render-check/compare.ts` reads,
-and hands anything else to ffmpeg. `--exposure`, `--size`, `--radius`,
-`--detail`, `--budget`, `--fov` and `--far` override the defaults; the dataset
-defaults to the first one under `./data/`.
+and hands anything else to ffmpeg. `--exposure`, `--size`, `--size-min`,
+`--size-cap`, `--detail`, `--budget`, `--fov` and `--far` override the
+defaults; `--dataset` names a dataset, and defaults to the first one under
+`./data/` or, with `--url`, the first one the API lists.
 
 ### Checking it against the viewer
 
@@ -244,9 +245,11 @@ measurement falls to 1.9%.
 
 `render-check/` holds the CPU reference that measurement is anchored to:
 `brightness.ts` rasterizes the same splat in TypeScript and `render-exact.ts`
-draws every leaf with no level of detail at all. That duplication is deliberate.
-Its LOD renderer is gone, though — it walked the octree a second time on the CPU
-to produce the same picture the shared renderer now produces on the GPU.
+draws every leaf with no level of detail at all. That duplication of the
+rendering is deliberate; finding the dataset and writing the image it shares
+with `offline/`. Its LOD renderer is gone, though — it walked the octree a
+second time on the CPU to produce the same picture the shared renderer now
+produces on the GPU.
 
 ## Rendering a tour
 
