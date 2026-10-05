@@ -10,5 +10,5 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["core", "viewer/src", "offline", "render-check"]
+  "include": ["core", "viewer/src", "offline"]
 }

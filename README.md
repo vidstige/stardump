@@ -219,9 +219,6 @@ npx tsx offline/still.ts --url http://127.0.0.1:3000 --output renders/still.png
 # Aimed at a labelled star, from 1.1 pc away, at a 35 degree field of view
 npx tsx offline/still.ts --at "Barnard's Star" --eye 0,-1.1,0.1 --fov 35 \
   --output renders/barnard.png
-
-# The CPU reference: every leaf, no level of detail, no GPU
-npx tsx render-check/render-exact.ts --width 960 --height 540 --output renders/exact.png
 ```
 
 `--output` writes P6 directly, which is what `offline/compare.ts` reads,
@@ -260,14 +257,6 @@ worst is 0.036. Total flux runs about 9% high, which is point sprite coverage
 rounding between the two GL implementations rather than anything shared: at a
 splat radius of 6 px, where a sprite spans 13 px instead of 4, the same
 measurement falls to 1.9%.
-
-`render-check/` holds the CPU reference that measurement is anchored to:
-`brightness.ts` rasterizes the same splat in TypeScript and `render-exact.ts`
-draws every leaf with no level of detail at all. That duplication of the
-rendering is deliberate; finding the dataset and writing the image it shares
-with `offline/`. Its LOD renderer is gone, though — it walked the octree a
-second time on the CPU to produce the same picture the shared renderer now
-produces on the GPU.
 
 ## Rendering a tour
 
@@ -399,7 +388,7 @@ the same view. It is the one way a sketch does not preview the final.
 
 ```bash
 npm test
-npm run check    # typecheck the viewer, the offline tools and the reference
+npm run check    # typecheck the viewer and the offline tools
 ```
 
 ## Author
